@@ -95,15 +95,16 @@ kernel itself (S5).
 | **F2** | Deterministic benchmark `tests/profile_encode.rs` (3 scenarios, best-of-N ×RT + median breakdown) | ✅ 2026-07-08 |
 | **F3** | C-reference baseline (ffmpeg libopus, slope-corrected) — table above | ✅ 2026-07-08 |
 | **F4** | **Quality oracle + byte-identity gate**: `tests/oracle_bitexact.rs` (FNV hash of the full packet stream per scenario — the workhorse gate, frozen 2026-07-08); `examples/roundtrip.rs` + `tools/quality_ab.sh` (PEAQ ODG ours vs libopus). Settled the CELT ⚠ (see verdict above) and armed the PEAQ gate. | ✅ 2026-07-08 |
-| **F5** | Cheap probes: bounds-check-ceiling (`get_unchecked` newtype throwaway) + alloc-traffic audit (per-frame `vec!`/`resize` in hot paths — NSQ allocates scratch per call?). Opus frames are tiny (working set ≪ L2) so the cache sweep is expected flat — run once to confirm, then never tile. | ☐ next |
+| **F5** | Cheap probes — **done 2026-07-08**: (a) **alloc traffic ZERO** in the hot SILK path (`nsq`/`nsq_del_dec`/`noise_shape`/`control_fixed` use only fixed stack arrays — no `vec!`/`resize`/`clone`); (b) **cache-tiles N/A** — NSQ state is a few KB ≪ L2 and frames are fixed 20 ms, no working-set sweep to bind on; (c) rate-loop clones a whole `SilkNSQState` + range coder per frame but that sits in SILK's 0.3% residue — the S5 lever is NSQ *recompute* (~12% extra calls), not copy cost; (d) bounds-check-ceiling deferred into S1a (measure on the real inner loop, not a speculative 900-line newtype). | ✅ 2026-07-08 |
 
 ### SILK wing — the 3.1× gap (order = profiler ranking)
 
 | brick | what | expected | status |
 |---|---|---|---|
-| **S1a** | **NSQ redundancy pass** (`nsq_del_dec.rs`, 930+803 lines): hoist invariants out of the per-sample loop, precompute shaping/LPC coefficient reuse, kill per-call allocations, branchless clamps. `codec-eliminate-redundancy` — biggest wins at lowest risk, byte-identical. | 1.2–1.5× on 59% | ☐ |
-| **S1b** | **NSQ inner-loop decomposition**: info-tier scopes inside the sample loop (short-term pred, LTP, shaping filter, del-dec Viterbi update) to rank sub-kernels before SIMD. | data | ☐ |
-| **S1c** | **NSQ AVX2**: vectorize across the 4 del-dec states (libopus 1.5's own AVX2 NSQ proves the shape); port/extend the existing NEON path to x86. Scalar twin as oracle, runtime dispatch. `codec-vectorize-kernel`. | 1.5–2.5× on the kernel | ☐ |
+| **S1a** | **NSQ redundancy pass** — folded into F5/S1b: F5 found **zero heap allocs** (all stack arrays) and the loop is a direct fixed-point libopus port with no recompute/re-walk vein. No byte-identical redundancy brick here; the lever is SIMD (S1c). | — | ✅ none found |
+| **S1b** | **NSQ inner-loop decomposition** (info-tier scopes, removed after reading): the 16-tap **LPC short-prediction ≈ 14–28% of NSQ**; the **warped shaping AR filter + RD ≈ 55–70%** but it's a *serial recurrence* (tmp1/tmp2 carried across taps) + branchy RD — hard to vectorize (why upstream only NEON'd the LPC dot product). Confirmed **n_states=4** (the cross-state SIMD axis for a future big brick). | data | ✅ 2026-07-08 |
+| **S1c** | **AVX2 LPC short-prediction** (`silk_lpc_prediction_avx2`): 8-tap/iter, emulated signed 64-bit `>>16`, i64-lane accumulate → i32 truncate (== scalar wrapping sum). Runtime-dispatched (`RUSTY_OPUS_NO_AVX2` A/B knob), scalar twin kept as oracle. **Result: +7–9% SILK, +8% Hybrid, BYTE-IDENTICAL** (same-binary interleaved A/B; the cross-build read was noise). Unit test: 200k random cases × orders {10,12,14,16} exact. | landed | ✅ 2026-07-08 |
+| **S1d** | **NSQ cross-state AVX2** (the big one): vectorize the whole `for k in 0..n_states` inner loop across the 4 del-dec states (libopus 1.5's AVX2 NSQ shape). Branchy (rd compare, seed) → hard; the largest remaining single-thread SILK lever. | 1.5–2.5× on NSQ | ☐ |
 | **S2** | **noise_shape_analysis (18.7%)**: autocorrelation, Levinson/Schur, warped-LPC loops — redundancy then AVX2 (fixed-point dot products vectorize cleanly). | ~1.15× overall | ☐ |
 | **S3** | **find_pred_coefs (14.5%)**: LTP correlation search + `nlsf_del_dec_quant` VQ — same two-step treatment; the NLSF VQ search may admit an energy-shortlist like the Vorbis classifier (that variant is PEAQ-gated). | ~1.1× overall | ☐ |
 | **S4** | **pitch analysis (4.7%)**: correlation kernels share machinery with S3. | small | ☐ |
@@ -152,3 +153,16 @@ correctness oracle for encoder bricks meanwhile.
   history predicts. Upstream already SIMD'd PVQ search/resynth + comb filter +
   some NEON in NSQ — the x86 NSQ hole is the single highest-value target in the
   whole codec.
+- *2026-07-08 (F4)*: PEAQ exposed the CELT speed as a quality trade, not a clean
+  win — and revealed our VBR is pinned to the target rate (effectively CBR). The
+  synthetic tonal clip *lied* (ours scored better); real dense music told the
+  truth. **Bench data-dependent quality on real content** (the Vorbis lesson,
+  re-confirmed for Opus).
+- *2026-07-08 (S1c)*: First optimization brick landed, +7–9% SILK byte-identical.
+  Two lessons: (1) the scalar LPC dot product has a **loop-carried dep on `out`**
+  so it can't auto-vectorize — a clean case where hand-AVX2 wins (unlike the
+  auto-vec-wins pattern). (2) The **cross-build A/B read it as flat (~2%)**; only
+  the **same-binary env-toggled interleave** (`RUSTY_OPUS_NO_AVX2`) showed the true
+  +7–9% — thermal drift between separate `cargo test` runs swamped the signal.
+  Always A/B in one binary. (3) AVX2 has no signed 64-bit shift; accumulate i64
+  lanes and truncate once (i32 wrapping sum == i64 sum mod 2³²) to sidestep it.

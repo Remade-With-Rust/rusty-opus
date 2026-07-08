@@ -56,12 +56,23 @@ pub enum Stage {
     CeltPvq = 16,
     /// Encoder-side synthesis after coding (denormalise/IMDCT for prefilter memory).
     CeltSynth = 17,
+    // --- info-tier diagnostic scopes (nested inside SilkNsq; EXCLUDED from the
+    //     residue sum via INFO_FIRST). Remove call sites after reading — at n_states
+    //     × length calls their own rdtsc overhead inflates the enclosing stage. ---
+    /// silk_noise_shape_quantizer_short_prediction (16-tap LPC dot product).
+    SilkNsqLpc = 18,
+    /// Warped shaping AR filter (serial recurrence) + RD decision, per state.
+    SilkNsqShape = 19,
     /// Wraps the whole `OpusEncoder::encode()` call — the denominator.
-    Total = 18,
+    Total = 20,
 }
 
 /// Number of buckets.
-pub const N: usize = 19;
+pub const N: usize = 21;
+
+/// Index of the first info-tier stage — buckets `INFO_FIRST..Total` are nested
+/// diagnostics excluded from the `mgmt/other` residue sum.
+pub const INFO_FIRST: usize = Stage::SilkNsqLpc as usize;
 
 #[cfg(feature = "profile")]
 mod imp {
@@ -114,6 +125,8 @@ mod imp {
         "celt-fine-q",
         "celt-pvq",
         "celt-synth",
+        "  ↳nsq-lpc-pred",
+        "  ↳nsq-shape+rd",
         "TOTAL encode()",
     ];
 
@@ -186,7 +199,7 @@ mod imp {
     pub fn dump() {
         let s = snapshot();
         let total = s[SUB].0.max(1e-9);
-        let sub_sum: f64 = (0..SUB).map(|i| s[i].0).sum();
+        let sub_sum: f64 = (0..super::INFO_FIRST).map(|i| s[i].0).sum();
         let mgmt = (total - sub_sum).max(0.0);
         let pct = |ms: f64| 100.0 * ms / total;
 

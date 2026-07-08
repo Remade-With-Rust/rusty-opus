@@ -199,7 +199,7 @@ fn profile_breakdown() {
         };
         let stages: Vec<(f64, u64)> = per_stage.iter_mut().map(med).collect();
         let total = stages[opus_rs::prof::Stage::Total as usize].0.max(1e-9);
-        let sub: f64 = stages[..opus_rs::prof::Stage::Total as usize]
+        let sub: f64 = stages[..opus_rs::prof::INFO_FIRST]
             .iter()
             .map(|s| s.0)
             .sum();
@@ -229,3 +229,4 @@ fn profile_breakdown() {
         );
     }
 }
+
