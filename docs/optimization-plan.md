@@ -109,7 +109,8 @@ kernel itself (S5).
 | **S1a** | **NSQ redundancy pass** — folded into F5/S1b: F5 found **zero heap allocs** (all stack arrays) and the loop is a direct fixed-point libopus port with no recompute/re-walk vein. No byte-identical redundancy brick here; the lever is SIMD (S1c). | — | ✅ none found |
 | **S1b** | **NSQ inner-loop decomposition** (info-tier scopes, removed after reading): the 16-tap **LPC short-prediction ≈ 14–28% of NSQ**; the **warped shaping AR filter + RD ≈ 55–70%** but it's a *serial recurrence* (tmp1/tmp2 carried across taps) + branchy RD — hard to vectorize (why upstream only NEON'd the LPC dot product). Confirmed **n_states=4** (the cross-state SIMD axis for a future big brick). | data | ✅ 2026-07-08 |
 | **S1c** | **AVX2 LPC short-prediction** (`silk_lpc_prediction_avx2`): 8-tap/iter, emulated signed 64-bit `>>16`, i64-lane accumulate → i32 truncate (== scalar wrapping sum). Runtime-dispatched (`RUSTY_OPUS_NO_AVX2` A/B knob), scalar twin kept as oracle. **Result: +7–9% SILK, +8% Hybrid, BYTE-IDENTICAL** (same-binary interleaved A/B; the cross-build read was noise). Unit test: 200k random cases × orders {10,12,14,16} exact. | landed | ✅ 2026-07-08 |
-| **S1d** | **NSQ cross-state AVX2** (the big one): vectorize the whole `for k in 0..n_states` inner loop across the 4 del-dec states (libopus 1.5's AVX2 NSQ shape). Branchy (rd compare, seed) → hard; the largest remaining single-thread SILK lever. | 1.5–2.5× on NSQ | ☐ |
+| **S1d-lite** | **AVX2 shaping-filter dot** — tried & **REVERTED (flat)**. Same split trick as S2 (serial `s_ar2` state update + a vectorized `n_ar = Σ s_ar2[j]·ar_shp[j]` smlawb dot; byte-identical, unit-tested 200k cases, oracle unchanged). But the alternating same-binary A/B was flat (ON median 109.6 vs OFF 109.8, ON slightly *lower* 3/5). Why: the dot is too small a slice of shape+rd (dominated by the serial state update + branchy 2-candidate RD), and the loop split added store/reload overhead that offset the SIMD gain on a small fraction. **The vectorization boundary: split-and-SIMD wins only when the vectorized part is a substantial, cleanly-separable fraction (S1c: only vec op + loop-carried dep; S2: half of a 17%-SILK kernel) — not a thin slice inside a serial/branchy loop.** | flat | ⊘ reverted |
+| **S1d** | **NSQ cross-state AVX2** (the big one, still open): vectorize the whole `for k in 0..n_states` inner loop across the 4 *independent* del-dec states (libopus 1.5's AVX2 NSQ shape — 4 states = 4 lanes). Branchy (rd compare, seed, state swap) → hard; the largest remaining single-thread SILK lever (~35% of SILK). The right frame is cross-state lanes, NOT splitting one state's inner math (S1d-lite proved that's flat). | 1.5–2.5× on NSQ | ☐ |
 | **S2** | **warped autocorrelation** (`silk_warped_autocorrelation_fix`) — decomposition showed it's **87% of noise-shape = 17% of SILK** (sine-window 0.6%, negligible). The warped all-pass state update is a serial recurrence, but the **correlation accumulation splits out cleanly**: `corr[i] += (state[i]·state[0])>>16` is a vector×scalar i64 MAC over the order dim. Split the fused loop → AVX2 the MAC (reuses the S1c i64/asr16 pattern; `warped_corr_update_avx2`, own `RUSTY_OPUS_NO_WARP_AVX2` knob). **Result: +9% SILK, +9.6% Hybrid, BYTE-IDENTICAL** (200k-case unit test + oracle unchanged). | landed | ✅ 2026-07-08 |
 | **S3** | **find_pred_coefs (14.5%)**: LTP correlation search + `nlsf_del_dec_quant` VQ — same two-step treatment; the NLSF VQ search may admit an energy-shortlist like the Vorbis classifier (that variant is PEAQ-gated). | ~1.1× overall | ☐ |
 | **S4** | **pitch analysis (4.7%)**: correlation kernels share machinery with S3. | small | ☐ |
@@ -163,6 +164,14 @@ correctness oracle for encoder bricks meanwhile.
   synthetic tonal clip *lied* (ours scored better); real dense music told the
   truth. **Bench data-dependent quality on real content** (the Vorbis lesson,
   re-confirmed for Opus).
+- *2026-07-08 (S1d-lite revert)*: The split-and-SIMD trick (S2's winning shape)
+  went FLAT when applied to the NSQ shaping-filter dot — same correctness (byte-
+  identical, oracle green) but no speed. The vectorized dot was a thin slice of a
+  serial+branchy loop, and the loop split's store/reload offset the gain. **Lesson:
+  the boundary for split-and-SIMD is the vectorized part being a *substantial,
+  cleanly-separable* fraction. When the surrounding serial/branchy work dominates,
+  vectorizing a sliver is a revert.** The real NSQ lever is cross-state (4 lanes),
+  not per-state inner math. Measured revert = a legit result (maps the boundary).
 - *2026-07-08 (S1c)*: First optimization brick landed, +7–9% SILK byte-identical.
   Two lessons: (1) the scalar LPC dot product has a **loop-carried dep on `out`**
   so it can't auto-vectorize — a clean case where hand-AVX2 wins (unlike the
