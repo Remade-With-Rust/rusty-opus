@@ -210,6 +210,66 @@ Tooling: `RUSTY_OPUS_COMPLEXITY` env on the bench + a 5th complexity arg to
 | **R2** | **rff integration bench + knobs — DONE 2026-07-08.** `rff-codec-opus` now honours `-b:a` (bitrate), `-compression_level` (complexity 0–10), `-vbr off` (CBR), `-application voip` — previously hardcoded 64 kbps. Added `Dictionary::get_bitrate` (FFmpeg `k`/`M` suffixes — was a latent bug affecting all audio codecs; `-b:a 128k` never parsed). End-to-end `rff -i speech.wav out.opus @24k` vs system `ffmpeg -c:a libopus`: full-transcode wall-clock **4.33× (overhead-dominated** on a 60 s clip — process startup + WAV decode + Ogg mux + I/O ≈ 0.45 s fixed); the pure-encode gap is ~2.1× (fork benchmark 128× vs libopus ~269× RT). **R1 (parallel) is the lever to win wall-clock.** *(Left uncommitted in remade_ffmpeg_rs — entangled with the local-path fork wiring; commit when the fork is hosted and the dep re-points to a git URL.)* | ✅ 2026-07-08 |
 | **R3** | Publish: README benchmark table (reproducible), upstream-PR-able bricks offered back to `restsend/opus-rs`, `docs/benchmarks.md` entry in remade_ffmpeg_rs. | ☐ |
 
+## R1 — frame/chunk-parallel encoding (the plan)
+
+**Goal.** libopus is single-threaded *per stream*, so multi-core wins wall-clock
+even at our ~2.5× slower single-thread — the exact structural move that took AAC
+to +6× and Vorbis to +5.3×. On a 24-core box, a well-chunked encode should land
+**several × faster than libopus wall-clock**, ffmpeg-decodable throughout.
+
+**Why Opus is harder than AAC/Vorbis.** Those had ~no inter-frame state (AAC's
+MDCT overlap = just the previous block's samples; Vorbis packets independent), so
+frame ranges were *byte-identically* concatenable. Opus carries real state across
+frames in one stream (inventoried in `OpusEncoder`):
+- **SILK**: LTP history (pitch lag up to ~18 ms), NSQ filter state (`s_nsq`),
+  NLSF/gain inter-frame prediction, entropy-context (`ec_prev_*`), `x_buf`.
+- **CELT**: pre-emphasis + overlap (`syn_mem`), prefilter/comb memory, per-band
+  energy prediction (prev-frame energies).
+- **Top level**: variable-HP filter (`hp_mem`, `variable_hp_smth2`), the SILK
+  input resampler states (`down2*`, `down_1_3`). (The range coder resets per packet
+  — not inter-frame.)
+
+So naive chunking (thread starts cold at frame T·S) gives *wrong* state at the
+boundary → a different (still valid) bitstream. Two tiers:
+
+**R1a — per-stream parallelism (byte-identical, easy, ship first).** When `rff`
+transcodes *multiple* audio streams/files, run each on its own thread with its own
+`OpusEncoder`. Zero correctness risk (each stream is independent), byte-identical,
+and it's a real win for batch/server workloads. Lives in the `rff` transcode
+scheduler, not the fork. ~1 day.
+
+**R1b — chunked + primed (single-stream speedup, PEAQ-gated, the headline).**
+Buffer the whole input, split into `N` contiguous frame-chunks, and give each
+thread a *fresh* encoder that **warms up** by encoding `W` frames *before* its
+chunk (output discarded), so its state converges to the true continuous state by
+the chunk start (a stable encoder forgets initial conditions over a few frames).
+Keep only the chunk's own packets; concatenate in order.
+- **Warm-up length `W`**: must exceed the deepest state memory — SILK LTP lag
+  (~18 ms) + NSQ decision delay + CELT overlap. Start `W = 8` frames (160 ms);
+  sweep down under the PEAQ gate. CELT-only (music) needs far less (~2) than
+  SILK/Hybrid (speech).
+- **Overhead**: `N·W` extra frames. Keep chunks ≫ `W` (e.g. 60 s → 3000 frames,
+  24 threads → 125/chunk, `W=8` ⇒ ~6% redundant compute). Cap `N` by
+  `chunk ≥ k·W`.
+- **Gate (this MOVES the bitstream at chunk seams → not byte-identical)**: PEAQ
+  **ΔODG ≤ 0.03 vs the single-thread encode** on a speech+music corpus, AND
+  ffmpeg-decodes at unity. Reuse `tools/quality_ab.sh` + the R2 harness. Sweep `W`
+  to the smallest that stays neutral.
+- **Threads**: `std::thread::scope` over chunk ranges — no `rayon` dep (matches
+  AAC/Vorbis). Deterministic (fixed chunk boundaries) so re-runs are identical.
+- **Home**: an opt-in fork API (`OpusEncoder::encode_parallel(pcm, …)` or a
+  `ParallelOpusEncoder` wrapper) makes rusty-opus *"the first parallel Opus
+  encoder"* — a real differentiator — with `rff-codec-opus` calling it when the
+  input is fully buffered (file encode). Falls back to serial for streaming/live.
+- **Validation ladder**: (1) prototype 2 chunks, prove concat decodes; (2) PEAQ
+  ΔODG vs serial at `W=8`; (3) sweep `W` down; (4) scale `N`, measure wall-clock
+  vs libopus; (5) A/B the seam artifacts by PEAQ on transient-heavy speech.
+
+**Expected**: near-linear scaling to the core count minus the `~N·W/total`
+overhead — realistically **5–15× wall-clock** on 24 cores, decisively beating
+libopus's single-threaded encode. Order: **R1a first** (free, byte-identical),
+then **R1b** (the headline, PEAQ-gated).
+
 ## Decoder (second campaign, same instruments)
 
 The decoder gets its own profile pass after the encoder walls are up — same
