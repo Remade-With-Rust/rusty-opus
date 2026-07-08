@@ -129,6 +129,9 @@ fn scenarios(secs: f32) -> Vec<Scenario> {
 fn encode_clip(sc: &Scenario) -> (usize, usize) {
     let mut enc = OpusEncoder::new(sc.rate as i32, sc.channels, sc.app).unwrap();
     enc.bitrate_bps = sc.bitrate;
+    if let Some(c) = std::env::var("RUSTY_OPUS_COMPLEXITY").ok().and_then(|s| s.parse::<i32>().ok()) {
+        enc.complexity = c.clamp(0, 10);
+    }
     let frame = sc.rate as usize / 50; // 20 ms
     let step = frame * sc.channels;
     let mut out = vec![0u8; 4000];

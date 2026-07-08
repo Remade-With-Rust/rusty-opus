@@ -77,6 +77,10 @@ fn main() {
 
     let mut enc = OpusEncoder::new(rate as i32, ch, app).unwrap();
     enc.bitrate_bps = bitrate;
+    // Optional 5th arg: complexity 0..10 (drives SILK n_states_delayed_decision).
+    if let Some(c) = std::env::args().nth(5).and_then(|s| s.parse::<i32>().ok()) {
+        enc.complexity = c.clamp(0, 10);
+    }
     let mut dec = OpusDecoder::new(rate as i32, ch).unwrap();
 
     let mut ebuf = vec![0u8; 4000];

@@ -147,6 +147,32 @@ factors ≈ 2.3–2.6×. Closing the full 3.1× single-thread likely also needs 
 resample/glue trims — set expectations per-brick, measure, and let the profiler
 rewrite the ranking after each brick lands.
 
+### SILK speed/quality knob (Path 1 — done 2026-07-08)
+
+The `complexity` knob (already exposed as `-compression_level`, R2) drives SILK's
+`n_states_delayed_decision` (del-dec depth = the NSQ's dominant cost). Measured
+speed (SILK 16 k @24 k) and PEAQ ODG on **real speech** (10 s fixture, upsampled
+48 k so PEAQ can score it — absolute ODG is bandwidth-limited/unreliable, the
+**deltas** are the signal):
+
+| complexity | n_states | SILK speed | ΔODG vs cx9 |
+|---|:---:|---:|---:|
+| 9 (default) | 4 | 137× RT | — |
+| 7 | 3 | 169× RT (+24%) | −0.07* |
+| **5** | **2** | **244× RT (+78%)** | **−0.02** |
+| 3 | 1 (no del-dec) | 354× RT (+159%) | −0.04 |
+
+<sub>*synthetic clip; real-speech Δ for 4→2 was −0.022, 4→1 was −0.044 — at/below
+PEAQ's ~0.03 noise floor.</sub>
+
+**Finding: `n_states` barely affects speech quality** — 4→2 states is ~1.8× faster
+for a PEAQ-neutral (≤0.03 ODG) cost. So the knob is a **near-free speed lever**;
+`-compression_level 5` is a strong speed/quality operating point for latency- or
+throughput-sensitive use. (This is a quality *trade*, not equal-quality parity —
+at equal complexity we're still ~1.9× behind libopus; but the trade is cheap.)
+Tooling: `RUSTY_OPUS_COMPLEXITY` env on the bench + a 5th complexity arg to
+`examples/roundtrip.rs`.
+
 ### CELT wing — extend a lead we must first prove is real
 
 | brick | what | expected | status |
