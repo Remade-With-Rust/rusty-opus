@@ -127,6 +127,30 @@ Recommendation: **R1 (threads)** is the higher-value, better-precedented next mo
 for wall-clock parity/win; **S1d** is the harder single-thread purist play. Both are
 their own focused campaign.
 
+## Kernel-improvement frontier (2026-07-08) — why SIMD wins some kernels and loses others
+
+Micro-benchmarking each candidate kernel *in isolation* (scalar 4-chain vs cross-
+lane SIMD) gives a clean rule, and it settles what's left:
+
+| kernel | structure | SIMD result | why |
+|---|---|---|---|
+| LPC prediction (S1c) | reduction | **win** | dot product, no dep |
+| warped-autocorr corr (S2) | reduction | **win** | MAC over order |
+| NSQ shaping filter (S1d) | **serial recurrence** | **1.56× win** (i64-lane) | recurrence caps scalar ILP → filling lanes helps |
+| **NSQ RD decision** | **branchy, no recurrence** | **5.3× LOSS** (measured, `tests/nsq_rd_microbench.rs`) | scalar's 4 independent chains already saturate ILP; SIMD needs sat-i32/16-bit-mul/4-way-blendv emulation at only 4 lanes |
+
+**The rule:** cross-lane SIMD wins when a *serial dependency* limits per-chain
+scalar ILP (recurrences) and loses when the scalar already has abundant ILP
+(branchy straight-line code) — because 4 lanes can't amortize the fixed-point
+emulation. The RD (16% of SILK, the biggest remaining kernel) is firmly in the
+LOSE column: **not improvable by SIMD.** SILK is otherwise ~98.5% named DSP
+kernel, ~1.5% glue — no structural/glue win left either. Remaining single-thread
+options are all marginal or non-SIMD: warped-autocorr state update cross-*subframe*
+(recurrence → could win ~3%, but conflicts with S2's cross-order correlation), the
+rate-loop rerun cut (~5%, algorithmic/PEAQ-gated), or matching libopus's hand-asm
+instruction scheduling (large). The realistic verdict: **single-thread SILK is
+near its practical pure-Rust ceiling; the wall-clock win is R1 (already landed).**
+
 ## The house
 
 ### Foundation — instruments (lay first, everything rests on it)
