@@ -251,13 +251,20 @@ impl MdctLookup {
         shift: usize,
         stride: usize,
     ) {
-        let st = self.kfft[shift]
-            .as_ref()
-            .expect("FFT state not initialized");
+        // A malformed frame can carry an out-of-range `shift` or a `stride`/size
+        // inconsistent with the input buffer; bail gracefully rather than panic on
+        // the FFT-state index or the (checked) pre/post-rotation reads. Inert for
+        // valid streams (shift in range, buffers correctly sized).
+        let Some(st) = self.kfft.get(shift).and_then(|s| s.as_ref()) else {
+            return;
+        };
         let n = self.n >> shift;
         let n2 = n / 2;
         let n4 = n / 4;
         let overlap2 = overlap / 2;
+        if n4 == 0 || n4 > MAX_N4 || stride.saturating_mul(n2.saturating_sub(1)) >= input.len() {
+            return;
+        }
 
         let (trig, _) = self.get_trig(shift);
 

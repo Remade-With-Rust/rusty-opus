@@ -975,7 +975,12 @@ impl OpusDecoder {
                 for (fi, payload) in frame_payloads.iter().enumerate() {
                     let mut rc = RangeCoder::new_decoder(payload);
                     let pcm_i16_len = internal_frame_size * self.channels;
-                    debug_assert!(pcm_i16_len <= self.w_pcm_i16.len());
+                    // A malformed packet can imply a frame larger than our scratch
+                    // buffer; reject it gracefully instead of slicing out of bounds
+                    // (a decode-path DoS on attacker-controlled input).
+                    if pcm_i16_len > self.w_pcm_i16.len() {
+                        return Err("opus: SILK frame size exceeds buffer");
+                    }
 
                     let ret = {
                         let (silk_dec, pcm_i16) = (&mut self.silk_dec, &mut self.w_pcm_i16);
