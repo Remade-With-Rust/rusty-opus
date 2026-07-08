@@ -780,6 +780,81 @@ pub fn silk_pitch_xcorr(x: &[i16], y: &[i16], xcorr: &mut [i32], len: usize, max
     }
 }
 
+/// Correlation MAC over the warped states: `corr_qc[i] += (state[i]·state[0])>>16`
+/// for `i in 0..=order`. Scalar oracle; the AVX2 twin (below) must match it
+/// byte-for-byte (i64 accumulate, arithmetic `>>16`).
+#[inline(always)]
+fn warped_corr_update_scalar(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
+    let state0 = state_qs[0];
+    for i in 0..=order {
+        corr_qc[i] += silk_rshift64(silk_smull(state_qs[i], state0), 2 * 13 - 10);
+    }
+}
+
+/// Cached AVX2 dispatch for the warped-correlation MAC (mirrors the NSQ knob;
+/// `RUSTY_OPUS_NO_AVX2` forces the scalar twin for interleaved A/B).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn warped_corr_avx2_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = is_x86_feature_detected!("avx2")
+                && std::env::var_os("RUSTY_OPUS_NO_AVX2").is_none()
+                && std::env::var_os("RUSTY_OPUS_NO_WARP_AVX2").is_none();
+            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// AVX2 twin: 4 taps/iteration, `(state[i] as i64 * state0 as i64) >> 16`
+/// accumulated into `corr_qc` (i64). Byte-identical to the scalar.
+///
+/// SAFETY: `corr_qc.len() >= order+1` and `state_qs.len() >= order+1` (the caller
+/// sizes both `MAX_SHAPE_LPC_ORDER+1`); AVX2 checked by the caller.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn warped_corr_update_avx2(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
+    use core::arch::x86_64::*;
+    let n = order + 1;
+    let s0v = _mm256_set1_epi64x(state_qs[0] as i64); // state0 in low 32 of each lane
+    let cp = corr_qc.as_mut_ptr();
+    let sp = state_qs.as_ptr();
+    let mut i = 0usize;
+    while i + 4 <= n {
+        // Sign-extend 4 i32 states to 4 i64 lanes; mul_epi32 uses the low 32 bits.
+        let s4 = _mm256_cvtepi32_epi64(_mm_loadu_si128(sp.add(i) as *const __m128i));
+        let prod = _mm256_mul_epi32(s4, s0v); // 4× (state[i+k] * state0) as i64
+        // Arithmetic >>16 of packed i64 (logical shift + sign fill at bit 48).
+        let sign = _mm256_cmpgt_epi64(_mm256_setzero_si256(), prod);
+        let shifted = _mm256_or_si256(_mm256_srli_epi64(prod, 16), _mm256_slli_epi64(sign, 48));
+        let cur = _mm256_loadu_si256(cp.add(i) as *const __m256i);
+        _mm256_storeu_si256(cp.add(i) as *mut __m256i, _mm256_add_epi64(cur, shifted));
+        i += 4;
+    }
+    while i < n {
+        corr_qc[i] += silk_rshift64(silk_smull(state_qs[i], state_qs[0]), 2 * 13 - 10);
+        i += 1;
+    }
+}
+
+#[inline(always)]
+fn warped_corr_update(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if warped_corr_avx2_enabled() {
+            // SAFETY: avx2 checked; caller sizes both slices to order+1.
+            unsafe { warped_corr_update_avx2(corr_qc, state_qs, order) };
+            return;
+        }
+    }
+    warped_corr_update_scalar(corr_qc, state_qs, order);
+}
+
 pub fn silk_warped_autocorrelation_fix(
     corr: &mut [i32],
     scale: &mut i32,
@@ -801,19 +876,21 @@ pub fn silk_warped_autocorrelation_fix(
     for &input_n in input.iter().take(length) {
         tmp1_qs = (input_n as i32) << QS;
 
+        // Warped all-pass state update (serial recurrence — inherently scalar).
         let mut i = 0;
         while i < order {
             tmp2_qs = silk_smlaww(state_qs[i], state_qs[i + 1] - tmp1_qs, warping_q16);
             state_qs[i] = tmp1_qs;
-            corr_qc[i] += silk_rshift64(silk_smull(tmp1_qs, state_qs[0]), 2 * QS - QC);
-
             tmp1_qs = silk_smlaww(state_qs[i + 1], state_qs[i + 2] - tmp2_qs, warping_q16);
             state_qs[i + 1] = tmp2_qs;
-            corr_qc[i + 1] += silk_rshift64(silk_smull(tmp2_qs, state_qs[0]), 2 * QS - QC);
             i += 2;
         }
         state_qs[order] = tmp1_qs;
-        corr_qc[order] += silk_rshift64(silk_smull(tmp1_qs, state_qs[0]), 2 * QS - QC);
+
+        // Correlation accumulation: corr_qc[i] += (state_qs[i]·state_qs[0]) >> 16
+        // for all i — a vector×scalar i64 MAC (state_qs[0] = input<<QS is the
+        // per-sample scalar). Vectorizable now that it's split from the recurrence.
+        warped_corr_update(&mut corr_qc, &state_qs, order);
     }
 
     let mut lsh = silk_clz64(corr_qc[0]) - 35;
@@ -826,6 +903,45 @@ pub fn silk_warped_autocorrelation_fix(
     } else {
         for i in 0..=order {
             corr[i] = (corr_qc[i] >> (-lsh)) as i32;
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod warped_corr_avx2_tests {
+    use super::*;
+
+    #[test]
+    fn avx2_matches_scalar() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut s: u64 = 0xDEAD_BEEF_1357_9bdf;
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for order in [10usize, 12, 14, 16] {
+            for _ in 0..50_000 {
+                let mut state = [0i32; MAX_SHAPE_LPC_ORDER + 1];
+                for v in state.iter_mut().take(order + 1) {
+                    // Warped states reach ~i16<<QS magnitudes; cover full sign range.
+                    *v = (rng() as i32) >> (rng() as u32 % 4);
+                }
+                // Random non-zero starting accumulators to catch add mistakes.
+                let mut a = [0i64; MAX_SHAPE_LPC_ORDER + 1];
+                let mut b = [0i64; MAX_SHAPE_LPC_ORDER + 1];
+                for k in 0..=order {
+                    let init = ((rng() as i64) << 20) >> (rng() as u32 % 20);
+                    a[k] = init;
+                    b[k] = init;
+                }
+                warped_corr_update_scalar(&mut a, &state, order);
+                unsafe { warped_corr_update_avx2(&mut b, &state, order) };
+                assert_eq!(a, b, "order={order}");
+            }
         }
     }
 }

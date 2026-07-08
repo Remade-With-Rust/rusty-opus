@@ -14,8 +14,13 @@ Single-thread, i7-14650HX, 60 s deterministic synthetic clips
 | Scenario | rusty-opus | libopus (C) | gap |
 |---|---:|---:|---|
 | CELT-only — 48 kHz stereo music @128k (Audio) | **308× RT** | ~137× RT | 2.2× faster **but lower quality — NOT a clean win** (see F4) |
-| SILK-only — 16 kHz mono speech @24k (VoIP) | **128× RT** | ~395× RT | **~3.1× slower** |
-| Hybrid — 48 kHz mono speech @32k (VoIP) | **111× RT** | ~303× RT | **~2.7× slower** |
+| SILK-only — 16 kHz mono speech @24k (VoIP) | **128× RT** (→ **~134× after S1c+S2**) | ~395× RT | ~3.1× → **~2.9× slower** |
+| Hybrid — 48 kHz mono speech @32k (VoIP) | **111× RT** (→ **~117× after S1c+S2**) | ~303× RT | ~2.7× → **~2.6× slower** |
+
+> **SILK progress (byte-identical bricks):** all-scalar baseline ~120× → **~134× (+12%)**
+> via S1c (AVX2 LPC prediction, +7–9%) + S2 (AVX2 warped-autocorr correlation, +9%).
+> The gap to libopus is closing kernel by kernel; the big remaining lever is S1d
+> (cross-state NSQ AVX2, ~35% of SILK).
 
 **F4 verdict (2026-07-08, resolved the ⚠):** the CELT speed is partly bought with
 quality. PEAQ ODG at 128k on real CC0 music (ours enc→dec vs libopus enc→dec):
@@ -105,7 +110,7 @@ kernel itself (S5).
 | **S1b** | **NSQ inner-loop decomposition** (info-tier scopes, removed after reading): the 16-tap **LPC short-prediction ≈ 14–28% of NSQ**; the **warped shaping AR filter + RD ≈ 55–70%** but it's a *serial recurrence* (tmp1/tmp2 carried across taps) + branchy RD — hard to vectorize (why upstream only NEON'd the LPC dot product). Confirmed **n_states=4** (the cross-state SIMD axis for a future big brick). | data | ✅ 2026-07-08 |
 | **S1c** | **AVX2 LPC short-prediction** (`silk_lpc_prediction_avx2`): 8-tap/iter, emulated signed 64-bit `>>16`, i64-lane accumulate → i32 truncate (== scalar wrapping sum). Runtime-dispatched (`RUSTY_OPUS_NO_AVX2` A/B knob), scalar twin kept as oracle. **Result: +7–9% SILK, +8% Hybrid, BYTE-IDENTICAL** (same-binary interleaved A/B; the cross-build read was noise). Unit test: 200k random cases × orders {10,12,14,16} exact. | landed | ✅ 2026-07-08 |
 | **S1d** | **NSQ cross-state AVX2** (the big one): vectorize the whole `for k in 0..n_states` inner loop across the 4 del-dec states (libopus 1.5's AVX2 NSQ shape). Branchy (rd compare, seed) → hard; the largest remaining single-thread SILK lever. | 1.5–2.5× on NSQ | ☐ |
-| **S2** | **noise_shape_analysis (18.7%)**: autocorrelation, Levinson/Schur, warped-LPC loops — redundancy then AVX2 (fixed-point dot products vectorize cleanly). | ~1.15× overall | ☐ |
+| **S2** | **warped autocorrelation** (`silk_warped_autocorrelation_fix`) — decomposition showed it's **87% of noise-shape = 17% of SILK** (sine-window 0.6%, negligible). The warped all-pass state update is a serial recurrence, but the **correlation accumulation splits out cleanly**: `corr[i] += (state[i]·state[0])>>16` is a vector×scalar i64 MAC over the order dim. Split the fused loop → AVX2 the MAC (reuses the S1c i64/asr16 pattern; `warped_corr_update_avx2`, own `RUSTY_OPUS_NO_WARP_AVX2` knob). **Result: +9% SILK, +9.6% Hybrid, BYTE-IDENTICAL** (200k-case unit test + oracle unchanged). | landed | ✅ 2026-07-08 |
 | **S3** | **find_pred_coefs (14.5%)**: LTP correlation search + `nlsf_del_dec_quant` VQ — same two-step treatment; the NLSF VQ search may admit an energy-shortlist like the Vorbis classifier (that variant is PEAQ-gated). | ~1.1× overall | ☐ |
 | **S4** | **pitch analysis (4.7%)**: correlation kernels share machinery with S3. | small | ☐ |
 | **S5** | **Rate-loop rerun cut (~12% of NSQ)**: seed the gain iteration from the previous frame's converged gain / predict bits before re-running NSQ. If prediction only reorders iterations → byte-identical; if it changes final gains → PEAQ gate. | up to ~7% SILK | ☐ |
