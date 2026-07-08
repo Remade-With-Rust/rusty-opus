@@ -13,14 +13,29 @@ Single-thread, i7-14650HX, 60 s deterministic synthetic clips
 
 | Scenario | rusty-opus | libopus (C) | gap |
 |---|---:|---:|---|
-| CELT-only — 48 kHz stereo music @128k (Audio) | **308× RT** | ~137× RT | **~2.2× faster** ⚠ quality unverified |
+| CELT-only — 48 kHz stereo music @128k (Audio) | **308× RT** | ~137× RT | 2.2× faster **but lower quality — NOT a clean win** (see F4) |
 | SILK-only — 16 kHz mono speech @24k (VoIP) | **128× RT** | ~395× RT | **~3.1× slower** |
 | Hybrid — 48 kHz mono speech @32k (VoIP) | **111× RT** | ~303× RT | **~2.7× slower** |
 
-⚠ The CELT "win" is unaudited: default complexity differs (ours 9, libopus 10)
-and libopus runs extra VBR/tonality analysis. Do not quote it until F4 (quality
-gate) confirms parity. **The campaign's battlefield is SILK** — that's where we
-lose 3×, and speech/VoIP is Opus's home turf.
+**F4 verdict (2026-07-08, resolved the ⚠):** the CELT speed is partly bought with
+quality. PEAQ ODG at 128k on real CC0 music (ours enc→dec vs libopus enc→dec):
+
+| clip | rusty-opus | libopus | our actual rate |
+|---|---:|---:|---|
+| synthetic tonal music | −0.14 | −0.20 | 128 kbps (pinned) |
+| real piano | −0.47 | −0.05 | 128 kbps (pinned) |
+| real guitar (dense/transient) | **−2.31** | −0.36 | 128 kbps (pinned) |
+
+Two root causes: (1) **our VBR is effectively CBR** — it emits *exactly* the
+target rate on every clip, while libopus VBR spends 155 kbps on the hard guitar
+(+21%); (2) even rate-adjusted, CELT bit-allocation on dense/transient content is
+weaker. This is a **quality** gap (codec-tune-quality / codec-experimental), not a
+speed gap — so **the CELT wing is re-scoped**: honest labeling now, speed bricks
+still welcome (byte-identical), but the real CELT prize is a quality sub-campaign
+(true VBR + allocation), tracked separately from the speed house.
+
+**The campaign's battlefield is SILK** — an unambiguous 3.1× *pure-speed* gap on
+Opus's home turf (speech/VoIP), gated byte-identical. That is the flagship.
 
 ## Where the time goes (stage profiler, median of 15 passes)
 
@@ -79,8 +94,8 @@ kernel itself (S5).
 | **F1** | Stage profiler `src/prof.rs` (rdtsc, feature-gated, 19 stages, calibrated snapshot) | ✅ 2026-07-08 |
 | **F2** | Deterministic benchmark `tests/profile_encode.rs` (3 scenarios, best-of-N ×RT + median breakdown) | ✅ 2026-07-08 |
 | **F3** | C-reference baseline (ffmpeg libopus, slope-corrected) — table above | ✅ 2026-07-08 |
-| **F4** | **Quality oracle harness**: encode corpus → decode with C libopus → PEAQ ODG vs libopus-encoded anchor at equal bitrate; plus packet-hash byte-identity gate runner. Settles the ⚠ on the CELT number and arms the PEAQ gate. | ☐ next |
-| **F5** | Cheap probes: bounds-check-ceiling (`get_unchecked` newtype throwaway) + alloc-traffic audit (per-frame `vec!`/`resize` in hot paths — NSQ allocates scratch per call?). Opus frames are tiny (working set ≪ L2) so the cache sweep is expected flat — run once to confirm, then never tile. | ☐ |
+| **F4** | **Quality oracle + byte-identity gate**: `tests/oracle_bitexact.rs` (FNV hash of the full packet stream per scenario — the workhorse gate, frozen 2026-07-08); `examples/roundtrip.rs` + `tools/quality_ab.sh` (PEAQ ODG ours vs libopus). Settled the CELT ⚠ (see verdict above) and armed the PEAQ gate. | ✅ 2026-07-08 |
+| **F5** | Cheap probes: bounds-check-ceiling (`get_unchecked` newtype throwaway) + alloc-traffic audit (per-frame `vec!`/`resize` in hot paths — NSQ allocates scratch per call?). Opus frames are tiny (working set ≪ L2) so the cache sweep is expected flat — run once to confirm, then never tile. | ☐ next |
 
 ### SILK wing — the 3.1× gap (order = profiler ranking)
 
