@@ -792,7 +792,11 @@ impl OpusDecoder {
             prev_internal_rate: 0,
             hybrid_skip_celt: false,
 
-            w_pcm_i16: vec![0i16; 640],
+            // SILK internal scratch: max frame is 60 ms at the 16 kHz WB internal
+            // rate (960 samples/ch), i.e. 1920 stereo. Sized like the sibling
+            // buffers below for headroom — the old fixed 640 overflowed on any
+            // 60 ms SILK frame (panic decoding valid streams).
+            w_pcm_i16: vec![0i16; 5760 * channels],
 
             w_silk_out: vec![0.0f32; 5760 * channels],
             w_pcm_resampled: vec![0i16; 5760 * channels],
@@ -844,14 +848,7 @@ impl OpusDecoder {
                 if data.is_empty() {
                     return Err("Code 2 packet has no data");
                 }
-                let (first_len, header_size) = if data[0] & 0x80 != 0 {
-                    if data.len() < 2 {
-                        return Err("Code 2 packet too short for 2-byte length");
-                    }
-                    (((data[0] & 0x7F) as usize) << 8 | data[1] as usize, 2)
-                } else {
-                    (data[0] as usize, 1)
-                };
+                let (first_len, header_size) = read_opus_frame_len(data, 0)?;
                 if header_size + first_len > data.len() {
                     return Err("Code 2: first frame size exceeds packet");
                 }
@@ -861,25 +858,30 @@ impl OpusDecoder {
                 ];
             }
             3 => {
+                // RFC 6716 §3.2.5. Frame-count byte: bit 7 = VBR flag, bit 6 =
+                // padding flag, bits 5..0 = frame count M. VBR and padding are
+                // independent; the earlier code conflated them (and used a
+                // non-standard length coding), which mis-parsed CBR and padded
+                // packets — exactly what the RFC test vectors exercise.
                 if input.len() < 2 {
                     return Err("Code 3 packet too short");
                 }
                 let count_byte = input[1];
-                let n_frames = (count_byte & 0x3F) as usize;
-                if n_frames < 1 || n_frames > 48 {
+                let m = (count_byte & 0x3F) as usize;
+                if m < 1 || m > 48 {
                     return Err("Code 3: invalid frame count");
                 }
-                frame_count = n_frames;
-                let padding_flag = (count_byte & 0x40) != 0;
+                frame_count = m;
+                let vbr = (count_byte & 0x80) != 0;
+                let padding = (count_byte & 0x40) != 0;
 
-                if padding_flag {
-                    let mut ptr = 2usize;
-                    let mut pad_len = 0usize;
+                // Padding length indicator bytes follow the count byte; the
+                // padding data itself sits at the end of the packet.
+                let mut ptr = 2usize;
+                let mut pad_len = 0usize;
+                if padding {
                     loop {
-                        if ptr >= input.len() {
-                            return Err("Padding overflow");
-                        }
-                        let p = input[ptr] as usize;
+                        let p = *input.get(ptr).ok_or("Code 3: padding overflow")? as usize;
                         ptr += 1;
                         if p == 255 {
                             pad_len += 254;
@@ -888,59 +890,52 @@ impl OpusDecoder {
                             break;
                         }
                     }
+                }
+                let end = input
+                    .len()
+                    .checked_sub(pad_len)
+                    .ok_or("Code 3: padding exceeds packet")?;
+                if ptr > end {
+                    return Err("Code 3: padding exceeds packet");
+                }
+                // Frame-data region, with the length headers (VBR) at its front
+                // and the trailing padding already excluded.
+                let region = &input[ptr..end];
 
-                    let end = input.len().saturating_sub(pad_len);
-                    if ptr > end {
-                        return Err("Padding exceeds packet");
+                if vbr {
+                    // M-1 explicit frame lengths, contiguous, then the frame
+                    // data; the last frame is the remainder.
+                    let mut lens = Vec::with_capacity(m.saturating_sub(1));
+                    let mut hp = 0usize;
+                    for _ in 0..m - 1 {
+                        let (l, nb) = read_opus_frame_len(region, hp)?;
+                        hp += nb;
+                        lens.push(l);
                     }
-                    let compressed = &input[ptr..end];
-                    let frame_len = compressed.len() / frame_count;
-                    if frame_len == 0 {
-                        return Err("Code 3 with padding: empty frame");
+                    let mut payloads = Vec::with_capacity(m);
+                    let mut fp = hp;
+                    for &l in &lens {
+                        if fp + l > region.len() {
+                            return Err("Code 3 VBR: frame length exceeds packet");
+                        }
+                        payloads.push(&region[fp..fp + l]);
+                        fp += l;
                     }
-                    frame_payloads = compressed.chunks(frame_len).collect();
-                    if frame_payloads.len() != frame_count {
-                        return Err("Code 3: frame count mismatch");
+                    if fp > region.len() {
+                        return Err("Code 3 VBR: no data for last frame");
                     }
+                    payloads.push(&region[fp..]);
+                    frame_payloads = payloads;
                 } else {
-                    // Self-delimiting format:
-                    // - Single frame: no length prefix, remaining data is the frame
-                    // - Multi-frame: lengths for all frames except the last
-                    let mut payload_ptr = 2usize;
-                    if frame_count == 1 {
-                        frame_payloads = vec![&input[payload_ptr..]];
-                    } else {
-                        let mut payloads = Vec::with_capacity(frame_count);
-                        for _f in 0..frame_count - 1 {
-                            if payload_ptr >= input.len() {
-                                return Err("Code 3: unexpected end in self-delimiting header");
-                            }
-                            let (frame_len, header_bytes) = if input[payload_ptr] & 0x80 != 0 {
-                                if payload_ptr + 2 > input.len() {
-                                    return Err("Code 3: short frame length");
-                                }
-                                (
-                                    ((input[payload_ptr] & 0x7F) as usize) << 8
-                                        | input[payload_ptr + 1] as usize,
-                                    2,
-                                )
-                            } else {
-                                (input[payload_ptr] as usize, 1)
-                            };
-                            payload_ptr += header_bytes;
-                            if payload_ptr + frame_len > input.len() {
-                                return Err("Code 3: frame length exceeds packet");
-                            }
-                            payloads.push(&input[payload_ptr..payload_ptr + frame_len]);
-                            payload_ptr += frame_len;
-                        }
-                        // Last frame: no length prefix, remaining data
-                        if payload_ptr > input.len() {
-                            return Err("Code 3: no data for last frame");
-                        }
-                        payloads.push(&input[payload_ptr..]);
-                        frame_payloads = payloads;
+                    // CBR: the region splits into M equal frames (possibly all
+                    // empty, e.g. DTX).
+                    if region.len() % m != 0 {
+                        return Err("Code 3 CBR: frame data not divisible by frame count");
                     }
+                    let frame_len = region.len() / m;
+                    frame_payloads = (0..m)
+                        .map(|i| &region[i * frame_len..(i + 1) * frame_len])
+                        .collect();
                 }
             }
             _ => unreachable!(),
@@ -1367,6 +1362,19 @@ fn frame_duration_ms_from_toc(toc: u8) -> i32 {
 
 fn channels_from_toc(toc: u8) -> usize {
     if toc & 0x04 != 0 { 2 } else { 1 }
+}
+
+/// RFC 6716 §3.1 frame-length coding (used by code 2 and VBR code 3): a length
+/// of 0..=251 is one byte with that value; 252..=1275 is two bytes `b0` (252..255)
+/// then `b1`, giving `b1*4 + b0`. Returns `(length, bytes_consumed)`.
+fn read_opus_frame_len(data: &[u8], ptr: usize) -> Result<(usize, usize), &'static str> {
+    let b0 = *data.get(ptr).ok_or("Opus frame length: truncated")? as usize;
+    if b0 < 252 {
+        Ok((b0, 1))
+    } else {
+        let b1 = *data.get(ptr + 1).ok_or("Opus frame length: truncated 2-byte")? as usize;
+        Ok((b1 * 4 + b0, 2))
+    }
 }
 
 #[cfg(test)]
