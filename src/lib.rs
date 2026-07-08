@@ -9,6 +9,7 @@ pub mod hp_cutoff;
 pub mod kiss_fft;
 pub mod mdct;
 pub mod modes;
+pub mod parallel;
 pub mod pitch;
 pub mod prof;
 pub mod pvq;
