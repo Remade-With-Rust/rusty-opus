@@ -1,4 +1,15 @@
-# opus-rs
+# rusty-opus
+
+[![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/remade-with-rust)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue)](COPYING)
+
+> **rusty-opus** is [Mata Network](https://www.mata.network)'s performance fork of
+> [`opus-rs`](https://github.com/restsend/opus-rs) (BSD-3-Clause), maintained as part of the
+> [Remade With Rust](https://github.com/remade-with-rust) initiative. It keeps the upstream
+> package name (`opus-rs`) so upstream syncs stay clean, and it is the Opus backend of
+> [remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs). Every optimization
+> is gated against a reference oracle — byte-identical where the bitstream must not move,
+> perceptually validated where it may.
 
 A pure-Rust implementation of the [Opus audio codec](https://opus-codec.org/) (RFC 6716), ported from the reference C implementation (libopus 1.6).
 
