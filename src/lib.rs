@@ -761,6 +761,12 @@ pub struct OpusDecoder {
     w_pcm_resampled: Vec<i16>,
     w_celt_planar: Vec<f32>,
     w_celt_out: Vec<f32>,
+
+    // Auxiliary decoder for packets whose channel count differs from ours
+    // (a stream may switch between mono and stereo). It decodes at the packet's
+    // native channel count; we then up/downmix to our output count. Persistent
+    // so the "other" channel mode keeps its own inter-frame state.
+    aux: Option<Box<OpusDecoder>>,
 }
 
 impl OpusDecoder {
@@ -802,6 +808,7 @@ impl OpusDecoder {
             w_pcm_resampled: vec![0i16; 5760 * channels],
             w_celt_planar: vec![0.0f32; 5760 * channels],
             w_celt_out: vec![0.0f32; 5760 * channels],
+            aux: None,
         })
     }
 
@@ -822,7 +829,40 @@ impl OpusDecoder {
         let frame_duration_ms = frame_duration_ms_from_toc(toc);
 
         if packet_channels != self.channels {
-            return Err("Channel count mismatch between packet and decoder");
+            // The packet's channel count differs from ours (a stream can switch
+            // between mono and stereo). Decode it at its native channel count in
+            // a persistent auxiliary decoder, then render to our output count:
+            // mono->stereo duplicates, stereo->mono averages the two channels.
+            if self
+                .aux
+                .as_ref()
+                .map(|a| a.channels != packet_channels)
+                .unwrap_or(true)
+            {
+                self.aux = Some(Box::new(OpusDecoder::new(
+                    self.sampling_rate,
+                    packet_channels,
+                )?));
+            }
+            let aux = self.aux.as_mut().unwrap();
+            let mut buf = vec![0.0f32; frame_size * packet_channels];
+            let n = aux.decode(input, frame_size, &mut buf)?;
+            if packet_channels == 1 && self.channels == 2 {
+                for i in 0..n {
+                    let v = buf[i];
+                    output[2 * i] = v;
+                    output[2 * i + 1] = v;
+                }
+            } else if packet_channels == 2 && self.channels == 1 {
+                for i in 0..n {
+                    output[i] = 0.5 * (buf[2 * i] + buf[2 * i + 1]);
+                }
+            } else {
+                let m = (n * self.channels).min(output.len()).min(buf.len());
+                output[..m].copy_from_slice(&buf[..m]);
+            }
+            self.prev_mode = Some(mode);
+            return Ok(n);
         }
 
         let code = toc & 0x03;
