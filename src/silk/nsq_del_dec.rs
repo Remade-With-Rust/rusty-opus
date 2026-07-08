@@ -310,6 +310,142 @@ fn silk_noise_shape_quantizer_short_prediction(
     silk_lpc_prediction_scalar(ps_lpc_q14, idx, a_q12, predict_lpc_order)
 }
 
+/// Cached AVX2 dispatch for the cross-state NSQ shaping filter (S1d/Path 2); own
+/// `RUSTY_OPUS_NO_NSQ_AVX2` knob for isolated A/B against the scalar twin.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn nsq_shape_avx2_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = is_x86_feature_detected!("avx2")
+                && std::env::var_os("RUSTY_OPUS_NO_AVX2").is_none()
+                && std::env::var_os("RUSTY_OPUS_NO_NSQ_AVX2").is_none();
+            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Cross-state warped shaping AR filter over a state-minor SoA buffer
+/// `sar[tap][state]` (the 4 del-dec states are the lanes). Serial in the tap
+/// dimension; scalar twin = the oracle for the AVX2 version below.
+#[inline(always)]
+fn nsq_shape_filter_soa_scalar(
+    sar: &mut [[i32; 4]],
+    diff: &[i32; 4],
+    warp: i32,
+    ar_shp_q13: &[i16],
+    order: usize,
+    base: i32,
+    n_ar: &mut [i32; 4],
+) {
+    for k in 0..4 {
+        let mut tmp2 = silk_smlawb(diff[k], sar[0][k], warp);
+        let mut tmp1 = silk_smlawb(sar[0][k], silk_sub32_ovflw(sar[1][k], tmp2), warp);
+        sar[0][k] = tmp2;
+        let mut acc = silk_smlawb(base, tmp2, ar_shp_q13[0] as i32);
+        let mut j = 2;
+        while j < order {
+            tmp2 = silk_smlawb(sar[j - 1][k], silk_sub32_ovflw(sar[j][k], tmp1), warp);
+            sar[j - 1][k] = tmp1;
+            acc = silk_smlawb(acc, tmp1, ar_shp_q13[j - 1] as i32);
+            tmp1 = silk_smlawb(sar[j][k], silk_sub32_ovflw(sar[j + 1][k], tmp2), warp);
+            sar[j][k] = tmp2;
+            acc = silk_smlawb(acc, tmp2, ar_shp_q13[j] as i32);
+            j += 2;
+        }
+        sar[order - 1][k] = tmp1;
+        n_ar[k] = silk_smlawb(acc, tmp1, ar_shp_q13[order - 1] as i32);
+    }
+}
+
+/// Hand-AVX2 twin: the 4 states run as 4 **i64 lanes** of a `__m256i` throughout
+/// the recurrence (values stay i32-range) — the key over the reverted S1d attempt
+/// is that nothing narrows/permutes per op; the narrow-to-i32 happens once, on
+/// store. Byte-identical to the scalar twin (`silk_sub32_ovflw` never wraps here:
+/// the shaping states are bounded Q14 values, verified by the oracle + unit test).
+/// Micro-benchmarked at ~1.56× the 4-chain scalar.
+///
+/// SAFETY: AVX2 verified by the caller; `sar`/`n_ar` sized ≥ order/4.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn nsq_shape_filter_soa_avx2(
+    sar: &mut [[i32; 4]],
+    diff: &[i32; 4],
+    warp: i32,
+    ar_shp_q13: &[i16],
+    order: usize,
+    base: i32,
+    n_ar: &mut [i32; 4],
+) {
+    use core::arch::x86_64::*;
+    let wb = _mm256_set1_epi64x(warp as i64);
+    let asr16 = |x: __m256i| {
+        let s = _mm256_cmpgt_epi64(_mm256_setzero_si256(), x);
+        _mm256_or_si256(_mm256_srli_epi64(x, 16), _mm256_slli_epi64(s, 48))
+    };
+    let smlawb_v =
+        |a: __m256i, b: __m256i, cb: __m256i| _mm256_add_epi64(a, asr16(_mm256_mul_epi32(b, cb)));
+    let ldv = |p: &[i32; 4]| _mm256_cvtepi32_epi64(_mm_loadu_si128(p.as_ptr() as *const __m128i));
+    let stv = |p: &mut [i32; 4], v: __m256i| {
+        let g = _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6));
+        _mm_storeu_si128(p.as_mut_ptr() as *mut __m128i, _mm256_castsi256_si128(g));
+    };
+    let cbv = |c: i32| _mm256_set1_epi64x(c as i16 as i64);
+
+    // Load the state column-vectors once (i64 lanes); operate in-register.
+    let mut vsar = [_mm256_setzero_si256(); MAX_SHAPE_LPC_ORDER];
+    for j in 0..order {
+        vsar[j] = ldv(&sar[j]);
+    }
+    let vdiff = ldv(diff);
+    let mut tmp2 = smlawb_v(vdiff, vsar[0], wb);
+    let mut tmp1 = smlawb_v(vsar[0], _mm256_sub_epi64(vsar[1], tmp2), wb);
+    vsar[0] = tmp2;
+    let mut acc = smlawb_v(_mm256_set1_epi64x(base as i64), tmp2, cbv(ar_shp_q13[0] as i32));
+    let mut j = 2;
+    while j < order {
+        tmp2 = smlawb_v(vsar[j - 1], _mm256_sub_epi64(vsar[j], tmp1), wb);
+        vsar[j - 1] = tmp1;
+        acc = smlawb_v(acc, tmp1, cbv(ar_shp_q13[j - 1] as i32));
+        tmp1 = smlawb_v(vsar[j], _mm256_sub_epi64(vsar[j + 1], tmp2), wb);
+        vsar[j] = tmp2;
+        acc = smlawb_v(acc, tmp2, cbv(ar_shp_q13[j] as i32));
+        j += 2;
+    }
+    vsar[order - 1] = tmp1;
+    acc = smlawb_v(acc, tmp1, cbv(ar_shp_q13[order - 1] as i32));
+    for j in 0..order {
+        stv(&mut sar[j], vsar[j]);
+    }
+    stv(n_ar, acc);
+}
+
+#[inline(always)]
+fn nsq_shape_filter_soa(
+    sar: &mut [[i32; 4]],
+    diff: &[i32; 4],
+    warp: i32,
+    ar_shp_q13: &[i16],
+    order: usize,
+    base: i32,
+    n_ar: &mut [i32; 4],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if nsq_shape_avx2_enabled() {
+            // SAFETY: avx2 checked; sar/n_ar sized ≥ order/4.
+            unsafe { nsq_shape_filter_soa_avx2(sar, diff, warp, ar_shp_q13, order, base, n_ar) };
+            return;
+        }
+    }
+    nsq_shape_filter_soa_scalar(sar, diff, warp, ar_shp_q13, order, base, n_ar);
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod lpc_pred_avx2_tests {
     use super::*;
@@ -347,6 +483,53 @@ mod lpc_pred_avx2_tests {
                 };
                 let want = silk_lpc_prediction_scalar(&lpc, idx, &a, order as i32);
                 assert_eq!(got, want, "order={order} idx={idx}");
+            }
+        }
+    }
+
+    /// Cross-state shaping filter (Path 2): the i64-lane AVX2 must match the
+    /// scalar SoA twin over random states, incl. large magnitudes (stresses the
+    /// `silk_sub32_ovflw` i32-wrap assumption — the shaping states are bounded in
+    /// practice, but this covers well beyond the realistic range).
+    #[test]
+    fn nsq_shape_filter_avx2_matches_scalar() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut s: u64 = 0xC0FF_EE00_1234_5678;
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for order in [16usize, 24] {
+            for _ in 0..20_000 {
+                let sh = 6 + (rng() % 20) as u32;
+                let mut sar_a = vec![[0i32; 4]; order];
+                for row in sar_a.iter_mut() {
+                    for v in row.iter_mut() {
+                        *v = (rng() as i32) >> sh;
+                    }
+                }
+                let mut sar_b = sar_a.clone();
+                let diff = [
+                    (rng() as i32) >> sh,
+                    (rng() as i32) >> sh,
+                    (rng() as i32) >> sh,
+                    (rng() as i32) >> sh,
+                ];
+                let ar: Vec<i16> = (0..order).map(|_| (rng() >> 8) as i16).collect();
+                let warp = 13421;
+                let base = (order as i32) >> 1;
+                let mut na = [0i32; 4];
+                let mut nb = [0i32; 4];
+                nsq_shape_filter_soa_scalar(&mut sar_a, &diff, warp, &ar, order, base, &mut na);
+                unsafe {
+                    nsq_shape_filter_soa_avx2(&mut sar_b, &diff, warp, &ar, order, base, &mut nb)
+                };
+                assert_eq!(na, nb, "n_ar mismatch order={order} sh={sh}");
+                assert_eq!(sar_a, sar_b, "sar mismatch order={order} sh={sh}");
             }
         }
     }
@@ -389,6 +572,20 @@ pub fn silk_noise_shape_quantizer_del_dec(
 
     let pred_lag_ptr_base = nsq.s_ltp_buf_idx - lag + LTP_ORDER as i32 / 2;
     let shp_lag_ptr_base = nsq.s_ltp_shp_buf_idx - lag + HARM_SHAPE_FIR_TAPS as i32 / 2;
+
+    // Persistent cross-state SoA for the warped-shaping state `s_ar2` (Path 2):
+    // transposed AoS→SoA once here and back at the end (amortised over `length`
+    // samples), so the per-sample shaping filter runs cross-state (4 states = 4
+    // lanes) with no per-sample transpose. Within the sample loop, `s_ar2` lives
+    // ONLY in `sar_soa` (the shaping filter + the RD state-swap update it there).
+    let shp_ord = shaping_lpc_order as usize;
+    let shp_base = silk_rshift(shaping_lpc_order, 1);
+    let mut sar_soa = [[0i32; 4]; MAX_SHAPE_LPC_ORDER];
+    for k in 0..n_states {
+        for j in 0..shp_ord {
+            sar_soa[j][k] = ps_del_dec[k].s_ar2_q14[j];
+        }
+    }
 
     for i in 0..length {
         let idx = i as usize;
@@ -434,13 +631,19 @@ pub fn silk_noise_shape_quantizer_del_dec(
             }
         }
 
+        // Shaping pre-pass (Path 2): seed + LPC prediction (per state), then the
+        // warped shaping AR filter run CROSS-STATE over `sar_soa` (4 states = 4
+        // i64 lanes). Byte-identical to the per-state scalar; ~1.56× the kernel.
+        // The states are independent within a sample, so this hoist is exact.
+        let mut lpc_pred_arr = [0i32; NSQ_MAX_STATES_OPERATING];
+        let mut n_ar_arr = [0i32; NSQ_MAX_STATES_OPERATING];
+        let mut n_lf_arr = [0i32; NSQ_MAX_STATES_OPERATING];
+        let mut diff_arr = [0i32; 4];
         for k in 0..n_states {
             let ps_dd = &mut ps_del_dec[k];
-            let ps_ss = &mut ps_sample_state[k];
-
             ps_dd.seed = silk_rand(ps_dd.seed);
             let ps_lpc_q14_idx = NSQ_LPC_BUF_LENGTH - 1 + idx;
-            let lpc_pred_q14 = silk_lshift(
+            lpc_pred_arr[k] = silk_lshift(
                 silk_noise_shape_quantizer_short_prediction(
                     &ps_dd.s_lpc_q14,
                     ps_lpc_q14_idx,
@@ -449,47 +652,38 @@ pub fn silk_noise_shape_quantizer_del_dec(
                 ),
                 4,
             );
-
-            let mut tmp2 = silk_smlawb(ps_dd.diff_q14, ps_dd.s_ar2_q14[0], warping_q16);
-            let mut tmp1 = silk_smlawb(
-                ps_dd.s_ar2_q14[0],
-                silk_sub32_ovflw(ps_dd.s_ar2_q14[1], tmp2),
-                warping_q16,
-            );
-            ps_dd.s_ar2_q14[0] = tmp2;
-            let mut n_ar_q14 = silk_rshift(shaping_lpc_order, 1);
-            n_ar_q14 = silk_smlawb(n_ar_q14, tmp2, ar_shp_q13[0] as i32);
-            for j in (2..shaping_lpc_order as usize).step_by(2) {
-                tmp2 = silk_smlawb(
-                    ps_dd.s_ar2_q14[j - 1],
-                    silk_sub32_ovflw(ps_dd.s_ar2_q14[j], tmp1),
-                    warping_q16,
-                );
-                ps_dd.s_ar2_q14[j - 1] = tmp1;
-                n_ar_q14 = silk_smlawb(n_ar_q14, tmp1, ar_shp_q13[j - 1] as i32);
-                tmp1 = silk_smlawb(
-                    ps_dd.s_ar2_q14[j],
-                    silk_sub32_ovflw(ps_dd.s_ar2_q14[j + 1], tmp2),
-                    warping_q16,
-                );
-                ps_dd.s_ar2_q14[j] = tmp2;
-                n_ar_q14 = silk_smlawb(n_ar_q14, tmp2, ar_shp_q13[j] as i32);
-            }
-            ps_dd.s_ar2_q14[shaping_lpc_order as usize - 1] = tmp1;
-            n_ar_q14 = silk_smlawb(
-                n_ar_q14,
-                tmp1,
-                ar_shp_q13[shaping_lpc_order as usize - 1] as i32,
-            );
-
-            n_ar_q14 = silk_lshift(n_ar_q14, 1);
+            diff_arr[k] = ps_dd.diff_q14;
+        }
+        let mut n_ar_raw = [0i32; 4];
+        nsq_shape_filter_soa(
+            &mut sar_soa,
+            &diff_arr,
+            warping_q16,
+            ar_shp_q13,
+            shp_ord,
+            shp_base,
+            &mut n_ar_raw,
+        );
+        let smpl_idx = (*smpl_buf_idx as usize).min(DECISION_DELAY - 1);
+        for k in 0..n_states {
+            let ps_dd = &ps_del_dec[k];
+            let mut n_ar_q14 = silk_lshift(n_ar_raw[k], 1);
             n_ar_q14 = silk_smlawb(n_ar_q14, ps_dd.lf_ar_q14, tilt_q14);
             n_ar_q14 = silk_lshift(n_ar_q14, 2);
-
-            let smpl_idx = (*smpl_buf_idx as usize).min(DECISION_DELAY - 1);
+            n_ar_arr[k] = n_ar_q14;
             let mut n_lf_q14 = silk_smulwb(ps_dd.shape_q14[smpl_idx], lf_shp_q14);
             n_lf_q14 = silk_smlawt(n_lf_q14, ps_dd.lf_ar_q14, lf_shp_q14);
             n_lf_q14 = silk_lshift(n_lf_q14, 2);
+            n_lf_arr[k] = n_lf_q14;
+        }
+
+        // RD decision pass (per state; branchy — scalar).
+        for k in 0..n_states {
+            let ps_dd = &mut ps_del_dec[k];
+            let ps_ss = &mut ps_sample_state[k];
+            let lpc_pred_q14 = lpc_pred_arr[k];
+            let n_ar_q14 = n_ar_arr[k];
+            let n_lf_q14 = n_lf_arr[k];
 
             let tmp1_val = silk_sub_sat32(
                 silk_add32_ovflw(n_ltp_q14, lpc_pred_q14),
@@ -625,12 +819,15 @@ pub fn silk_noise_shape_quantizer_del_dec(
                 max_state.xq_q14 = min_state.xq_q14;
                 max_state.pred_q15 = min_state.pred_q15;
                 max_state.shape_q14 = min_state.shape_q14;
-                max_state.s_ar2_q14 = min_state.s_ar2_q14;
                 max_state.lf_ar_q14 = min_state.lf_ar_q14;
                 max_state.diff_q14 = min_state.diff_q14;
                 max_state.seed = min_state.seed;
                 max_state.seed_init = min_state.seed_init;
                 max_state.rd_q10 = min_state.rd_q10;
+                // s_ar2 lives in the SoA buffer during the loop — swap its column.
+                for j in 0..shp_ord {
+                    sar_soa[j][rd_max_ind] = sar_soa[j][rd_min_ind];
+                }
             }
 
             ps_sample_state[rd_max_ind][0] = ps_sample_state[rd_min_ind][1];
@@ -684,6 +881,13 @@ pub fn silk_noise_shape_quantizer_del_dec(
         }
         let smpl_idx = (*smpl_buf_idx as usize).min(DECISION_DELAY - 1);
         delayed_ga_q10[smpl_idx] = gain_q10;
+    }
+    // Transpose the cross-state shaping state back to the AoS structs (once), so
+    // the next subframe's scale_states and the final copy see the updated s_ar2.
+    for k in 0..n_states {
+        for j in 0..shp_ord {
+            ps_del_dec[k].s_ar2_q14[j] = sar_soa[j][k];
+        }
     }
     for k in 0..n_states {
         let ps_dd = &mut ps_del_dec[k];
