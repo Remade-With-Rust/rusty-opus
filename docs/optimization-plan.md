@@ -90,6 +90,32 @@ kernel itself (S5).
 
 ---
 
+## Status — the clean-vectorization seam is mined out (2026-07-08)
+
+Two fat data-parallel SILK kernels existed and both are **landed, byte-identical**:
+**S1c** (NSQ LPC prediction, +7–9%) and **S2** (warped-autocorrelation correlation,
++9%) → **SILK ~+12%, gap to libopus 3.1×→~2.9×**. Two candidates were correctly
+**ruled out by measurement**, not hunch: **S1d-lite** (NSQ shaping-dot — vectorized
+but flat, too thin a slice of a serial/branchy loop) and **S3** (Burg/find_lpc —
+ceiling probe showed the vectorizable inner loops are 1.5%; the rest is already-AVX2
+FIR + serial root-finding/recursion). The remaining SILK cost is **serial-by-nature**
+(NSQ shape+RD recurrence + Viterbi, LPC root-finding) — it does not yield to
+per-kernel SIMD. The two remaining levers are structural, not another dot-product:
+
+1. **S1d — cross-state NSQ SIMD** (~35% of SILK): the 4 del-dec states are
+   *independent* → vectorize across them (4 lanes), the libopus-1.5 approach.
+   Hard: data-dependent RD compare / seed / state-swap per sample. The only big
+   single-thread lever left.
+2. **R1 — frame/chunk parallelism** (the AAC +6× / Vorbis +5.3× structural move):
+   libopus is single-threaded per stream, so multi-core beats it wall-clock even at
+   2.9× slower per-thread. Opus carries inter-frame state (SILK LTP/NSQ/entropy,
+   CELT preemph/overlap) so exact frame-parallel isn't free like AAC/Vorbis —
+   chunked with primed state (PEAQ-gated) or per-stream in `rff`.
+
+Recommendation: **R1 (threads)** is the higher-value, better-precedented next move
+for wall-clock parity/win; **S1d** is the harder single-thread purist play. Both are
+their own focused campaign.
+
 ## The house
 
 ### Foundation — instruments (lay first, everything rests on it)
@@ -112,7 +138,7 @@ kernel itself (S5).
 | **S1d-lite** | **AVX2 shaping-filter dot** — tried & **REVERTED (flat)**. Same split trick as S2 (serial `s_ar2` state update + a vectorized `n_ar = Σ s_ar2[j]·ar_shp[j]` smlawb dot; byte-identical, unit-tested 200k cases, oracle unchanged). But the alternating same-binary A/B was flat (ON median 109.6 vs OFF 109.8, ON slightly *lower* 3/5). Why: the dot is too small a slice of shape+rd (dominated by the serial state update + branchy 2-candidate RD), and the loop split added store/reload overhead that offset the SIMD gain on a small fraction. **The vectorization boundary: split-and-SIMD wins only when the vectorized part is a substantial, cleanly-separable fraction (S1c: only vec op + loop-carried dep; S2: half of a 17%-SILK kernel) — not a thin slice inside a serial/branchy loop.** | flat | ⊘ reverted |
 | **S1d** | **NSQ cross-state AVX2** (the big one, still open): vectorize the whole `for k in 0..n_states` inner loop across the 4 *independent* del-dec states (libopus 1.5's AVX2 NSQ shape — 4 states = 4 lanes). Branchy (rd compare, seed, state swap) → hard; the largest remaining single-thread SILK lever (~35% of SILK). The right frame is cross-state lanes, NOT splitting one state's inner math (S1d-lite proved that's flat). | 1.5–2.5× on NSQ | ☐ |
 | **S2** | **warped autocorrelation** (`silk_warped_autocorrelation_fix`) — decomposition showed it's **87% of noise-shape = 17% of SILK** (sine-window 0.6%, negligible). The warped all-pass state update is a serial recurrence, but the **correlation accumulation splits out cleanly**: `corr[i] += (state[i]·state[0])>>16` is a vector×scalar i64 MAC over the order dim. Split the fused loop → AVX2 the MAC (reuses the S1c i64/asr16 pattern; `warped_corr_update_avx2`, own `RUSTY_OPUS_NO_WARP_AVX2` knob). **Result: +9% SILK, +9.6% Hybrid, BYTE-IDENTICAL** (200k-case unit test + oracle unchanged). | landed | ✅ 2026-07-08 |
-| **S3** | **find_pred_coefs (14.5%)** — decomposed: **`silk_find_lpc_fix` is 13.8% of SILK** (87% of the stage; ltp_analysis_filter 0.4%, LTP correlation already AVX2). Inside find_lpc the LPC is **`silk_burg_modified_fix` (Burg's method), scalar/no-SIMD** — its hot loops (initial C_first/C_last correlation ~L241-262, and the O(d²) reflection-coef MAC updates ~L285-298: 4 parallel `silk_smlawb` accumulations over the signal) are vectorizable, and **libopus ships `silk_burg_modified_sse4_1`**. Large, complex, multi-loop kernel with partial serial structure (rc recursion) — a focused brick like S1d. **This is the clearest remaining un-SIMD'd SILK target after NSQ.** | ~1.1–1.15× SILK | ☐ next |
+| **S3** | **find_pred_coefs (14.5%) — RULED OUT by ceiling probe.** `silk_find_lpc_fix` is 13.8% of SILK, but it's **diffuse, not one fat kernel**: (a) Burg's inner O(d²) update loops — the obvious SIMD target — are only **1.5% of SILK** (ceiling-probe scope; d²/2 iterations of *short* k-loops, k=0..n, dominated by per-(n,s) scalar setup); (b) `silk_lpc_analysis_filter` (the interp-loop FIR, ×4) is **already AVX2**; (c) the rest is `silk_a2nlsf` root-finding, `nlsf2a` polynomial eval, and Burg's rc recursion (variable per-k shifts) — **serial/iterative, not vectorizable**. Vectorizing Burg's inner loops would gain ≤0.75% for ~150 risky lines. **The probe saved the brick.** | <1% | ⊘ not viable |
 | **S4** | **pitch analysis (4.7%)**: correlation kernels share machinery with S3. | small | ☐ |
 | **S5** | **Rate-loop rerun cut (~12% of NSQ)**: seed the gain iteration from the previous frame's converged gain / predict bits before re-running NSQ. If prediction only reorders iterations → byte-identical; if it changes final gains → PEAQ gate. | up to ~7% SILK | ☐ |
 
