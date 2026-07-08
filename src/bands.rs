@@ -2250,6 +2250,13 @@ pub fn quant_all_bands(
         let e_band_i1 = e_bands[i + 1] as usize;
         let offset = m_val * e_band_i;
         let n = m_val * (e_band_i1 - e_band_i);
+        // A malformed frame (inconsistent LM / band layout vs the buffer) can push
+        // this band past the frequency buffer; bail instead of slicing out of
+        // bounds (decode-path DoS). Valid streams never exceed it, so it's inert.
+        let y_len = y.as_deref().map_or(usize::MAX, <[f32]>::len);
+        if offset + n > x.len() || offset + n > y_len {
+            break;
+        }
         let last = i == end - 1;
 
         let tell = tell_frac_inline!(rc);
@@ -2734,6 +2741,12 @@ pub fn denormalise_bands(
         for i in start..end {
             let base = c * frame_size + ((m.e_bands[i] as usize) << lm);
             let n = ((m.e_bands[i + 1] - m.e_bands[i]) as usize) << lm;
+            // A malformed frame (bad LM/band layout) can push this band past the
+            // buffers; bail instead of slicing OOB (decode-path DoS). Inert for
+            // valid streams.
+            if base + n > x.len() || base + n > freq.len() {
+                break;
+            }
             let band_log = band_e[c * m.nb_ebands + i];
 
             // Match C: celt_exp2_db(MIN32(32.f, lg)) — cap gain to prevent overflow
