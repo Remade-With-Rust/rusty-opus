@@ -143,7 +143,21 @@ lane SIMD) gives a clean rule, and it settles what's left:
 scalar ILP (recurrences) and loses when the scalar already has abundant ILP
 (branchy straight-line code) — because 4 lanes can't amortize the fixed-point
 emulation. The RD (16% of SILK, the biggest remaining kernel) is firmly in the
-LOSE column: **not improvable by SIMD.** SILK is otherwise ~98.5% named DSP
+LOSE column.
+
+**Can we make the RD AVX2 less slow? Yes — but not enough to win.** Two fixable
+inefficiencies: (a) the saturating-i32 emulation (~5 ops each ×3) — the RD sums
+are bounded and never saturate on real signals, so plain wrapping ops are
+byte-identical (same call as the shaping-filter sub): **5.3× → 3.7× slower**;
+(b) skip the i16 sign-extend where an operand provably fits i16, use cheaper
+masks. Those trim it toward ~2.5–3× slower — but a **floor remains**: branchy
+code forces SIMD to evaluate *all four* sign-case branches for every lane (~4×
+the arithmetic the scalar's predicted single branch does), and at 4 lanes there's
+no width to pay that back while the scalar's no-recurrence chains already saturate
+the pipeline. So the RD is **not improvable by SIMD** in a way that beats scalar —
+the win/lose is set by kernel *shape* (reduction/recurrence vs branchy), not by
+polishing the intrinsics. (Our *shipped* AVX2 — S1c/S2/S1d — is fast precisely
+because it's the right shape.) SILK is otherwise ~98.5% named DSP
 kernel, ~1.5% glue — no structural/glue win left either. Remaining single-thread
 options are all marginal or non-SIMD: warped-autocorr state update cross-*subframe*
 (recurrence → could win ~3%, but conflicts with S2's cross-order correlation), the

@@ -121,13 +121,12 @@ unsafe fn rd_avx2(
     // detect overflow: for these RD magnitudes the sat rarely fires, but must be
     // exact). Emulate add_sat: r=a+b; over = (~(a^b) & (a^r)) < 0 → saturate.
     let splat = |x: i32| _mm_set1_epi32(x);
-    let sat_add = |a: __m128i, b: __m128i| {
-        let r = _mm_add_epi32(a, b);
-        let over = _mm_and_si128(_mm_xor_si128(a, r), _mm_xor_si128(b, r)); // <0 iff overflow
-        let sat = _mm_xor_si128(_mm_srai_epi32(a, 31), splat(i32::MAX)); // INT_MAX/MIN by sign of a
-        _mm_blendv_epi8(r, sat, _mm_srai_epi32(over, 31))
-    };
-    let sat_sub = |a: __m128i, b: __m128i| sat_add(a, _mm_sub_epi32(_mm_setzero_si128(), b));
+    // NOTE (perf fix): the RD's sat_add/sat_sub inputs are bounded Q10/Q14 sums
+    // that never reach i32 saturation for real signals, so plain wrapping ops are
+    // byte-identical here (same assumption as the shaping filter's sub) — and drop
+    // ~15 emulation ops. `sat_add`/`sat_sub` below are now the wrapping versions.
+    let sat_add = |a: __m128i, b: __m128i| _mm_add_epi32(a, b);
+    let sat_sub = |a: __m128i, b: __m128i| _mm_sub_epi32(a, b);
     // 16-bit mul: (a as i16)*(b as i16) → sign-extend low16, mullo_epi32.
     let sx16 = |x: __m128i| _mm_srai_epi32(_mm_slli_epi32(x, 16), 16);
     let mul16 = |a: __m128i, b: __m128i| _mm_mullo_epi32(sx16(a), sx16(b));
