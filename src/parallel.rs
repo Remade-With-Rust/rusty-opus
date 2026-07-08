@@ -156,6 +156,56 @@ pub fn encode_serial(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> Ve
     packets
 }
 
+/// **R1a — per-stream parallelism (byte-identical).** Encode several *independent*
+/// PCM streams concurrently, one serial encoder per worker. Each stream's output
+/// is exactly its serial encode (no chunk seams), so this is **bit-identical** to
+/// encoding them one-by-one — the right tool for batch/many-stream workloads
+/// (and for short streams too small to split internally with [`encode_parallel`]).
+///
+/// `streams[i]` is `(config, pcm, frame_size)`; returns `out[i]` = that stream's
+/// packets. Order preserved. Uses a bounded pool (`threads`, or all cores) so a
+/// thousand tiny streams don't spawn a thousand threads.
+pub fn encode_streams(
+    streams: &[(ParallelConfig, &[f32], usize)],
+    threads: usize,
+) -> Vec<Vec<Vec<u8>>> {
+    let n = streams.len();
+    let mut out: Vec<Vec<Vec<u8>>> = (0..n).map(|_| Vec::new()).collect();
+    if n == 0 {
+        return out;
+    }
+    let workers = if threads == 0 {
+        std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
+    } else {
+        threads
+    }
+    .max(1)
+    .min(n);
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out_slots: Vec<std::sync::Mutex<Option<Vec<Vec<u8>>>>> =
+        (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let next = &next;
+            let out_slots = &out_slots;
+            scope.spawn(move || loop {
+                let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if idx >= n {
+                    break;
+                }
+                let (cfg, pcm, frame_size) = &streams[idx];
+                let pkts = encode_serial(cfg, pcm, *frame_size);
+                *out_slots[idx].lock().unwrap() = Some(pkts);
+            });
+        }
+    });
+    for (slot, dst) in out_slots.into_iter().zip(out.iter_mut()) {
+        *dst = slot.into_inner().unwrap().unwrap_or_default();
+    }
+    out
+}
+
 fn new_encoder(cfg: &ParallelConfig) -> OpusEncoder {
     let mut enc = OpusEncoder::new(cfg.sample_rate, cfg.channels, cfg.application)
         .expect("opus encoder init");

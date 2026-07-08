@@ -4,7 +4,7 @@
 //!
 //!   cargo test --release --test parallel_encode -- --ignored --nocapture
 
-use opus_rs::parallel::{encode_parallel, encode_serial, ParallelConfig};
+use opus_rs::parallel::{encode_parallel, encode_serial, encode_streams, ParallelConfig};
 use opus_rs::{Application, OpusDecoder};
 
 struct Lcg(u64);
@@ -63,6 +63,32 @@ fn decode_all(rate: i32, channels: usize, pkts: &[Vec<u8>], frame: usize) -> usi
         n += dec.decode(p, frame, &mut out).expect("decode");
     }
     n
+}
+
+/// R1a: per-stream parallelism must be BYTE-IDENTICAL to serial (independent
+/// streams, no chunk seams).
+#[test]
+fn per_stream_byte_identical() {
+    let (rate, channels) = (16000u32, 1usize);
+    let frame = rate as usize / 50;
+    let mut cfg = ParallelConfig::new(rate as i32, channels, Application::Voip);
+    cfg.bitrate_bps = 24_000;
+    // Several distinct streams (vary the seed → distinct content).
+    let clips: Vec<Vec<f32>> = (0..7)
+        .map(|k| {
+            let mut v = synth_speech(rate, 3.0);
+            for x in v.iter_mut() {
+                *x = (*x + 0.01 * k as f32).clamp(-0.98, 0.98);
+            }
+            v
+        })
+        .collect();
+    let streams: Vec<_> = clips.iter().map(|c| (cfg, c.as_slice(), frame)).collect();
+    let par = encode_streams(&streams, 0);
+    for (i, clip) in clips.iter().enumerate() {
+        let serial = encode_serial(&cfg, clip, frame);
+        assert_eq!(par[i], serial, "stream {i}: per-stream parallel != serial");
+    }
 }
 
 #[test]
