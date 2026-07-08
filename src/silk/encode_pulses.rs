@@ -26,6 +26,7 @@ pub fn silk_encode_pulses(
     pulses: &[i8],
     frame_length: usize,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkCode);
     let mut pulses_comb = [0i32; 8];
 
     let mut abs_pulses = [0i32; MAX_FRAME_LENGTH + SHELL_CODEC_FRAME_LENGTH];

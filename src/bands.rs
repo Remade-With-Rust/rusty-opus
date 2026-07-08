@@ -2217,6 +2217,7 @@ pub fn quant_all_bands(
     disable_inv: bool,
     seed: &mut u32,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltPvq);
     let mut balance_val = *balance;
     let b_blocks = if short_blocks { 1 << lm } else { 1 };
     let c_channels = if y.is_some() { 2 } else { 1 };
@@ -2556,6 +2557,7 @@ pub fn compute_band_energies(
     channels: usize,
     lm: usize,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltBands);
     let frame_size = m.short_mdct_size << lm;
 
     #[cfg(target_arch = "x86_64")]
@@ -2626,6 +2628,7 @@ pub fn normalise_bands(
     channels: usize,
     m_val: usize,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltBands);
     let lm = m_val.trailing_zeros() as usize;
     let frame_size = m.short_mdct_size << lm;
     #[cfg(target_arch = "x86_64")]

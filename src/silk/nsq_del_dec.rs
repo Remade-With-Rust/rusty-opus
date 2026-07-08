@@ -558,6 +558,7 @@ pub fn silk_nsq_del_dec(
     lambda_q10: i32,
     ltp_scale_q14: i32,
 ) -> i32 {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkNsq);
     let mut x_sc_q10 = [0i32; MAX_SUB_FRAME_LENGTH];
     let mut delayed_ga_q10 = [0i32; DECISION_DELAY];
     let mut s_ltp_q15 = [0i32; LTP_MEM_LENGTH_MS * MAX_FS_KHZ + MAX_FRAME_LENGTH];

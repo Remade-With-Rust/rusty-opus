@@ -33,6 +33,7 @@ pub fn silk_find_pitch_lags_fix(
     x: &[i16],
     _arch: i32,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkPitch);
     let la_pitch = ps_enc.s_cmn.la_pitch as usize;
     let frame_length = ps_enc.s_cmn.frame_length as usize;
     let ltp_mem_length = ps_enc.s_cmn.ltp_mem_length as usize;

@@ -11,6 +11,7 @@ pub fn silk_encode_indices(
     encode_lbrr: bool,
     cond_coding: i32,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkCode);
     let ps_indices = if encode_lbrr {
         ps_enc_c.s_cmn.indices_lbrr[frame_index]
     } else {

@@ -56,6 +56,7 @@ fn silk_vad_get_noise_levels(p_x: &[i32; VAD_N_BANDS], ps_silk_vad: &mut SilkVAD
 }
 
 pub fn silk_vad_get_sa_q8(ps_enc: &mut SilkEncoderState, p_in: &[i16], _n_in: usize) -> i32 {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkVad);
     let ps_silk_vad = &mut ps_enc.s_cmn.s_vad;
 
     let mut x_nrg = [0i32; VAD_N_BANDS];

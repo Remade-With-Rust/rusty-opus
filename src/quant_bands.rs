@@ -198,6 +198,7 @@ pub fn quant_coarse_energy_advanced(
     loss_rate: i32,
     lfe: bool,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltCoarse);
     let mut intra = force_intra
         || (!two_pass
             && *delayed_intra > 2.0 * channels as f32 * (end.saturating_sub(start)) as f32
@@ -393,6 +394,7 @@ pub fn quant_fine_energy(
     enc: &mut RangeCoder,
     channels: usize,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltFine);
     for i in start..end {
         for c in 0..channels {
             let bits = fine_quant[i];

@@ -104,6 +104,7 @@ pub fn clt_compute_allocation(
     prev: i32,
     signal_bandwidth: i32,
 ) -> i32 {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltAlloc);
     total = max(total, 0);
     let nb_ebands = m.nb_ebands;
     let mut skip_start = start;

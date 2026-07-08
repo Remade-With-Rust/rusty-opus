@@ -71,6 +71,7 @@ impl MdctLookup {
         shift: usize,
         stride: usize,
     ) {
+        let _prof = crate::prof::scope(crate::prof::Stage::CeltMdct);
         let st = self.kfft[shift]
             .as_ref()
             .expect("FFT state not initialized");

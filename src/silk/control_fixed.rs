@@ -19,6 +19,7 @@ pub fn silk_find_pred_coefs_fix(
     x_buf_full: &[i16],
     cond_coding: i32,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkPred);
     let mut inv_gains_q16 = [0i32; MAX_NB_SUBFR];
     let mut local_gains = [0i32; MAX_NB_SUBFR];
     let mut nlsf_q15 = [0i16; MAX_LPC_ORDER];

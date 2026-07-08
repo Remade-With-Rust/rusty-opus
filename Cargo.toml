@@ -7,6 +7,11 @@ description = "pure Rust implementation of Opus codec"
 license = "BSD-3-Clause"
 repository = "https://github.com/restsend/opus-rs"
 
+[features]
+# Dev-only stage profiler (src/prof.rs): per-stage tick buckets + dump().
+# OFF (default) = zero-cost ZST guards, release builds byte-identical.
+profile = []
+
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1"

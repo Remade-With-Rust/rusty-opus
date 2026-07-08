@@ -21,6 +21,7 @@ pub fn silk_nsq(
     lambda_q10: i32,
     ltp_scale_q14: i32,
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkNsq);
     let mut lag: usize;
     let mut start_idx: usize;
     let mut a_q12: &[i16];

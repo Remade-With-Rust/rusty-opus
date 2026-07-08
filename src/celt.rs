@@ -138,6 +138,7 @@ fn transient_analysis(
     tmp: &mut [f32],
     tmp2: &mut [f32],
 ) -> bool {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltTransient);
     let mut mask_metric = 0.0f32;
     let mut forward_decay = 0.0625f32;
 
@@ -337,6 +338,7 @@ fn tf_analysis(
     tf_estimate: f32,
     tf_chan: usize,
 ) -> i32 {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltTf);
     debug_assert!(len <= MAX_NB_EBANDS);
     let mut metric = [0i32; MAX_NB_EBANDS];
     let mut tmp = [0.0f32; MAX_TF_TMP];
@@ -1144,6 +1146,7 @@ fn run_prefilter(
     analysis: &AnalysisInfo,
     loss_rate: i32,
 ) -> (bool, f32, usize) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltPrefilter);
     let max_period = COMBFILTER_MAXPERIOD;
     let min_period = COMBFILTER_MINPERIOD;
     let buf_stride = frame_size + overlap;
@@ -1421,6 +1424,7 @@ fn alloc_trim_analysis(
     surround_trim: f32,
     equiv_rate: i32,
 ) -> i32 {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltAlloc);
     let mut trim = 5.0f32;
     if equiv_rate < 64000 {
         trim = 4.0;
@@ -1503,6 +1507,7 @@ fn dynalloc_analysis_simple(
     offsets: &mut [i32],
     cap: &[i32],
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::CeltAlloc);
     offsets.fill(0);
     if effective_bytes < (30 + 5 * lm) {
         return;
@@ -1731,6 +1736,7 @@ impl CeltEncoder {
             lm = 0;
         }
 
+        let _prof_pre = crate::prof::scope(crate::prof::Stage::CeltPreemph);
         let syn_mem_size = 2048 + overlap;
         for c in 0..channels {
             let channel_offset = c * syn_mem_size;
@@ -1767,6 +1773,7 @@ impl CeltEncoder {
         let mut tf_chan = 0;
         let mut weak_transient = false;
 
+        drop(_prof_pre);
         let is_transient = if self.complexity >= 1 {
             transient_analysis(
                 in_buf,
@@ -2247,6 +2254,7 @@ impl CeltEncoder {
         );
 
         if resynth {
+            let _prof = crate::prof::scope(crate::prof::Stage::CeltSynth);
             let band_amp_synth = &mut self.w_band_amp_synth[..nb_ebands * channels];
             log2amp(mode, nb_ebands, band_amp_synth, &self.old_band_e, channels);
             self.w_freq_synth[..frame_size * channels].fill(0.0);

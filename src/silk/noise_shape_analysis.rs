@@ -105,6 +105,7 @@ pub fn silk_noise_shape_analysis_fix(
     pitch_res: &[i16],
     x: &[i16],
 ) {
+    let _prof = crate::prof::scope(crate::prof::Stage::SilkNoise);
     let n_samples: usize;
     let n_segs: usize;
     let mut q_nrg: i32;

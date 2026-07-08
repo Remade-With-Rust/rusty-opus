@@ -10,6 +10,7 @@ pub mod kiss_fft;
 pub mod mdct;
 pub mod modes;
 pub mod pitch;
+pub mod prof;
 pub mod pvq;
 pub mod quant_bands;
 pub mod range_coder;
@@ -328,6 +329,7 @@ impl OpusEncoder {
         frame_size: usize,
         output: &mut [u8],
     ) -> Result<usize, &'static str> {
+        let _prof_total = crate::prof::scope(crate::prof::Stage::Total);
         if output.len() < 2 {
             return Err("Output buffer too small");
         }
@@ -470,6 +472,7 @@ impl OpusEncoder {
 
             let cutoff_hz = silk_log2lin(silk_rshift(self.variable_hp_smth2_q15, 8));
 
+            let _prof_rs = crate::prof::scope(crate::prof::Stage::Resample);
             let required_size = frame_size * self.channels;
             self.buf_filtered.resize(required_size, 0);
             if self.application == Application::Voip {
@@ -562,6 +565,8 @@ impl OpusEncoder {
             } else {
                 input_i16
             };
+
+            drop(_prof_rs);
 
             let mut pn_bytes = 0;
 
