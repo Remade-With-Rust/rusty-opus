@@ -2562,19 +2562,6 @@ impl CeltDecoder {
             lm = 0;
         }
 
-        let tell = rc.tell();
-        let mut silence = false;
-        if tell >= total_bits {
-            silence = true;
-        } else if tell == 1 {
-            silence = rc.decode_bit_logp(15);
-        }
-
-        if silence {
-            pcm[..frame_size * cc].fill(0.0);
-            return frame_size;
-        }
-
         // libopus celt_decoder.c:953: `if (C==1) oldBandE[i]=MAX(oldBandE[i],
         // oldBandE[nbEBands+i])` before the coarse-energy decode — a mono packet in
         // a stereo decoder predicts its single channel from the MAX of both
@@ -2584,6 +2571,24 @@ impl CeltDecoder {
             for i in 0..nb_ebands {
                 self.old_band_e[i] = self.old_band_e[i].max(self.old_band_e[nb_ebands + i]);
             }
+        }
+
+        let tell = rc.tell();
+        let mut silence = false;
+        if tell >= total_bits {
+            silence = true;
+        } else if tell == 1 {
+            silence = rc.decode_bit_logp(15);
+        }
+        if silence {
+            // libopus: "Pretend we've read all the remaining bits" — every
+            // downstream budget check then skips its entropy reads naturally, the
+            // whole pipeline still runs (decode_mem shift, overlap fade-out via a
+            // zeroed spectrum, postfilter/deemph, frame-end energy bookkeeping).
+            // The old early-return left the decoder state one frame stale and the
+            // energy prediction hot -> the next loud frame decoded ~2^15 too loud
+            // and railed the output.
+            rc.nbits_total += total_bits - rc.tell();
         }
 
         let mut pf_on = false;
@@ -2819,21 +2824,33 @@ impl CeltDecoder {
             );
         }
 
+        // libopus celt_decoder.c:1107: silence floors the coded channels' energy to
+        // -28 (so the next frame's inter prediction starts from "very quiet") and
+        // renders a zero spectrum — the frame's output is just the MDCT overlap
+        // fade-out of the previous frame.
+        if silence {
+            for i in 0..channels * nb_ebands {
+                self.old_band_e[i] = -28.0;
+            }
+        }
+
         // Recompute band_amp after unquant_energy_finalise, which adjusts old_band_e.
         // (Mirrors the encoder's resynth path: log2amp is called after quant_energy_finalise.)
         log2amp(mode, nb_ebands, band_amp, &self.old_band_e, channels);
         self.w_freq[..frame_size * channels].fill(0.0);
         let freq = &mut self.w_freq[..frame_size * channels];
-        denormalise_bands(
-            mode,
-            x,
-            freq,
-            band_amp,
-            start_band,
-            end_band,
-            channels,
-            (1 << lm) as usize,
-        );
+        if !silence {
+            denormalise_bands(
+                mode,
+                x,
+                freq,
+                band_amp,
+                start_band,
+                end_band,
+                channels,
+                (1 << lm) as usize,
+            );
+        }
         // Always trace freq and band_amp for comparison
 
         let (shift, b) = if short_blocks {
