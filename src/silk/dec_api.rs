@@ -17,6 +17,11 @@ pub struct SilkDecoder {
     pub n_channels_internal: i32,
 
     pub prev_decode_only_middle: i32,
+
+    // Stereo MS->LR reconstruction state (libopus stereo_dec_state).
+    pub s_stereo_pred_prev_q13: [i32; 2],
+    pub s_stereo_mid: [i16; 2],
+    pub s_stereo_side: [i16; 2],
 }
 
 impl Default for SilkDecoder {
@@ -32,6 +37,9 @@ impl SilkDecoder {
             n_channels_api: 1,
             n_channels_internal: 1,
             prev_decode_only_middle: 0,
+            s_stereo_pred_prev_q13: [0; 2],
+            s_stereo_mid: [0; 2],
+            s_stereo_side: [0; 2],
         };
         silk_init_decoder(&mut dec.channel_state[0]);
         silk_init_decoder(&mut dec.channel_state[1]);
