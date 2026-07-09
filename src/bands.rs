@@ -2108,6 +2108,14 @@ pub fn quant_band_stereo(
             x[1] = mx1 - sy1;
             y[0] = mx0 + sy0;
             y[1] = mx1 + sy1;
+            // libopus applies the stereo-inversion negation for ALL N (its N==2
+            // case falls through to the shared `if(inv) Y[j]=-Y[j]`); our early
+            // return here dropped it, so intensity n=2 bands with inv=1 kept the
+            // wrong (un-negated) right channel.
+            if sctx.inv {
+                y[0] = -y[0];
+                y[1] = -y[1];
+            }
         }
         return cm;
     }
