@@ -1,6 +1,10 @@
 use crate::range_coder::RangeCoder;
 use crate::silk::decoder_structs::SilkDecoderState;
 use crate::silk::define::*;
+use crate::silk::macros::{
+    silk_div32_16, silk_lshift, silk_rshift_round, silk_sat16, silk_smlabb, silk_smlawb,
+    silk_smulbb, silk_smulwb,
+};
 use crate::silk::nlsf_unpack::silk_nlsf_unpack;
 use crate::silk::tables::*;
 
@@ -107,14 +111,139 @@ pub fn silk_decode_indices(
     ps_dec.indices.seed = ps_range_dec.decode_icdf(&SILK_UNIFORM4_ICDF, 8) as i8;
 }
 
-pub fn silk_stereo_decode_pred(ps_range_dec: &mut RangeCoder) {
-    ps_range_dec.decode_icdf(&SILK_STEREO_PRED_JOINT_ICDF, 8);
-    for _ in 0..2 {
-        ps_range_dec.decode_icdf(&SILK_UNIFORM3_ICDF, 8);
-        ps_range_dec.decode_icdf(&SILK_UNIFORM5_ICDF, 8);
+/// Decode the mid/side stereo predictors (RFC 6716 §3; libopus
+/// silk_stereo_decode_pred). Returns `pred_Q13[2]` (Q13). Previously this only
+/// consumed the bits and discarded the predictors — needed for the stereo
+/// MS->LR reconstruction.
+pub fn silk_stereo_decode_pred(ps_range_dec: &mut RangeCoder) -> [i32; 2] {
+    let mut ix = [[0i32; 3]; 2];
+    let n = ps_range_dec.decode_icdf(&SILK_STEREO_PRED_JOINT_ICDF, 8) as i32;
+    ix[0][2] = n / 5;
+    ix[1][2] = n - 5 * ix[0][2];
+    for j in 0..2 {
+        ix[j][0] = ps_range_dec.decode_icdf(&SILK_UNIFORM3_ICDF, 8) as i32;
+        ix[j][1] = ps_range_dec.decode_icdf(&SILK_UNIFORM5_ICDF, 8) as i32;
+    }
+    // Dequantize
+    let mut pred_q13 = [0i32; 2];
+    for j in 0..2 {
+        ix[j][0] += 3 * ix[j][2];
+        let low_q13 = SILK_STEREO_PRED_QUANT_Q13[ix[j][0] as usize] as i32;
+        // step = SMULWB(quant[i+1]-quant[i], SILK_FIX_CONST(0.5/STEREO_QUANT_SUB_STEPS, 16))
+        //      = SMULWB(delta, round(0.1 * 65536) = 6554)
+        let step_q13 = silk_smulwb(
+            SILK_STEREO_PRED_QUANT_Q13[ix[j][0] as usize + 1] as i32 - low_q13,
+            6554,
+        );
+        pred_q13[j] = silk_smlabb(low_q13, step_q13, 2 * ix[j][1] + 1);
+    }
+    // Subtract second predictor from the first (helps when applying)
+    pred_q13[0] -= pred_q13[1];
+    pred_q13
+}
+
+/// Adaptive Mid/Side -> Left/Right (libopus silk_stereo_MS_to_LR). `x1` is the
+/// mid (becomes left), `x2` the side (becomes right); both have 2 samples of
+/// history at the front (indices 0,1) and `frame_length` decoded samples after.
+/// `state` carries `pred_prev_q13[2]`, `s_mid[2]`, `s_side[2]` across frames.
+pub fn silk_stereo_ms_to_lr(
+    pred_prev_q13: &mut [i32; 2],
+    s_mid: &mut [i16; 2],
+    s_side: &mut [i16; 2],
+    x1: &mut [i16],
+    x2: &mut [i16],
+    pred_q13: &[i32; 2],
+    fs_khz: i32,
+    frame_length: usize,
+) {
+    // Buffer the 2-sample history and stash this frame's tail for next time.
+    x1[0] = s_mid[0];
+    x1[1] = s_mid[1];
+    x2[0] = s_side[0];
+    x2[1] = s_side[1];
+    s_mid[0] = x1[frame_length];
+    s_mid[1] = x1[frame_length + 1];
+    s_side[0] = x2[frame_length];
+    s_side[1] = x2[frame_length + 1];
+
+    let interp_len = (STEREO_INTERP_LEN_MS as i32 * fs_khz) as usize;
+    let denom_q16 = silk_div32_16(1 << 16, STEREO_INTERP_LEN_MS as i32 * fs_khz);
+    let mut pred0_q13 = pred_prev_q13[0];
+    let mut pred1_q13 = pred_prev_q13[1];
+    let delta0_q13 =
+        silk_rshift_round(silk_smulbb(pred_q13[0] - pred_prev_q13[0], denom_q16), 16);
+    let delta1_q13 =
+        silk_rshift_round(silk_smulbb(pred_q13[1] - pred_prev_q13[1], denom_q16), 16);
+
+    for n in 0..frame_length {
+        if n < interp_len {
+            pred0_q13 += delta0_q13;
+            pred1_q13 += delta1_q13;
+        } else {
+            pred0_q13 = pred_q13[0];
+            pred1_q13 = pred_q13[1];
+        }
+        // sum = LSHIFT( ADD_LSHIFT(x1[n]+x1[n+2], x1[n+1], 1), 9 )  Q11
+        let mut sum = silk_lshift(
+            (x1[n] as i32 + x1[n + 2] as i32) + silk_lshift(x1[n + 1] as i32, 1),
+            9,
+        );
+        sum = silk_smlawb(silk_lshift(x2[n + 1] as i32, 8), sum, pred0_q13); // Q8
+        sum = silk_smlawb(sum, silk_lshift(x1[n + 1] as i32, 11), pred1_q13); // Q8
+        x2[n + 1] = silk_sat16(silk_rshift_round(sum, 8)) as i16;
+    }
+    pred_prev_q13[0] = pred_q13[0];
+    pred_prev_q13[1] = pred_q13[1];
+
+    // Convert to left/right
+    for n in 0..frame_length {
+        let sum = x1[n + 1] as i32 + x2[n + 1] as i32;
+        let diff = x1[n + 1] as i32 - x2[n + 1] as i32;
+        x1[n + 1] = silk_sat16(sum) as i16;
+        x2[n + 1] = silk_sat16(diff) as i16;
     }
 }
 
 pub fn silk_stereo_decode_mid_only(ps_range_dec: &mut RangeCoder) -> bool {
     ps_range_dec.decode_icdf(&SILK_STEREO_ONLY_CODE_MID_ICDF, 8) != 0
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+
+    /// Bit-exact vs libopus silk_stereo_MS_to_LR (reference output captured from
+    /// the actual C function with this exact input).
+    #[test]
+    fn ms_to_lr_matches_libopus() {
+        let mut pred_prev = [500i32, -300];
+        let mut s_mid = [10i16, -20];
+        let mut s_side = [5i16, -8];
+        let fl = 160usize;
+        let fs = 16;
+        let mut x1 = [0i16; 164];
+        let mut x2 = [0i16; 164];
+        for i in 0..fl {
+            x1[i + 2] = (37 * (i as i32 + 1) % 1000 - 400) as i16;
+            x2[i + 2] = ((i as i32 * 13) % 500 - 250) as i16;
+        }
+        let pred = [1200i32, -700];
+        silk_stereo_ms_to_lr(
+            &mut pred_prev,
+            &mut s_mid,
+            &mut s_side,
+            &mut x1,
+            &mut x2,
+            &pred,
+            fs,
+            fl,
+        );
+        let idx = [0usize, 1, 2, 127, 128, 129, 158, 159];
+        let l: Vec<i16> = idx.iter().map(|&i| x1[i + 1]).collect();
+        let r: Vec<i16> = idx.iter().map(|&i| x2[i + 1]).collect();
+        assert_eq!(l, vec![-33, -616, -571, 204, 258, 310, 264, 316]);
+        assert_eq!(r, vec![-7, -110, -81, 394, 414, 436, 628, 650]);
+        assert_eq!(s_mid, [483, 520]);
+        assert_eq!(s_side, [-196, -183]);
+    }
 }

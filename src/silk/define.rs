@@ -1,6 +1,9 @@
 pub const ENCODER_NUM_CHANNELS: usize = 2;
 pub const DECODER_NUM_CHANNELS: usize = 2;
 
+/// Stereo predictor interpolation length in ms (libopus STEREO_INTERP_LEN_MS).
+pub const STEREO_INTERP_LEN_MS: i32 = 8;
+
 pub const SILK_NO_ERROR: i32 = 0;
 
 pub const MAX_FRAMES_PER_PACKET: usize = 3;

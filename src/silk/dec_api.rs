@@ -146,7 +146,7 @@ impl SilkDecoder {
                     for n in 0..n_channels {
                         if self.channel_state[n].lbrr_flags[i] != 0 {
                             if n_channels == 2 && n == 0 {
-                                silk_stereo_decode_pred(range_dec);
+                                let _ = silk_stereo_decode_pred(range_dec);
                                 if self.channel_state[1].lbrr_flags[i] == 0 {
                                     silk_stereo_decode_mid_only(range_dec);
                                 }
@@ -180,7 +180,10 @@ impl SilkDecoder {
 
         let frame_index = self.channel_state[0].n_frames_decoded as usize;
         if self.n_channels_internal == 2 && lost_flag == FLAG_DECODE_NORMAL {
-            silk_stereo_decode_pred(range_dec);
+            // Predictors decoded here; consumed by the (upcoming) unified stereo
+            // MS->LR reconstruction. Bits must be read to keep the range coder
+            // in sync regardless.
+            let _ = silk_stereo_decode_pred(range_dec);
             if self.channel_state[1].vad_flags[frame_index] == 0 {
                 silk_stereo_decode_mid_only(range_dec);
             }
