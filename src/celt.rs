@@ -2807,6 +2807,9 @@ impl CeltDecoder {
             channels,
         );
         if anti_collapse_on {
+            // libopus passes `end`, not nbEBands: for narrower bandwidths (e.g.
+            // SWB end=19) anti-collapsing the uncoded bands would burn PRNG draws
+            // and desync the noise-fill seed for every subsequent frame.
             self.rng = crate::bands::anti_collapse(
                 mode,
                 x,
@@ -2815,7 +2818,7 @@ impl CeltDecoder {
                 channels,
                 frame_size,
                 start_band,
-                nb_ebands,
+                end_band,
                 &self.old_band_e,
                 &self.old_band_e2,
                 &self.old_band_e3,
