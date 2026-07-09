@@ -785,6 +785,10 @@ pub struct OpusDecoder {
     // from the aux at the next primary (stereo) CELT/Hybrid packet, so the MDCT
     // overlap-add is continuous across the mono->stereo switch.
     prev_used_aux: bool,
+    // libopus st->prev_redundancy: the previous frame carried a SILK->CELT
+    // redundant frame (redundancy && !celt_to_silk). Suppresses the CELT reset on
+    // the following mode change (the redundant frame already primed CELT state).
+    prev_redundancy: bool,
 }
 
 impl OpusDecoder {
@@ -831,6 +835,7 @@ impl OpusDecoder {
             last_range: 0,
             aux: None,
             prev_used_aux: false,
+            prev_redundancy: false,
         })
     }
 
@@ -855,13 +860,12 @@ impl OpusDecoder {
         // state is blind to the interleaved stereo packets, so its state is stale
         // at every mono<->stereo switch. libopus keeps ONE decoder whose channel-0
         // resampler and stereo state run continuously across the switches.
-        // Mono SilkOnly OR CeltOnly packet in a stereo stream: decode through the
-        // PRIMARY (unified path) so inter-frame state stays one continuous chain
-        // across mono<->stereo switches (SILK resampler/stereo state; CELT via
-        // stream_channels=1, C=1/CC=2). Hybrid mono still uses the aux for now.
-        let mono_in_stereo = (mode == OpusMode::SilkOnly || mode == OpusMode::CeltOnly)
-            && packet_channels == 1
-            && self.channels == 2;
+        // A mono packet of ANY mode in a stereo stream decodes through the PRIMARY
+        // (unified path) so inter-frame state stays one continuous chain across
+        // mono<->stereo switches — SILK resampler/stereo state; CELT (and the
+        // redundant/silence transition frames) via stream_channels=1 (C=1/CC=2) —
+        // matching libopus's single decoder.
+        let mono_in_stereo = packet_channels == 1 && self.channels == 2;
 
         if packet_channels != self.channels && !mono_in_stereo {
             // The packet's channel count differs from ours (a stream can switch
@@ -1108,6 +1112,9 @@ impl OpusDecoder {
                 };
                 let internal_sub_frame_size = internal_frame_size / n_silk;
                 let ratio = self.sampling_rate as f64 / internal_sample_rate as f64;
+                // Per-FRAME previous mode (libopus updates prev_mode per frame; for
+                // payloads after the first, the previous frame is this same packet).
+                let mut prev_mode_frame = self.prev_mode;
 
                 for (fi, payload) in frame_payloads.iter().enumerate() {
                     let mut rc = RangeCoder::new_decoder(payload);
@@ -1253,7 +1260,107 @@ impl OpusDecoder {
                         };
                         silk_off += out_len;
                     }
-                    self.last_range = rc.rng;
+
+                    // --- Opus redundancy layer (opus_decoder.c:420-580) ---
+                    // A SILK-only frame carries IMPLICIT CELT redundancy: if >= 17
+                    // bits remain after SILK, the trailing bytes ARE a 5 ms CELT
+                    // frame (no flag) used to smooth mode/bandwidth transitions.
+                    let mut redundant_rng = 0u32;
+                    let mut redundancy = false;
+                    let mut celt_to_silk = false;
+                    let plen = payload.len();
+                    let f5 = (self.sampling_rate / 200) as usize;
+                    let f2_5 = f5 / 2;
+                    let red_end_band = celt_endband_for_bandwidth(bandwidth);
+                    let mut red_buf = [0.0f32; 480]; // F5 * <=2ch, planar
+                    let mut red_bytes = 0usize;
+                    if self.sampling_rate == 48000 && rc.tell() + 17 <= (plen as i32) * 8 {
+                        redundancy = true;
+                        celt_to_silk = rc.decode_bit_logp(1);
+                        red_bytes = plen - (((rc.tell() + 7) >> 3) as usize);
+                        if red_bytes < 2 || red_bytes >= plen {
+                            redundancy = false;
+                            red_bytes = 0;
+                        }
+                    }
+                    // CELT->SILK: the redundant frame continues the prior CELT
+                    // state (a fade-out of the previous CELT mode). Decode BEFORE
+                    // the hybrid->SILK silence frame to keep libopus state order.
+                    if redundancy && celt_to_silk {
+                        redundant_rng = self.decode_redundant_celt(
+                            &payload[plen - red_bytes..],
+                            false,
+                            packet_channels,
+                            red_end_band,
+                            &mut red_buf[..f5 * self.channels],
+                        );
+                    }
+                    // Hybrid->SILK transition: let the CELT MDCT fade out by
+                    // decoding a 2-byte silence frame; its 2.5 ms overlap tail is
+                    // ADDED to the output (libopus decodes it into pcm before the
+                    // SILK sum).
+                    if self.sampling_rate == 48000
+                        && prev_mode_frame == Some(OpusMode::Hybrid)
+                        && !(redundancy && celt_to_silk && self.prev_redundancy)
+                    {
+                        let silence = [0xFFu8, 0xFF];
+                        let mut sil_buf = [0.0f32; 240]; // F2_5 * <=2ch, planar
+                        self.celt_dec.set_stream_channels(packet_channels);
+                        let mut src = RangeCoder::new_decoder(&silence);
+                        self.celt_dec.decode_from_range_coder_with_band_range(
+                            &mut src,
+                            16,
+                            f2_5,
+                            &mut sil_buf[..f2_5 * self.channels],
+                            0,
+                            red_end_band,
+                        );
+                        let region = &mut output[out_start..out_start + sub_output_len];
+                        for i in 0..f2_5 {
+                            for c in 0..self.channels {
+                                region[i * self.channels + c] += sil_buf[c * f2_5 + i];
+                            }
+                        }
+                    }
+                    // SILK->CELT: reset, then decode — this PRIMES the CELT state
+                    // for the upcoming CELT-mode frames (which is why the next mode
+                    // change skips its reset when prev_redundancy is set).
+                    if redundancy && !celt_to_silk {
+                        redundant_rng = self.decode_redundant_celt(
+                            &payload[plen - red_bytes..],
+                            true,
+                            packet_channels,
+                            red_end_band,
+                            &mut red_buf[..f5 * self.channels],
+                        );
+                    }
+                    if redundancy {
+                        let window = modes::default_mode().window;
+                        let region = &mut output[out_start..out_start + sub_output_len];
+                        if celt_to_silk {
+                            redundancy_fade_start(
+                                region,
+                                &red_buf,
+                                f5,
+                                f2_5,
+                                self.channels,
+                                window,
+                            );
+                        } else {
+                            redundancy_fade_end(
+                                region,
+                                sub_frame_size,
+                                &red_buf,
+                                f5,
+                                f2_5,
+                                self.channels,
+                                window,
+                            );
+                        }
+                    }
+                    self.prev_redundancy = redundancy && !celt_to_silk;
+                    prev_mode_frame = Some(OpusMode::SilkOnly);
+                    self.last_range = rc.rng ^ redundant_rng;
                 }
                 self.prev_mode = Some(OpusMode::SilkOnly);
                 Ok(frame_size)
@@ -1261,6 +1368,15 @@ impl OpusDecoder {
 
             OpusMode::CeltOnly => {
                 let celt_end_band = self.celt_end_band_from_toc(toc);
+                // libopus opus_decoder.c:515 — discard CELT state on a mode change
+                // unless the previous frame's SILK->CELT redundant frame already
+                // primed it.
+                if let Some(pm) = self.prev_mode {
+                    if pm != OpusMode::CeltOnly && !self.prev_redundancy {
+                        self.celt_dec.reset();
+                    }
+                }
+                self.prev_redundancy = false;
                 // Mono packet in a stereo stream => C=1, CC=2 (continuous state).
                 self.celt_dec.set_stream_channels(packet_channels);
 
@@ -1321,19 +1437,47 @@ impl OpusDecoder {
                 {
                     self.silk_resampler
                         .init(internal_sample_rate, self.sampling_rate);
+                    self.silk_resampler_r
+                        .init(internal_sample_rate, self.sampling_rate);
                     self.prev_internal_rate = internal_sample_rate;
                 }
+
+                // Same SILK stereo/channel handling as the SilkOnly arm: true L/R
+                // low band via MS->LR for stereo packets; per-packet internal
+                // channel switch with side-channel/stereo-state resets.
+                let silk_lr = self.channels == 2 && packet_channels == 2;
+                self.silk_dec.produce_lr = silk_lr;
+                let prev_internal_ch = self.silk_dec.n_channels_internal;
+                if packet_channels as i32 > prev_internal_ch {
+                    silk::init_decoder::silk_init_decoder(&mut self.silk_dec.channel_state[1]);
+                }
+                if self.channels == 2 && packet_channels == 2 && prev_internal_ch == 1 {
+                    self.silk_dec.s_stereo_pred_prev_q13 = [0; 2];
+                    self.silk_dec.s_stereo_side = [0; 2];
+                    self.silk_resampler_r = self.silk_resampler.clone();
+                }
+                self.silk_dec.n_channels_internal = packet_channels as i32;
 
                 for (fi, payload) in frame_payloads.iter().enumerate() {
                     let mut rc = RangeCoder::new_decoder(payload);
                     let pcm_silk_i16_len = internal_frame_size * self.channels;
-                    debug_assert!(pcm_silk_i16_len <= self.w_pcm_i16.len());
+                    if pcm_silk_i16_len + 2 > self.w_pcm_i16.len() {
+                        return Err("opus: SILK frame size exceeds buffer");
+                    }
 
+                    // Prepend the previous frame's last two samples (sMid) and
+                    // decode at offset 2, matching libopus's samplesOut1_tmp[n][2]
+                    // layout — the resampler is fed from offset 1 (the 1-sample
+                    // delay line), keeping the SILK low band aligned with the CELT
+                    // high band exactly as in the reference.
+                    let s_mid = self.silk_s_mid;
                     let ret = {
                         let (silk_dec, pcm_i16) = (&mut self.silk_dec, &mut self.w_pcm_i16);
+                        pcm_i16[0] = s_mid[0];
+                        pcm_i16[1] = s_mid[1];
                         silk_dec.decode(
                             &mut rc,
-                            &mut pcm_i16[..pcm_silk_i16_len],
+                            &mut pcm_i16[2..pcm_silk_i16_len + 2],
                             silk::decode_frame::FLAG_DECODE_NORMAL,
                             true,
                             frame_duration_ms,
@@ -1349,61 +1493,124 @@ impl OpusDecoder {
                     self.w_silk_out[..silk_out_len].fill(0.0);
                     if ret > 0 {
                         let decoded_samples = ret as usize;
-                        // SILK only decodes channel 0 (mono). For multi-channel output,
-                        // replicate the mono samples to every channel in w_silk_out.
-                        if self.sampling_rate == internal_sample_rate {
-                            let frames = decoded_samples.min(sub_frame_size);
-                            for i in 0..frames {
-                                let v = self.w_pcm_i16[i] as f32 / 32768.0;
-                                for ch in 0..self.channels {
-                                    let idx = i * self.channels + ch;
-                                    if idx < silk_out_len {
-                                        self.w_silk_out[idx] = v;
-                                    }
-                                }
+                        if decoded_samples >= 2 {
+                            self.silk_s_mid[0] = self.w_pcm_i16[decoded_samples];
+                            self.silk_s_mid[1] = self.w_pcm_i16[decoded_samples + 1];
+                        }
+                        let ratio = self.sampling_rate as f64 / internal_sample_rate as f64;
+                        let out_len =
+                            ((decoded_samples as f64 * ratio) as usize).min(sub_frame_size);
+                        debug_assert!(out_len <= self.w_pcm_resampled.len());
+                        if silk_lr {
+                            // Stereo low band: L/R from dec_api (already in the
+                            // 1-sample-delay layout), each through its own resampler.
+                            self.silk_resampler.process(
+                                &mut self.w_pcm_resampled[..out_len],
+                                &self.silk_dec.l_out[..decoded_samples],
+                                decoded_samples as i32,
+                            );
+                            for i in 0..out_len {
+                                self.w_silk_out[i * 2] = self.w_pcm_resampled[i] as f32 / 32768.0;
+                            }
+                            self.silk_resampler_r.process(
+                                &mut self.w_pcm_resampled[..out_len],
+                                &self.silk_dec.r_out[..decoded_samples],
+                                decoded_samples as i32,
+                            );
+                            for i in 0..out_len {
+                                self.w_silk_out[i * 2 + 1] =
+                                    self.w_pcm_resampled[i] as f32 / 32768.0;
                             }
                         } else {
-                            let ratio = self.sampling_rate as f64 / internal_sample_rate as f64;
-                            let out_len =
-                                ((decoded_samples as f64 * ratio) as usize).min(sub_frame_size);
-                            debug_assert!(out_len <= self.w_pcm_resampled.len());
-                            {
-                                let (silk_res, pcm_i16, pcm_resampled) = (
-                                    &mut self.silk_resampler,
-                                    &self.w_pcm_i16,
-                                    &mut self.w_pcm_resampled,
-                                );
-                                silk_res.process(
-                                    &mut pcm_resampled[..out_len],
-                                    &pcm_i16[..decoded_samples],
-                                    decoded_samples as i32,
-                                );
-                            }
-                            let frames = out_len.min(sub_frame_size);
-                            for i in 0..frames {
+                            self.silk_resampler.process(
+                                &mut self.w_pcm_resampled[..out_len],
+                                &self.w_pcm_i16[1..1 + decoded_samples],
+                                decoded_samples as i32,
+                            );
+                            for i in 0..out_len {
                                 let v = self.w_pcm_resampled[i] as f32 / 32768.0;
                                 for ch in 0..self.channels {
-                                    let idx = i * self.channels + ch;
-                                    if idx < silk_out_len {
-                                        self.w_silk_out[idx] = v;
-                                    }
+                                    self.w_silk_out[i * self.channels + ch] = v;
+                                }
+                            }
+                            // Mono packet, stereo output: keep the right-channel
+                            // resampler continuous (libopus dec_API.c:351-355).
+                            if self.channels == 2 {
+                                self.silk_resampler_r.process(
+                                    &mut self.w_pcm_resampled[..out_len],
+                                    &self.w_pcm_i16[1..1 + decoded_samples],
+                                    decoded_samples as i32,
+                                );
+                                for i in 0..out_len {
+                                    self.w_silk_out[i * 2 + 1] =
+                                        self.w_pcm_resampled[i] as f32 / 32768.0;
                                 }
                             }
                         }
                     }
 
-                    let total_bits = (payload.len() * 8) as i32;
-                    let redundancy = rc.decode_bit_logp(12);
-                    let skip_celt = if redundancy {
-                        let _ = rc.decode_bit_logp(1);
-                        true
-                    } else {
-                        false
-                    };
+                    // --- Opus redundancy layer, hybrid form (opus_decoder.c) ---
+                    // redundancy = bit(12); if set: celt_to_silk = bit(1),
+                    // redundancy_bytes = uint(256)+2 taken from the END of the
+                    // packet — the MAIN CELT layer still decodes, but with the
+                    // range coder's storage shrunk by those bytes (this changes
+                    // its raw-bit region and tell budget).
+                    let plen = payload.len();
+                    let mut redundancy = false;
+                    let mut celt_to_silk = false;
+                    let mut red_bytes = 0usize;
+                    let mut effective_len = plen;
+                    if rc.tell() + 37 <= (plen as i32) * 8 {
+                        redundancy = rc.decode_bit_logp(12);
+                        if redundancy {
+                            celt_to_silk = rc.decode_bit_logp(1);
+                            red_bytes = rc.dec_uint(256) as usize + 2;
+                            if red_bytes <= effective_len {
+                                effective_len -= red_bytes;
+                            } else {
+                                red_bytes = 0;
+                                redundancy = false;
+                            }
+                            if redundancy && (effective_len as i32) * 8 < rc.tell() {
+                                effective_len = plen;
+                                red_bytes = 0;
+                                redundancy = false;
+                            }
+                            if redundancy {
+                                rc.storage -= red_bytes as u32;
+                            }
+                        }
+                    }
+                    let f5 = (self.sampling_rate / 200) as usize;
+                    let f2_5 = f5 / 2;
+                    let red_end_band = celt_endband_for_bandwidth(bandwidth);
+                    let mut red_buf = [0.0f32; 480];
+                    let mut redundant_rng = 0u32;
+                    let do_red = redundancy && self.sampling_rate == 48000;
+                    // CELT->SILK: redundant frame decodes BEFORE the main CELT,
+                    // continuing the prior CELT state (fade-out of previous CELT).
+                    if do_red && celt_to_silk {
+                        redundant_rng = self.decode_redundant_celt(
+                            &payload[plen - red_bytes..],
+                            false,
+                            packet_channels,
+                            red_end_band,
+                            &mut red_buf[..f5 * self.channels],
+                        );
+                    }
 
-                    if skip_celt {
-                        self.w_celt_out[..silk_out_len].fill(0.0);
-                    } else {
+                    // Main CELT high band. libopus opus_decoder.c:515 — reset CELT
+                    // on a mode change unless primed by prior SILK->CELT redundancy.
+                    if fi == 0 {
+                        if let Some(pm) = self.prev_mode {
+                            if pm != OpusMode::Hybrid && !self.prev_redundancy {
+                                self.celt_dec.reset();
+                            }
+                        }
+                    }
+                    self.celt_dec.set_stream_channels(packet_channels);
+                    let total_bits = (effective_len * 8) as i32;
+                    {
                         let (celt_dec, celt_planar) = (&mut self.celt_dec, &mut self.w_celt_planar);
                         celt_dec.decode_from_range_coder_with_band_range(
                             &mut rc,
@@ -1433,7 +1640,44 @@ impl OpusDecoder {
                         output[out_start + j] =
                             (self.w_silk_out[j] + self.w_celt_out[j]).clamp(-1.0, 1.0);
                     }
-                    self.last_range = rc.rng;
+
+                    // SILK->CELT: reset + decode the redundant frame AFTER the main
+                    // decode; it primes the CELT state for the upcoming CELT mode.
+                    if do_red && !celt_to_silk {
+                        redundant_rng = self.decode_redundant_celt(
+                            &payload[plen - red_bytes..],
+                            true,
+                            packet_channels,
+                            red_end_band,
+                            &mut red_buf[..f5 * self.channels],
+                        );
+                    }
+                    if do_red {
+                        let window = modes::default_mode().window;
+                        let region = &mut output[out_start..out_start + silk_out_len];
+                        if celt_to_silk {
+                            redundancy_fade_start(
+                                region,
+                                &red_buf,
+                                f5,
+                                f2_5,
+                                self.channels,
+                                window,
+                            );
+                        } else {
+                            redundancy_fade_end(
+                                region,
+                                sub_frame_size,
+                                &red_buf,
+                                f5,
+                                f2_5,
+                                self.channels,
+                                window,
+                            );
+                        }
+                    }
+                    self.prev_redundancy = redundancy && !celt_to_silk;
+                    self.last_range = rc.rng ^ redundant_rng;
                 }
                 self.prev_mode = Some(OpusMode::Hybrid);
                 Ok(frame_size)
@@ -1466,6 +1710,87 @@ impl OpusDecoder {
             return 19.min(top);
         }
         top
+    }
+
+    /// Decode a redundant CELT frame (opus_decoder.c "5 ms redundant frame"):
+    /// start band 0, end band from the packet bandwidth, 5 ms, its own range
+    /// decoder. Returns the redundant final range; PLANAR output in `buf`
+    /// (F5 samples per state channel). Only valid at 48 kHz output.
+    fn decode_redundant_celt(
+        &mut self,
+        red: &[u8],
+        reset_first: bool,
+        packet_channels: usize,
+        end_band: usize,
+        buf: &mut [f32],
+    ) -> u32 {
+        if reset_first {
+            self.celt_dec.reset();
+        }
+        self.celt_dec.set_stream_channels(packet_channels);
+        let f5 = (self.sampling_rate / 200) as usize;
+        let mut rrc = RangeCoder::new_decoder(red);
+        let total_bits = (red.len() * 8) as i32;
+        self.celt_dec.decode_from_range_coder_with_band_range(
+            &mut rrc, total_bits, f5, buf, 0, end_band,
+        );
+        rrc.rng
+    }
+}
+
+/// libopus opus_decoder.c bandwidth -> CELT end band for the packet.
+fn celt_endband_for_bandwidth(bw: Bandwidth) -> usize {
+    match bw {
+        Bandwidth::Narrowband => 13,
+        Bandwidth::Mediumband | Bandwidth::Wideband => 17,
+        Bandwidth::Superwideband => 19,
+        _ => 21,
+    }
+}
+
+/// smooth_fade cross-fades (w = window[i]^2, 48 kHz inc=1) applied to the
+/// interleaved output region of one frame. `red` is PLANAR (F5 per channel).
+/// celt_to_silk: redundant frame occupies the START of the frame — first 2.5 ms
+/// copied verbatim, next 2.5 ms fades redundant -> main.
+fn redundancy_fade_start(
+    out: &mut [f32],
+    red: &[f32],
+    f5: usize,
+    f2_5: usize,
+    channels: usize,
+    window: &[f32],
+) {
+    for i in 0..f2_5 {
+        for c in 0..channels {
+            out[i * channels + c] = red[c * f5 + i];
+        }
+    }
+    for i in 0..f2_5 {
+        let w = window[i] * window[i];
+        for c in 0..channels {
+            let idx = (f2_5 + i) * channels + c;
+            out[idx] = (1.0 - w) * red[c * f5 + f2_5 + i] + w * out[idx];
+        }
+    }
+}
+
+/// SILK->CELT: redundant frame occupies the END of the frame — the last 2.5 ms
+/// fades main -> redundant (second half of the redundant frame).
+fn redundancy_fade_end(
+    out: &mut [f32],
+    frame_samples: usize,
+    red: &[f32],
+    f5: usize,
+    f2_5: usize,
+    channels: usize,
+    window: &[f32],
+) {
+    for i in 0..f2_5 {
+        let w = window[i] * window[i];
+        for c in 0..channels {
+            let idx = (frame_samples - f2_5 + i) * channels + c;
+            out[idx] = (1.0 - w) * out[idx] + w * red[c * f5 + f2_5 + i];
+        }
     }
 }
 
