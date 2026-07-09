@@ -1450,6 +1450,14 @@ impl OpusDecoder {
             let trim = (data0 >> 5) as usize;
             return top.saturating_sub(2 * trim).max(1);
         }
+        // Hybrid: libopus maps the packet bandwidth to a CELT end band
+        // (opus_decoder.c: SWB -> 19, FB -> 21). Decoding SWB hybrid with 21
+        // reads two bands the encoder never coded -> range desync every packet.
+        if mode_from_toc(toc) == OpusMode::Hybrid
+            && bandwidth_from_toc(toc) == Bandwidth::Superwideband
+        {
+            return 19.min(top);
+        }
         top
     }
 }
