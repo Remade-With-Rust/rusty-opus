@@ -64,6 +64,8 @@ fn test_celt_multi_frame_code_0_and_1() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::RestrictedLowDelay).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 64000;
 
     let pcm0 = make_sine(440.0, sr, fs, ch, 0);
@@ -104,6 +106,8 @@ fn test_celt_multi_frame_code_2() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::RestrictedLowDelay).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 64000;
 
     let pcm0 = make_sine(440.0, sr, fs, ch, 0);
@@ -140,6 +144,8 @@ fn test_celt_multi_frame_code_3_with_padding() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::RestrictedLowDelay).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 64000;
 
     let pcm0 = make_sine(440.0, sr, fs, ch, 0);
@@ -182,6 +188,8 @@ fn test_celt_multi_frame_code_3_self_delimiting() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::RestrictedLowDelay).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 64000;
 
     let pcm0 = make_sine(440.0, sr, fs, ch, 0);
@@ -219,6 +227,8 @@ fn test_silk_multi_frame_code_3_padding_roundtrip() {
     let target_size = 100usize;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::Voip).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 24000;
     enc.use_cbr = true;
 
@@ -247,6 +257,8 @@ fn test_hybrid_multi_frame_roundtrip() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::Audio).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 64000;
 
     let pcm0 = make_sine(440.0, sr, fs, ch, 0);
@@ -281,6 +293,8 @@ fn test_multi_frame_code_2_unequal_payloads() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::RestrictedLowDelay).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 64000;
 
     let pcm_silence = vec![0.0f32; fs];
@@ -288,6 +302,8 @@ fn test_multi_frame_code_2_unequal_payloads() {
     let pkt_sil = encode_full(&mut enc, &pcm_silence, fs, 400);
     // fresh encoder for tone to avoid state interference
     let mut enc2 = OpusEncoder::new(sr, ch, Application::RestrictedLowDelay).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc2.use_cbr = true;
     enc2.bitrate_bps = 64000;
     let pkt_tone = encode_full(&mut enc2, &pcm_tone, fs, 400);
 
@@ -322,6 +338,8 @@ fn test_multi_frame_all_codes_stereo() {
     let fs = 960;
 
     let mut enc = OpusEncoder::new(sr, ch, Application::Audio).unwrap();
+    // hand-assembled multi-frame packets need equal-size (CBR) frames
+    enc.use_cbr = true;
     enc.bitrate_bps = 96000;
 
     let pcm0 = make_sine(440.0, sr, fs, ch, 0);
