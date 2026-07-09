@@ -14,11 +14,15 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
     // MAX here forced the 20 ms contour on every 10 ms frame -> wrong bit count
     // -> range-coder desync on the first 10 ms packet.
     let new_frame_length = new_subfr_length * dec.nb_subfr;
-    // libopus resets the decoder's sample-history state whenever the internal
-    // bandwidth (or frame length) changes; otherwise the first frame at the new
-    // rate runs its LPC filter on stale history and diverges (garbage at every
-    // bandwidth transition). Detect the change before overwriting the fields.
-    let changed = dec.fs_khz != fs_khz || dec.frame_length != new_frame_length;
+    // libopus resets the decoder's sample-history state ONLY when the internal
+    // sampling rate (bandwidth) changes — see decoder_set_fs.c, where the outBuf/
+    // sLPC_Q14_buf memset lives inside `if( psDec->fs_kHz != fs_kHz )`, NOT the
+    // outer `|| frame_length != psDec->frame_length` block. A pure frame-length
+    // switch (e.g. 20 ms -> 10 ms at the same NB/MB/WB rate) must PRESERVE the
+    // LPC/output history; zeroing it there makes the first 10 ms frame synthesize
+    // from silence (~1/4 magnitude, wrong sign) even though the range coder stays
+    // perfectly in sync. Only pitch-contour/frame_length update on a length change.
+    let fs_changed = dec.fs_khz != fs_khz;
 
     dec.fs_khz = fs_khz;
     dec.fs_api_hz = fs_api_hz;
@@ -60,7 +64,7 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
         _ => Some(&SILK_NLSF_CB_WB),
     };
 
-    if changed {
+    if fs_changed {
         dec.first_frame_after_reset = 1;
         dec.lag_prev = 100;
         dec.last_gain_index = 10;
