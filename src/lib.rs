@@ -874,6 +874,20 @@ impl OpusDecoder {
                     packet_channels,
                 )?));
             }
+            // Reverse of the mono->stereo seed: on a stereo->mono switch, seed the
+            // aux (mono) CELT decoder from the primary (stereo channel 0) so its
+            // MDCT-overlap/energy state is continuous with the preceding stereo
+            // packets (the primary was the continuous decoder during them).
+            if !self.prev_used_aux
+                && packet_channels == 1
+                && self.channels == 2
+                && (mode == OpusMode::CeltOnly || mode == OpusMode::Hybrid)
+            {
+                let (aux_opt, primary) = (&mut self.aux, &self.celt_dec);
+                if let Some(aux) = aux_opt.as_mut() {
+                    aux.celt_dec.seed_from(primary);
+                }
+            }
             let aux = self.aux.as_mut().unwrap();
             let mut buf = vec![0.0f32; frame_size * packet_channels];
             let n = aux.decode(input, frame_size, &mut buf)?;
