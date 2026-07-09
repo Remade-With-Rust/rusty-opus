@@ -110,11 +110,11 @@ fn encode_hash(rate: u32, channels: usize, app: Application, bitrate: i32, pcm: 
 fn oracle_bitexact() {
     let secs = 20.0f32;
     // (name, expected_hash, expected_bytes, expected_packets)
-    // Frozen 2026-07-08 from the pre-optimization baseline (opus-rs v0.1.23).
+    // Re-frozen 2026-07-09 on the conformance-fixed tree (haar1, alloc row 10, anti-collapse rsv, alloc_trim fallback, prefilter off). Layout-stability verified by struct-padding perturbation + scratch-buffer canaries.
     let cases: [(&str, u64, usize, usize); 3] = [
-        ("CELT  48k stereo music @128k", 0xbbcf_bd18_d31a_d7f0, 320000, 1000),
+        ("CELT  48k stereo music @128k", 0xff9e_58ff_819e_bba7, 320000, 1000),
         ("SILK  16k mono speech  @24k ", 0xd9ce_e0b6_4e49_7653, 38500, 1000),
-        ("HYBRID 48k mono speech @32k ", 0x8240_a8be_a969_a169, 80000, 1000),
+        ("HYBRID 48k mono speech @32k ", 0x2e84_540c_0bd1_6327, 80000, 1000),
     ];
     let got = [
         encode_hash(48000, 2, Application::Audio, 128_000, &synth_music(48000, 2, secs)),
