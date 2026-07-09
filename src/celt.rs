@@ -1800,8 +1800,20 @@ impl CeltEncoder {
         };
         let _tone_freq = 0.0f32; // Would be set from analysis if available
 
-        let pf_enabled =
-            start_band == 0 && self.complexity >= 5 && toneishness < 0.99 && channels == 1;
+        // Encoder pitch prefilter: DEFAULT-OFF — the implementation is broken.
+        // Measured 2026-07-09 (oracle-decoded, opus_compare vs input): mono music
+        // @96k CBR scores 19.8 with it and 0.44 without (libopus itself: 0.91) —
+        // it modulates the very signal it should protect (pure 1 kHz sine round
+        // trips at 7.6 dB SNR with it, 40+ dB without; error = AM/PM sidebands at
+        // the frame rate). It also only ever ran for MONO (`channels == 1`), which
+        // is why the stereo path never showed it. `CELT_PF=1` re-enables for
+        // debugging the proper fix (compare run_prefilter against libopus
+        // celt_encoder.c run_prefilter + the gain/period/tapset signalling).
+        let pf_enabled = start_band == 0
+            && self.complexity >= 5
+            && toneishness < 0.99
+            && channels == 1
+            && std::env::var("CELT_PF").is_ok();
         let (pf_on, gain1, pitch_index) = if pf_enabled {
             run_prefilter(
                 in_buf,
@@ -2132,9 +2144,18 @@ impl CeltEncoder {
             0.0,
             equiv_rate,
         );
-        if rc.tell_frac() + (6 << BITRES) <= total_bits_bitres - total_boost {
+        // libopus celt_encoder.c: alloc_trim is 5 UNLESS there is room to code the
+        // analysis value — the decoder falls back to 5 when the trim isn't coded,
+        // so the encoder MUST use 5 in the allocation math too. Keeping the
+        // analysis trim here made trim_offset (hence the allocation) differ from
+        // every conformant decoder on tight-budget frames (e.g. 24 kbps hybrid),
+        // desyncing the range coder on ~1% of packets.
+        let alloc_trim = if rc.tell_frac() + (6 << BITRES) <= total_bits_bitres - total_boost {
             rc.encode_icdf(alloc_trim, &TRIM_ICDF, 7);
-        }
+            alloc_trim
+        } else {
+            5
+        };
 
         let mut intensity = self.intensity;
         self.w_pulses[..nb_ebands].fill(0);
