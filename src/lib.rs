@@ -751,6 +751,8 @@ pub struct OpusDecoder {
     stream_channels: usize,
 
     silk_resampler: silk::resampler::SilkResampler,
+    // Second resampler for the SILK stereo right channel (L uses silk_resampler).
+    silk_resampler_r: silk::resampler::SilkResampler,
 
     prev_internal_rate: i32,
 
@@ -806,6 +808,7 @@ impl OpusDecoder {
             bandwidth: Bandwidth::Auto,
             stream_channels: channels,
             silk_resampler: silk::resampler::SilkResampler::default(),
+            silk_resampler_r: silk::resampler::SilkResampler::default(),
             prev_internal_rate: 0,
             hybrid_skip_celt: false,
 
@@ -841,7 +844,15 @@ impl OpusDecoder {
         let bandwidth = bandwidth_from_toc(toc);
         let frame_duration_ms = frame_duration_ms_from_toc(toc);
 
-        if packet_channels != self.channels {
+        // A mono SILK packet inside a stereo stream is decoded through the PRIMARY
+        // decoder (unified path), not a separate aux — the aux's SILK/resampler
+        // state is blind to the interleaved stereo packets, so its state is stale
+        // at every mono<->stereo switch. libopus keeps ONE decoder whose channel-0
+        // resampler and stereo state run continuously across the switches.
+        let silk_mono_in_stereo =
+            mode == OpusMode::SilkOnly && packet_channels == 1 && self.channels == 2;
+
+        if packet_channels != self.channels && !silk_mono_in_stereo {
             // The packet's channel count differs from ours (a stream can switch
             // between mono and stereo). Decode it at its native channel count in
             // a persistent auxiliary decoder, then render to our output count:
@@ -1018,8 +1029,32 @@ impl OpusDecoder {
                 {
                     self.silk_resampler
                         .init(internal_sample_rate, self.sampling_rate);
+                    self.silk_resampler_r
+                        .init(internal_sample_rate, self.sampling_rate);
                     self.prev_internal_rate = internal_sample_rate;
                 }
+
+                // Pure-SILK stereo (both stream and output are 2ch): reconstruct
+                // true L/R via SILK MS->LR instead of duplicating the mono mid.
+                let silk_lr = self.channels == 2 && packet_channels == 2;
+                self.silk_dec.produce_lr = silk_lr;
+
+                // Per-packet internal channel switch (libopus dec_API.c:119-166).
+                let prev_internal_ch = self.silk_dec.n_channels_internal;
+                if packet_channels as i32 > prev_internal_ch {
+                    // mono -> stereo: reset the side channel decoder.
+                    silk::init_decoder::silk_init_decoder(
+                        &mut self.silk_dec.channel_state[1],
+                    );
+                }
+                if self.channels == 2 && packet_channels == 2 && prev_internal_ch == 1 {
+                    // Switching to stereo: clear stereo prediction/side history and
+                    // seed the right-channel resampler from the (continuous) left.
+                    self.silk_dec.s_stereo_pred_prev_q13 = [0; 2];
+                    self.silk_dec.s_stereo_side = [0; 2];
+                    self.silk_resampler_r = self.silk_resampler.clone();
+                }
+                self.silk_dec.n_channels_internal = packet_channels as i32;
 
                 // A 40/60 ms Opus frame carries 2/3 internal 20 ms SILK frames;
                 // 10/20 ms carry one. libopus calls silk_Decode once per internal
@@ -1077,10 +1112,50 @@ impl OpusDecoder {
                         }
                         let base = out_start + silk_off * self.channels;
 
-                        // SILK decodes channel 0 (mono); replicate to every output
-                        // channel. The resampler/copy is fed from offset 1 — the
-                        // 1-sample delay line that aligns us with the reference.
-                        let out_len = if self.sampling_rate == internal_sample_rate {
+                        // Stereo SILK: L in silk_dec.l_out, R in silk_dec.r_out,
+                        // both already in the 1-sample-delay-line layout. Resample
+                        // each channel through its own resampler.
+                        let out_len = if silk_lr {
+                            if self.sampling_rate == internal_sample_rate {
+                                for i in 0..decoded_samples {
+                                    let l = self.silk_dec.l_out[i] as f32 / 32768.0;
+                                    let r = self.silk_dec.r_out[i] as f32 / 32768.0;
+                                    let idx = base + i * 2;
+                                    if idx + 1 < output.len() {
+                                        output[idx] = l;
+                                        output[idx + 1] = r;
+                                    }
+                                }
+                                decoded_samples
+                            } else {
+                                let out_len = (decoded_samples as f64 * ratio) as usize;
+                                // Left
+                                self.silk_resampler.process(
+                                    &mut self.w_pcm_resampled[..out_len],
+                                    &self.silk_dec.l_out[..decoded_samples],
+                                    decoded_samples as i32,
+                                );
+                                for i in 0..out_len {
+                                    let idx = base + i * 2;
+                                    if idx < output.len() {
+                                        output[idx] = self.w_pcm_resampled[i] as f32 / 32768.0;
+                                    }
+                                }
+                                // Right (reuse the scratch)
+                                self.silk_resampler_r.process(
+                                    &mut self.w_pcm_resampled[..out_len],
+                                    &self.silk_dec.r_out[..decoded_samples],
+                                    decoded_samples as i32,
+                                );
+                                for i in 0..out_len {
+                                    let idx = base + i * 2 + 1;
+                                    if idx < output.len() {
+                                        output[idx] = self.w_pcm_resampled[i] as f32 / 32768.0;
+                                    }
+                                }
+                                out_len
+                            }
+                        } else if self.sampling_rate == internal_sample_rate {
                             let frames = decoded_samples;
                             for i in 0..frames {
                                 let v = self.w_pcm_i16[1 + i] as f32 / 32768.0;
@@ -1113,6 +1188,24 @@ impl OpusDecoder {
                                     let idx = base + i * self.channels + ch;
                                     if idx < output.len() {
                                         output[idx] = v;
+                                    }
+                                }
+                            }
+                            // Stereo output, mono packet: also run the mono signal
+                            // through the RIGHT-channel resampler so its state stays
+                            // continuous for the next stereo packet (libopus
+                            // dec_API.c:351-355). Its output overwrites channel 1,
+                            // which is numerically ~identical to the left here.
+                            if self.channels == 2 {
+                                self.silk_resampler_r.process(
+                                    &mut self.w_pcm_resampled[..out_len],
+                                    &self.w_pcm_i16[1..1 + decoded_samples],
+                                    decoded_samples as i32,
+                                );
+                                for i in 0..out_len {
+                                    let idx = base + i * 2 + 1;
+                                    if idx < output.len() {
+                                        output[idx] = self.w_pcm_resampled[i] as f32 / 32768.0;
                                     }
                                 }
                             }

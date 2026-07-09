@@ -2,6 +2,7 @@ use crate::range_coder::RangeCoder;
 use crate::silk::decode_frame::{FLAG_DECODE_NORMAL, FLAG_PACKET_LOST, silk_decode_frame};
 use crate::silk::decode_indices::{
     silk_decode_indices, silk_stereo_decode_mid_only, silk_stereo_decode_pred,
+    silk_stereo_ms_to_lr,
 };
 use crate::silk::decode_pulses::silk_decode_pulses;
 use crate::silk::decoder_structs::SilkDecoderState;
@@ -22,6 +23,14 @@ pub struct SilkDecoder {
     pub s_stereo_pred_prev_q13: [i32; 2],
     pub s_stereo_mid: [i16; 2],
     pub s_stereo_side: [i16; 2],
+
+    // When set, a stereo decode reconstructs L/R via silk_stereo_ms_to_lr and
+    // publishes them (1-sample-delay-line layout, ready to resample) in l_out/
+    // r_out. When clear, stereo decodes emit only the mid (mono downmix) as
+    // before. lib.rs sets this for the pure-SILK stereo path.
+    pub produce_lr: bool,
+    pub l_out: [i16; MAX_FRAME_LENGTH],
+    pub r_out: [i16; MAX_FRAME_LENGTH],
 }
 
 impl Default for SilkDecoder {
@@ -40,6 +49,9 @@ impl SilkDecoder {
             s_stereo_pred_prev_q13: [0; 2],
             s_stereo_mid: [0; 2],
             s_stereo_side: [0; 2],
+            produce_lr: false,
+            l_out: [0; MAX_FRAME_LENGTH],
+            r_out: [0; MAX_FRAME_LENGTH],
         };
         silk_init_decoder(&mut dec.channel_state[0]);
         silk_init_decoder(&mut dec.channel_state[1]);
@@ -192,10 +204,11 @@ impl SilkDecoder {
 
         let frame_index = self.channel_state[0].n_frames_decoded as usize;
         let mut decode_only_middle = 0i32;
+        let mut ms_pred_q13 = [0i32; 2];
         if self.n_channels_internal == 2 && lost_flag == FLAG_DECODE_NORMAL {
             // Predictors + mid-only flag. Bits must be read to keep the range
             // coder in sync.
-            let _ = silk_stereo_decode_pred(range_dec);
+            ms_pred_q13 = silk_stereo_decode_pred(range_dec);
             if self.channel_state[1].vad_flags[frame_index] == 0 {
                 decode_only_middle = if silk_stereo_decode_mid_only(range_dec) {
                     1
@@ -237,6 +250,9 @@ impl SilkDecoder {
         );
         self.channel_state[0].n_frames_decoded += 1;
 
+        let mut side_samples = [0i16; MAX_FRAME_LENGTH];
+        let mut side_decoded = false;
+
         // Stereo: we output only the mid (mono downmix) for now, but the side
         // frame's bits MUST still be consumed or the range coder desyncs for the
         // next internal frame of a multi-frame packet (the mid of frames 2/3 then
@@ -254,12 +270,11 @@ impl SilkDecoder {
             } else {
                 CODE_CONDITIONALLY
             };
-            let mut side_scratch = [0i16; MAX_FRAME_LENGTH];
             let mut ns_side: i32 = 0;
             let ret1 = silk_decode_frame(
                 &mut self.channel_state[1],
                 range_dec,
-                &mut side_scratch,
+                &mut side_samples,
                 &mut ns_side,
                 lost_flag,
                 cond1,
@@ -267,6 +282,43 @@ impl SilkDecoder {
             if ret1 < 0 {
                 return ret1;
             }
+            side_decoded = true;
+        }
+
+        // Reconstruct L/R for the pure-SILK stereo path. mid is in `output`
+        // ([0..n]); side in side_samples ([0..n], zero if mid-only). ms_to_lr
+        // wants x1/x2 laid out as [hist0, hist1, samples...] and writes L to
+        // x1[1..1+n], R to x2[1..1+n] — exactly the 1-sample delay line the
+        // resampler consumes.
+        if self.produce_lr && self.n_channels_internal == 2 && n_samples_out > 0 {
+            let n = n_samples_out as usize;
+            let mut mid_buf = [0i16; MAX_FRAME_LENGTH + 2];
+            let mut side_buf = [0i16; MAX_FRAME_LENGTH + 2];
+            mid_buf[2..2 + n].copy_from_slice(&output[..n]);
+            if side_decoded {
+                side_buf[2..2 + n].copy_from_slice(&side_samples[..n]);
+            }
+            silk_stereo_ms_to_lr(
+                &mut self.s_stereo_pred_prev_q13,
+                &mut self.s_stereo_mid,
+                &mut self.s_stereo_side,
+                &mut mid_buf,
+                &mut side_buf,
+                &ms_pred_q13,
+                self.channel_state[0].fs_khz,
+                n,
+            );
+            self.l_out[..n].copy_from_slice(&mid_buf[1..1 + n]);
+            self.r_out[..n].copy_from_slice(&side_buf[1..1 + n]);
+        } else if n_samples_out >= 2 {
+            // Mono frame: buffer the last two mid samples so the NEXT stereo
+            // frame's ms_to_lr starts from the correct 2-sample history (libopus
+            // dec_API.c:312-313 — sStereo.sMid is updated even on mono frames).
+            // Without this the first stereo frame after a mono run reconstructs
+            // from stale history (~1/4-magnitude glitch at the switch).
+            let n = n_samples_out as usize;
+            self.s_stereo_mid[0] = output[n - 2];
+            self.s_stereo_mid[1] = output[n - 1];
         }
 
         // libopus increments channel_state[1].nFramesDecoded on EVERY internal
