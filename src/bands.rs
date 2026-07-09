@@ -195,26 +195,17 @@ pub fn spreading_decision(
 }
 
 pub fn haar1(x: &mut [f32], n0: usize, stride: usize) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        if stride == 1 && n0 >= 64 {
-            haar1_neon(x, n0);
-        } else {
-            haar1_scalar(x, n0, stride);
-        }
-        return;
-    }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe {
-        if stride == 1 && n0 >= 16 && is_x86_feature_detected!("avx") {
-            haar1_avx(x, n0);
-            return;
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
+    // The SIMD paths (haar1_avx / haar1_neon) have a deinterleave bug that
+    // corrupts the transform — verified against libopus: tf!=0 CELT bands decode
+    // with the wrong per-band L2 energy (e.g. v01 frame 86 band 12 output energy
+    // 1.012/0.857 vs the correct 1.0), which broke stereo-CELT conformance
+    // (opus_compare v01 0.70, v11 0.61). The scalar path is bit-exact vs libopus,
+    // so use it unconditionally until the SIMD kernels are fixed & re-verified.
     haar1_scalar(x, n0, stride);
 }
 
+// Disabled: has a deinterleave bug (see haar1). Kept for reference / future fix.
+#[allow(dead_code)]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn haar1_avx(x: &mut [f32], n0: usize) {
@@ -276,6 +267,8 @@ fn haar1_scalar(x: &mut [f32], n0: usize, stride: usize) {
     }
 }
 
+// Disabled: same deinterleave bug class as haar1_avx (see haar1).
+#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
 fn haar1_neon(x: &mut [f32], n0: usize) {
     use std::arch::aarch64::*;
