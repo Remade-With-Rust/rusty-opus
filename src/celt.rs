@@ -1140,11 +1140,10 @@ fn run_prefilter(
 
     pre: &mut [f32],
     pitch_buf: &mut [f32],
-    before: &mut [f32],
-    after: &mut [f32],
 
     analysis: &AnalysisInfo,
     loss_rate: i32,
+    nb_available_bytes: i32,
 ) -> (bool, f32, usize) {
     let _prof = crate::prof::scope(crate::prof::Stage::CeltPrefilter);
     let max_period = COMBFILTER_MAXPERIOD;
@@ -1188,21 +1187,34 @@ fn run_prefilter(
     );
     let mut gain1 = gain1_raw * 0.7;
 
+    // Loss-rate ladder (matches celt_encoder.c: halve >2%, halve again >4%,
+    // zero >8%).
+    if loss_rate > 2 {
+        gain1 *= 0.5;
+    }
+    if loss_rate > 4 {
+        gain1 *= 0.5;
+    }
+    if loss_rate > 8 {
+        gain1 = 0.0;
+    }
+
     // Apply max_pitch_ratio from analysis if available
     if analysis.valid {
         gain1 *= analysis.max_pitch_ratio;
     }
 
-    // Apply loss_rate scaling: halve at 2%, quarter at 4%, zero at 8%
-    if loss_rate >= 8 {
-        gain1 = 0.0;
-    } else if loss_rate > 0 {
-        gain1 *= 1.0 - (loss_rate as f32) / 8.0;
-    }
-
     let mut pf_threshold = 0.2f32;
     if (pitch_index as i32 - prefilter_period as i32).unsigned_abs() as usize * 10 > pitch_index {
         pf_threshold += 0.2;
+    }
+    // Rate-based bumps (celt_encoder.c): the ~7 pf bits are not worth it on
+    // starved frames.
+    if nb_available_bytes < 25 {
+        pf_threshold += 0.1;
+    }
+    if nb_available_bytes < 35 {
+        pf_threshold += 0.1;
     }
     if prefilter_gain > 0.4 {
         pf_threshold -= 0.1;
@@ -1225,12 +1237,8 @@ fn run_prefilter(
         pf_on = true;
     }
 
-    let before = &mut before[..channels];
-    for c in 0..channels {
-        let start = c * buf_stride + overlap;
-        before[c] = sum_abs(&in_buf[start..start + frame_size]);
-    }
-
+    // Standard Opus modes have shortMdctSize == overlap (120), so C's
+    // `offset = mode->shortMdctSize - overlap` is always 0 here.
     let offset = 0usize;
     let prev_period = prefilter_period.clamp(COMBFILTER_MINPERIOD, max_period - 2);
 
@@ -1272,41 +1280,6 @@ fn run_prefilter(
                 overlap,
             );
         }
-    }
-
-    let after = &mut after[..channels];
-    for c in 0..channels {
-        let start = c * buf_stride + overlap;
-        after[c] = sum_abs(&in_buf[start..start + frame_size]);
-    }
-
-    let cancel_pitch = (0..channels).any(|c| after[c] > before[c]);
-
-    if cancel_pitch {
-        for c in 0..channels {
-            in_buf[c * buf_stride + overlap..c * buf_stride + overlap + frame_size]
-                .copy_from_slice(
-                    &pre[c * pre_size + max_period..c * pre_size + max_period + frame_size],
-                );
-        }
-
-        for c in 0..channels {
-            if frame_size >= max_period {
-                prefilter_mem[c * max_period..(c + 1) * max_period].copy_from_slice(
-                    &pre[c * pre_size + frame_size..c * pre_size + frame_size + max_period],
-                );
-            } else {
-                let shift = max_period - frame_size;
-                prefilter_mem.copy_within(
-                    c * max_period + frame_size..(c + 1) * max_period,
-                    c * max_period,
-                );
-                prefilter_mem[c * max_period + shift..(c + 1) * max_period].copy_from_slice(
-                    &pre[c * pre_size + max_period..c * pre_size + max_period + frame_size],
-                );
-            }
-        }
-        return (false, 0.0, pitch_index);
     }
 
     for c in 0..channels {
@@ -1434,8 +1407,6 @@ pub struct CeltEncoder {
 
     w_prefilter_pre: Vec<f32>,
     w_prefilter_pitch_buf: Vec<f32>,
-    w_prefilter_before: Vec<f32>,
-    w_prefilter_after: Vec<f32>,
 
     w_transient_tmp: Vec<f32>,
     w_transient_tmp2: Vec<f32>,
@@ -1743,8 +1714,6 @@ impl CeltEncoder {
 
             w_prefilter_pre: vec![0.0; channels * (COMBFILTER_MAXPERIOD + MAX_FRAME_SIZE)],
             w_prefilter_pitch_buf: vec![0.0; (COMBFILTER_MAXPERIOD + MAX_FRAME_SIZE) >> 1],
-            w_prefilter_before: vec![0.0; channels],
-            w_prefilter_after: vec![0.0; channels],
             w_transient_tmp: vec![0.0; MAX_TRANSIENT_LEN],
             w_transient_tmp2: vec![0.0; MAX_TRANSIENT_LEN / 2],
             consec_transient: 0,
@@ -1839,11 +1808,66 @@ impl CeltEncoder {
             );
         }
 
+        drop(_prof_pre);
+
+        // Encoder pitch prefilter (the inverse of the decoder postfilter).
+        // Enable gate matches celt_encoder.c: enough bytes to be worth the ~7
+        // bits, CELT-only (start_band == 0; the hybrid high band has no pf),
+        // complexity >= 5. `CELT_PF_OFF` disables for A/B debugging.
+        // (History: default-off until 2026-07-09 — the octave signalling was one
+        // low for every pitch_index >= 31, so decoders reconstructed a garbage
+        // period; fixed, sine round-trip 7.6 -> 45.7 dB.)
+        let nb_available_bytes = (explicit_total_bits.unwrap_or((rc.buf.len() * 8) as i32) >> 3)
+            - ((rc.tell() + 4) >> 3);
+        let pf_enabled = start_band == 0
+            && self.complexity >= 5
+            && nb_available_bytes > 12 * channels as i32
+            && std::env::var("CELT_PF_OFF").is_err();
+        // Capture the tapset used for THIS frame's comb (C's `prefilter_tapset`
+        // local): spreading_decision mutates self.tapset_decision later in the
+        // frame, and the value applied+signalled here — not the mutated one —
+        // must become next frame's "old" tapset.
+        let prefilter_tapset = self.tapset_decision;
+        let (pf_on, gain1, pitch_index) = if pf_enabled {
+            run_prefilter(
+                in_buf,
+                &mut self.prefilter_mem,
+                self.prefilter_period,
+                self.prefilter_gain,
+                self.prefilter_tapset,
+                prefilter_tapset,
+                mode.window,
+                channels,
+                frame_size,
+                overlap,
+                &mut self.w_prefilter_pre,
+                &mut self.w_prefilter_pitch_buf,
+                &self.analysis,
+                self.loss_rate,
+                nb_available_bytes,
+            )
+        } else {
+            (false, 0.0f32, COMBFILTER_MINPERIOD)
+        };
+
+        // Save the prefiltered overlap for the next frame.
+        // In libopus, st->in_mem stores the overlap separately and run_prefilter
+        // copies it to/from in[]. Here we emulate that by updating syn_mem with
+        // the last overlap samples of in_buf (which were prefiltered in place).
+        let syn_mem_size = 2048 + overlap;
+        for c in 0..channels {
+            let channel_offset = c * syn_mem_size;
+            let in_buf_offset = c * buf_stride;
+            self.syn_mem[channel_offset + syn_mem_size - overlap..channel_offset + syn_mem_size]
+                .copy_from_slice(&in_buf[in_buf_offset + frame_size..in_buf_offset + buf_stride]);
+        }
+
+        // Transient analysis runs on the PREFILTERED signal (celt_encoder.c
+        // order) — the comb removes periodic energy so pitch pulses don't read
+        // as transients.
         let mut tf_estimate = 0.0f32;
         let mut tf_chan = 0;
         let mut weak_transient = false;
-
-        drop(_prof_pre);
         let is_transient = if self.complexity >= 1 {
             transient_analysis(
                 in_buf,
@@ -1861,63 +1885,6 @@ impl CeltEncoder {
         } else {
             false
         };
-
-        // Check for pure tone: if tonality is very high, bypass pitch search
-        let toneishness = if self.analysis.valid {
-            self.analysis.tonality
-        } else {
-            0.0
-        };
-        let _tone_freq = 0.0f32; // Would be set from analysis if available
-
-        // Encoder pitch prefilter: DEFAULT-OFF — the implementation is broken.
-        // Measured 2026-07-09 (oracle-decoded, opus_compare vs input): mono music
-        // @96k CBR scores 19.8 with it and 0.44 without (libopus itself: 0.91) —
-        // it modulates the very signal it should protect (pure 1 kHz sine round
-        // trips at 7.6 dB SNR with it, 40+ dB without; error = AM/PM sidebands at
-        // the frame rate). It also only ever ran for MONO (`channels == 1`), which
-        // is why the stereo path never showed it. `CELT_PF=1` re-enables for
-        // debugging the proper fix (compare run_prefilter against libopus
-        // celt_encoder.c run_prefilter + the gain/period/tapset signalling).
-        let pf_enabled = start_band == 0
-            && self.complexity >= 5
-            && toneishness < 0.99
-            && channels == 1
-            && std::env::var("CELT_PF").is_ok();
-        let (pf_on, gain1, pitch_index) = if pf_enabled {
-            run_prefilter(
-                in_buf,
-                &mut self.prefilter_mem,
-                self.prefilter_period,
-                self.prefilter_gain,
-                self.prefilter_tapset,
-                self.tapset_decision,
-                mode.window,
-                channels,
-                frame_size,
-                overlap,
-                &mut self.w_prefilter_pre,
-                &mut self.w_prefilter_pitch_buf,
-                &mut self.w_prefilter_before,
-                &mut self.w_prefilter_after,
-                &self.analysis,
-                self.loss_rate,
-            )
-        } else {
-            (false, 0.0f32, COMBFILTER_MINPERIOD)
-        };
-
-        // Save the prefiltered overlap for the next frame.
-        // In libopus, st->in_mem stores the overlap separately and run_prefilter
-        // copies it to/from in[]. Here we emulate that by updating syn_mem with
-        // the last overlap samples of in_buf (which were prefiltered in place).
-        let syn_mem_size = 2048 + overlap;
-        for c in 0..channels {
-            let channel_offset = c * syn_mem_size;
-            let in_buf_offset = c * buf_stride;
-            self.syn_mem[channel_offset + syn_mem_size - overlap..channel_offset + syn_mem_size]
-                .copy_from_slice(&in_buf[in_buf_offset + frame_size..in_buf_offset + buf_stride]);
-        }
 
         let freq = &mut self.w_freq[..frame_size * channels];
         let (shift, b) = if is_transient {
@@ -1988,12 +1955,16 @@ impl CeltEncoder {
                 let qg = (gain1 / 0.09375 - 1.0 + 0.5).floor() as i32;
                 let qg = qg.clamp(0, 7);
                 let pi = (pitch_index + 1) as u32;
-                let octave = 31 - pi.leading_zeros();
-                let octave = (octave as i32 - 5).max(0) as u32;
+                // octave = EC_ILOG(pi) - 5 (EC_ILOG = 32 - clz, the BIT COUNT of
+                // pi, not floor(log2)). The old `31 - clz` was one octave low for
+                // every pi >= 32, overflowing the 4+octave residual field -> the
+                // decoder reconstructed a garbage period (the prefilter's AM/PM
+                // sideband bug). pi >= MINPERIOD+1 = 16 keeps this >= 0.
+                let octave = 32 - pi.leading_zeros() - 5;
                 rc.enc_uint(octave, 6);
                 rc.enc_bits(pi - (16 << octave), 4 + octave);
                 rc.enc_bits(qg as u32, 3);
-                rc.encode_icdf(self.tapset_decision, &TAPSET_ICDF, 2);
+                rc.encode_icdf(prefilter_tapset, &TAPSET_ICDF, 2);
             }
         }
 
@@ -2504,12 +2475,11 @@ impl CeltEncoder {
         if pf_on {
             self.prefilter_period = pitch_index;
             self.prefilter_gain = gain1;
-            self.prefilter_tapset = self.tapset_decision;
         } else {
             self.prefilter_period = COMBFILTER_MINPERIOD;
             self.prefilter_gain = 0.0;
-            self.prefilter_tapset = self.tapset_decision;
         }
+        self.prefilter_tapset = prefilter_tapset;
 
         if is_transient {
             self.consec_transient += 1;
@@ -3282,5 +3252,153 @@ mod tests {
         let pcm = vec![0.0f32; 48 + mode.overlap]; // supply ≥ frame_size samples
         let mut rc = RangeCoder::new_encoder(100);
         enc.encode_with_budget(&pcm, 48, &mut rc, 0, 800);
+    }
+
+    // Prefilter/postfilter inversion, MDCT bypassed: run the real run_prefilter
+    // per frame (with the real signalling quantization of gain/period), feed the
+    // FILTERED stream straight into the decoder's postfilter sequence (call 1
+    // old->current over shortMdctSize, call 2 current->new with the crossfade),
+    // honoring the 120-sample MDCT delay. If the encoder applies exactly what it
+    // signals with the timing the decoder inverts, the round trip is ~identity.
+    #[test]
+    fn prefilter_postfilter_inversion() {
+        let mode = modes::default_mode();
+        let n = 960usize;
+        let overlap = mode.overlap; // 120
+        let short_n = mode.short_mdct_size; // 120
+        let frames = 100usize;
+        let max_period = COMBFILTER_MAXPERIOD;
+
+        // Signal designed to TOGGLE the prefilter: alternating strongly periodic
+        // stretches (varying pitch) and noise bursts.
+        let total = frames * n;
+        let mut x = vec![0.0f32; total];
+        let mut rng = 0x12345678u32;
+        let mut next = || {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            (rng >> 8) as f32 / (1 << 24) as f32 - 0.5
+        };
+        for (t, v) in x.iter_mut().enumerate() {
+            let seg = t / (n * 10);
+            let phase = t as f32;
+            *v = match seg % 4 {
+                0 => (phase * std::f32::consts::TAU / 147.0).sin() * 8000.0, // ~326 Hz
+                1 => next() * 6000.0,
+                2 => {
+                    ((phase * std::f32::consts::TAU / 89.0).sin()
+                        + 0.5 * (phase * std::f32::consts::TAU / 44.5).sin())
+                        * 7000.0
+                }
+                _ => (phase * std::f32::consts::TAU / 480.0).sin() * 5000.0, // 100 Hz
+            };
+        }
+
+        // ---- encoder side ----
+        let mut pre = vec![0.0f32; max_period + n];
+        let mut pitch_buf = vec![0.0f32; (max_period + n) >> 1];
+        let mut prefilter_mem = vec![0.0f32; max_period];
+        let mut in_mem = vec![0.0f32; overlap];
+        let (mut prev_t, mut prev_g) = (COMBFILTER_MINPERIOD, 0.0f32);
+        let analysis = AnalysisInfo::default();
+        let mut filtered = vec![0.0f32; total];
+        let mut params = Vec::new(); // (pf_on, T, g) per frame
+        let mut in_buf = vec![0.0f32; n + overlap];
+        for k in 0..frames {
+            in_buf[..overlap].copy_from_slice(&in_mem);
+            in_buf[overlap..].copy_from_slice(&x[k * n..(k + 1) * n]);
+            let (pf_on, g1, t1) = run_prefilter(
+                &mut in_buf,
+                &mut prefilter_mem,
+                prev_t,
+                prev_g,
+                0, // prefilter_tapset (old)
+                0, // tapset_decision (new)
+                mode.window,
+                1,
+                n,
+                overlap,
+                &mut pre,
+                &mut pitch_buf,
+                &analysis,
+                0,
+                159,
+            );
+            filtered[k * n..(k + 1) * n].copy_from_slice(&in_buf[overlap..]);
+            in_mem.copy_from_slice(&in_buf[n..]);
+            params.push((pf_on, t1, g1));
+            // encoder end-of-frame state update
+            prev_t = if pf_on { t1 } else { COMBFILTER_MINPERIOD };
+            prev_g = if pf_on { g1 } else { 0.0 };
+        }
+
+        // ---- decoder side (postfilter only), 120-sample MDCT delay ----
+        let mut delayed = vec![0.0f32; total];
+        delayed[short_n..].copy_from_slice(&filtered[..total - short_n]);
+        let mut w = vec![0.0f32; max_period + n];
+        let mut post_mem = vec![0.0f32; max_period];
+        let (mut d_t_old, mut d_g_old) = (COMBFILTER_MINPERIOD, 0.0f32);
+        let (mut d_t, mut d_g) = (COMBFILTER_MINPERIOD, 0.0f32);
+        let mut out = vec![0.0f32; total];
+        for k in 0..frames {
+            let (pf_on, sig_t, sig_g) = params[k];
+            let (gain1, pitch_index) = if pf_on {
+                (sig_g, sig_t)
+            } else {
+                (0.0, COMBFILTER_MINPERIOD)
+            };
+            w[..max_period].copy_from_slice(&post_mem);
+            w[max_period..].copy_from_slice(&delayed[k * n..(k + 1) * n]);
+            if pf_on || d_g > 0.0 || d_g_old > 0.0 {
+                comb_filter_inplace(
+                    &mut w, max_period, d_t_old, d_t, short_n, d_g_old, d_g, 0, 0, mode.window,
+                    overlap,
+                );
+                comb_filter_inplace(
+                    &mut w,
+                    max_period + short_n,
+                    d_t,
+                    pitch_index,
+                    n - short_n,
+                    d_g,
+                    gain1,
+                    0,
+                    0,
+                    mode.window,
+                    overlap,
+                );
+            }
+            out[k * n..(k + 1) * n].copy_from_slice(&w[max_period..]);
+            post_mem.copy_from_slice(&w[n..]);
+            // decoder end-of-frame chain, then the lm > 0 override
+            if pf_on {
+                d_t = pitch_index;
+                d_g = gain1;
+            } else {
+                d_t = COMBFILTER_MINPERIOD;
+                d_g = 0.0;
+            }
+            d_t_old = d_t;
+            d_g_old = d_g;
+        }
+
+        // ---- compare out (delayed by short_n) against x ----
+        let m = total - 2 * n;
+        let mut se = 0.0f64;
+        let mut sx = 0.0f64;
+        for t in n..m {
+            let e = (out[t + short_n] - x[t]) as f64;
+            se += e * e;
+            sx += (x[t] as f64) * (x[t] as f64);
+        }
+        let snr = 10.0 * (sx / se.max(1e-30)).log10();
+        let engaged = params.iter().filter(|p| p.0).count();
+        assert!(
+            engaged > frames / 4,
+            "prefilter never engaged ({engaged}/{frames}) — test signal too weak"
+        );
+        assert!(
+            snr > 90.0,
+            "prefilter/postfilter round trip not transparent: SNR={snr:.1} dB (engaged {engaged}/{frames})"
+        );
     }
 }

@@ -136,7 +136,13 @@ impl MdctLookup {
                 xp2 -= 2;
             }
 
-            let loop3_iters = if mid > limit { n4 - mid } else { 0 };
+            // C: after the middle loop, i == max(limit, N4-limit) and the third
+            // loop runs to N4. The old `if mid > limit {..} else { 0 }` yielded
+            // ZERO iterations when mid <= limit — exactly the short-block case
+            // (N == 2*overlap: n4 = 2*limit), leaving f[2*limit..n2) UNWRITTEN:
+            // uninitialized-stack reads on every transient sub-MDCT (this is
+            // what made the HYB-VBR bitstream hash move across builds).
+            let loop3_iters = n4 - limit.max(mid);
             let mut wp1_l3 = 0usize;
             let mut wp2_l3 = overlap.saturating_sub(1);
             for _ in 0..loop3_iters {
