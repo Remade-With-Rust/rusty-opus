@@ -2152,6 +2152,25 @@ impl CeltEncoder {
         let ebits = &mut self.w_ebits[..ebands_stereo];
         let mut balance = 0;
 
+        // The anti-collapse bit reservation must be subtracted from the allocation
+        // budget BEFORE compute_allocation (libopus celt_encoder.c: `total_bits -=
+        // anti_collapse_rsv` precedes it) — the decoder reserves it there too.
+        // Computing it only afterwards (as this code used to) let the encoder
+        // allocate 1<<BITRES more than the decoder assumes on transient LM>=2
+        // frames -> band budgets differ from band `start` -> range desync on
+        // exactly those frames (caught by opus_demo -d's per-packet range check).
+        // Same formula as the decoder for exact symmetry.
+        let anti_collapse_rsv = if is_transient && lm >= 2 {
+            let remaining = (total_bits << BITRES) - rc.tell_frac() - 1;
+            if remaining >= ((lm as i32 + 2) << BITRES) {
+                1i32 << BITRES
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         self.last_coded_bands = clt_compute_allocation(
             mode,
             start_band,
@@ -2161,7 +2180,7 @@ impl CeltEncoder {
             alloc_trim,
             &mut intensity,
             &mut dual_stereo_val,
-            (total_bits << BITRES) - rc.tell_frac() - 1,
+            (total_bits << BITRES) - rc.tell_frac() - 1 - anti_collapse_rsv,
             &mut balance,
             pulses,
             ebits,
@@ -2189,17 +2208,6 @@ impl CeltEncoder {
         let collapse_masks = &mut self.w_collapse_masks[..nb_ebands * channels];
         let (x_split, y_split) = x.split_at_mut(frame_size);
         let y_opt = if channels == 2 { Some(y_split) } else { None };
-
-        let anti_collapse_rsv = if is_transient && lm >= 2 {
-            let remaining = (total_bits << BITRES) - rc.tell_frac() - 1;
-            if remaining >= ((lm as i32 + 2) << BITRES) {
-                1i32 << BITRES
-            } else {
-                0
-            }
-        } else {
-            0
-        };
 
         let mut dual_stereo = dual_stereo_val != 0;
 
