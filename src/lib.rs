@@ -762,6 +762,13 @@ pub struct OpusDecoder {
     w_celt_planar: Vec<f32>,
     w_celt_out: Vec<f32>,
 
+    // SILK per-frame history: libopus prepends the previous frame's last two
+    // decoded samples (`sStereo.sMid`) and feeds the resampler from offset 1, a
+    // 1-internal-sample delay line. Replicated here so our SILK output aligns
+    // with the reference across every bandwidth (was leading by 1 internal
+    // sample = 3/4/6 output samples at WB/MB/NB).
+    silk_s_mid: [i16; 2],
+
     // Auxiliary decoder for packets whose channel count differs from ours
     // (a stream may switch between mono and stereo). It decodes at the packet's
     // native channel count; we then up/downmix to our output count. Persistent
@@ -808,6 +815,7 @@ impl OpusDecoder {
             w_pcm_resampled: vec![0i16; 5760 * channels],
             w_celt_planar: vec![0.0f32; 5760 * channels],
             w_celt_out: vec![0.0f32; 5760 * channels],
+            silk_s_mid: [0; 2],
             aux: None,
         })
     }
@@ -1017,11 +1025,17 @@ impl OpusDecoder {
                         return Err("opus: SILK frame size exceeds buffer");
                     }
 
+                    let s_mid = self.silk_s_mid;
                     let ret = {
                         let (silk_dec, pcm_i16) = (&mut self.silk_dec, &mut self.w_pcm_i16);
+                        // Prepend the previous frame's last two samples (sMid) at
+                        // [0..2] and decode at offset 2, matching libopus's
+                        // samplesOut1_tmp[n][2] layout.
+                        pcm_i16[0] = s_mid[0];
+                        pcm_i16[1] = s_mid[1];
                         silk_dec.decode(
                             &mut rc,
-                            &mut pcm_i16[..pcm_i16_len],
+                            &mut pcm_i16[2..pcm_i16_len + 2],
                             silk::decode_frame::FLAG_DECODE_NORMAL,
                             true,
                             frame_duration_ms,
@@ -1034,14 +1048,20 @@ impl OpusDecoder {
                     }
 
                     let decoded_samples = ret as usize;
+                    // Carry the last two decoded samples as next frame's sMid.
+                    if decoded_samples >= 2 {
+                        self.silk_s_mid[0] = self.w_pcm_i16[decoded_samples];
+                        self.silk_s_mid[1] = self.w_pcm_i16[decoded_samples + 1];
+                    }
                     let out_start = fi * sub_output_len;
 
-                    // SILK only decodes channel 0 (mono). For multi-channel output,
-                    // replicate the mono samples to every channel.
+                    // SILK decodes channel 0 (mono); replicate to every output
+                    // channel. The resampler/copy is fed from offset 1 — the
+                    // 1-sample delay line that aligns us with the reference.
                     if self.sampling_rate == internal_sample_rate {
                         let frames = decoded_samples.min(sub_frame_size);
                         for i in 0..frames {
-                            let v = self.w_pcm_i16[i] as f32 / 32768.0;
+                            let v = self.w_pcm_i16[1 + i] as f32 / 32768.0;
                             for ch in 0..self.channels {
                                 let idx = out_start + i * self.channels + ch;
                                 if idx < output.len() {
@@ -1062,7 +1082,7 @@ impl OpusDecoder {
                             );
                             silk_res.process(
                                 &mut pcm_out[..out_len],
-                                &pcm_i16[..decoded_samples],
+                                &pcm_i16[1..1 + decoded_samples],
                                 decoded_samples as i32,
                             );
                         }
