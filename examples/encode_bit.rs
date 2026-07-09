@@ -44,9 +44,16 @@ fn main() {
 
     let mut enc = OpusEncoder::new(rate, channels, app).unwrap();
     enc.bitrate_bps = bitrate;
-    // VBR=1 switches off hard CBR (libopus's default mode is VBR).
-    if std::env::var("VBR").is_ok() {
-        enc.use_cbr = false;
+    // Explicit rate-control mode: CBR unless VBR=1 (the OpusEncoder default is
+    // VBR, mirroring libopus; the conformance harness pins CBR for stable A/Bs).
+    enc.use_cbr = std::env::var("VBR").is_err();
+    if let Ok(bw) = std::env::var("FORCE_BW") {
+        enc.force_bandwidth = Some(match bw.as_str() {
+            "nb" => opus_rs::Bandwidth::Narrowband,
+            "wb" => opus_rs::Bandwidth::Wideband,
+            "swb" => opus_rs::Bandwidth::Superwideband,
+            _ => opus_rs::Bandwidth::Fullband,
+        });
     }
 
     let samples_per_frame = frame_size * channels;

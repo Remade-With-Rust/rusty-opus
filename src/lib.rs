@@ -75,6 +75,12 @@ pub struct OpusEncoder {
     prev_enc_mode: Option<OpusMode>,
 
     variable_hp_smth2_q15: i32,
+    /// Rate-dependent automatic bandwidth (libopus auto_bandwidth), stored as the
+    /// Bandwidth discriminant (1101 NB .. 1105 FB). Hysteresis state.
+    auto_bandwidth: i32,
+    first_frame: bool,
+    /// Overrides automatic bandwidth selection when set (OPUS_SET_BANDWIDTH).
+    pub force_bandwidth: Option<Bandwidth>,
     hp_mem: Vec<i32>,
 
     buf_filtered: Vec<i16>,
@@ -89,6 +95,13 @@ pub struct OpusEncoder {
 
     rc: RangeCoder,
 }
+
+// libopus opus_encoder.c bandwidth thresholds: (threshold, hysteresis) pairs for
+// NB<->MB, MB<->WB, WB<->SWB, SWB<->FB, interpolated voice<->music by voice_est^2.
+const MONO_VOICE_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 13500, 1000, 14000, 2000];
+const MONO_MUSIC_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 11000, 1000, 12000, 2000];
+const STEREO_VOICE_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 13500, 1000, 14000, 2000];
+const STEREO_MUSIC_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 11000, 1000, 12000, 2000];
 
 fn compute_equiv_rate(
     bitrate: i32,
@@ -294,6 +307,9 @@ impl OpusEncoder {
             prev_enc_mode: None,
             mode: opus_mode,
             variable_hp_smth2_q15,
+            auto_bandwidth: 0,
+            first_frame: true,
+            force_bandwidth: None,
             hp_mem: vec![0; channels * 2],
 
             buf_filtered: Vec::new(),
@@ -379,6 +395,117 @@ impl OpusEncoder {
                 OpusMode::SilkOnly
             }
         };
+
+        // ---- Automatic rate-dependent bandwidth selection (opus_encoder.c:1456) ----
+        // Walk down from FB; stop at the first bandwidth whose hysteresis-adjusted
+        // threshold the equivalent rate meets. Thresholds interpolate voice<->music
+        // by voice_est^2. Without the tonality analysis we cannot do
+        // detected-bandwidth reduction, so this reproduces libopus's
+        // complexity-0 choices (measured: WB @16k, SWB @20k, FB @24k+ voip mono).
+        {
+            let equiv = compute_equiv_rate(
+                self.bitrate_bps,
+                self.channels,
+                frame_rate,
+                !self.use_cbr,
+                self.complexity,
+                self.packet_loss_perc,
+            );
+            let voice_est: i32 = match self.application {
+                Application::Voip => 115,
+                Application::Audio => 48,
+                Application::RestrictedLowDelay => 0,
+            };
+            let (vt, mt) = if self.channels == 2 {
+                (
+                    &STEREO_VOICE_BANDWIDTH_THRESHOLDS,
+                    &STEREO_MUSIC_BANDWIDTH_THRESHOLDS,
+                )
+            } else {
+                (
+                    &MONO_VOICE_BANDWIDTH_THRESHOLDS,
+                    &MONO_MUSIC_BANDWIDTH_THRESHOLDS,
+                )
+            };
+            let mut th = [0i32; 8];
+            for i in 0..8 {
+                th[i] = mt[i] + ((voice_est * voice_est * (vt[i] - mt[i])) >> 14);
+            }
+            const NB: i32 = Bandwidth::Narrowband as i32; // 1101
+            const MB: i32 = Bandwidth::Mediumband as i32; // 1102
+            const FB: i32 = Bandwidth::Fullband as i32; // 1105
+            let mut bw = FB;
+            while bw > NB {
+                let idx = (2 * (bw - MB)) as usize;
+                let mut threshold = th[idx];
+                let hysteresis = th[idx + 1];
+                if !self.first_frame {
+                    if self.auto_bandwidth >= bw {
+                        threshold -= hysteresis;
+                    } else {
+                        threshold += hysteresis;
+                    }
+                }
+                if equiv >= threshold {
+                    break;
+                }
+                bw -= 1;
+            }
+            // Mediumband is no longer used by libopus's selector.
+            if bw == MB {
+                bw = Bandwidth::Wideband as i32;
+            }
+            self.auto_bandwidth = bw;
+            // Hybrid at unsafe CBR rates starves SILK: cap at WB below 15 kb/s.
+            if mode != OpusMode::CeltOnly && self.use_cbr && self.bitrate_bps < 15000 {
+                bw = bw.min(Bandwidth::Wideband as i32);
+            }
+            // Our CELT encoder has no end-band support yet, so SWB (end band 19)
+            // cannot be coded conformantly; map SWB down to WB for SILK/hybrid.
+            // (libopus-with-analysis picks WB SILK in that range for speech anyway.)
+            if bw == Bandwidth::Superwideband as i32 && mode != OpusMode::CeltOnly {
+                bw = Bandwidth::Wideband as i32;
+            }
+            // NB/MB SILK-internal rates (8/12 kHz) aren't wired for >16 kHz API
+            // input yet (no 48k->8k/12k encode resamplers); clamp to WB.
+            if mode != OpusMode::CeltOnly && self.sampling_rate > 16000 {
+                bw = bw.max(Bandwidth::Wideband as i32);
+            }
+            // Never code above the input's Nyquist (opus_encoder.c:1516).
+            if self.sampling_rate <= 24000 {
+                bw = bw.min(Bandwidth::Superwideband as i32);
+            }
+            if self.sampling_rate <= 16000 {
+                bw = bw.min(Bandwidth::Wideband as i32);
+            }
+            if self.sampling_rate <= 12000 {
+                bw = bw.min(Bandwidth::Mediumband as i32);
+            }
+            if self.sampling_rate <= 8000 {
+                bw = bw.min(Bandwidth::Narrowband as i32);
+            }
+            // (MB remap above may have been undone by the caps; keep WB floor
+            // only where the API rate allows it.)
+            if bw == Bandwidth::Mediumband as i32 && self.sampling_rate > 12000 {
+                bw = Bandwidth::Wideband as i32;
+            }
+            // CELT-only frames likewise always code the full 21 bands today.
+            if mode == OpusMode::CeltOnly {
+                bw = FB;
+            }
+            self.bandwidth = match self.force_bandwidth {
+                Some(f) => f,
+                None => match bw {
+                    x if x == NB => Bandwidth::Narrowband,
+                    x if x == MB => Bandwidth::Mediumband,
+                    x if x == Bandwidth::Wideband as i32 => Bandwidth::Wideband,
+                    x if x == Bandwidth::Superwideband as i32 => Bandwidth::Superwideband,
+                    x if x == FB => Bandwidth::Fullband,
+                    _ => Bandwidth::Wideband,
+                },
+            };
+            self.first_frame = false;
+        }
 
         let curr_bw = self.bandwidth;
         if mode == OpusMode::SilkOnly
@@ -515,21 +642,16 @@ impl OpusEncoder {
 
             let silk_input: &[i16] = if mode == OpusMode::SilkOnly && self.sampling_rate > 16000 {
                 if self.sampling_rate == 48000 {
-                    let stage1_size = frame_size / 2;
-                    let mut stage1_buf = [0i16; 480];
-                    silk_resampler_down2(
-                        &mut self.down2_state_first,
-                        &mut stage1_buf[..stage1_size],
-                        input_i16,
-                        frame_size as i32,
-                    );
-                    let silk_frame_size = stage1_size * 2 / 3;
+                    // 48k -> 16k via the same direct FIR the Hybrid path uses. The
+                    // old down2 + down2_3 two-stage chain ALIASES: a 1 kHz sine
+                    // came out with a 7 kHz mirror at ~1/3 amplitude (spectrum-
+                    // verified), wrecking every SILK-only encode from 48 kHz input.
+                    let silk_frame_size = frame_size / 3;
                     self.buf_silk_input.resize(silk_frame_size, 0);
-                    silk_resampler_down2_3(
-                        &mut self.down2_3_state,
+                    silk::resampler::silk_resampler_down_1_3(
+                        &mut self.down_1_3_state,
                         &mut self.buf_silk_input,
-                        &stage1_buf[..stage1_size],
-                        stage1_size as i32,
+                        input_i16,
                     );
                     &self.buf_silk_input
                 } else if self.sampling_rate == 24000 {
@@ -590,10 +712,15 @@ impl OpusEncoder {
 
             let mut pn_bytes = 0;
 
+            // The frames-per-second math below divides by silk_input.len(), which is
+            // at the SILK-INTERNAL rate — so the rate here must be internal too.
+            // Using the API rate at 48 kHz told SILK to target 3x the real budget
+            // with a hard max_bits cap -> the gain loop crushed every frame to fit
+            // -> near-silent output (only worked at 16 kHz API where they coincide).
             let silk_rate_for_calc = if mode == OpusMode::Hybrid {
                 16000
             } else {
-                self.sampling_rate
+                self.sampling_rate.min(16000)
             };
             let silk_frame_len = silk_input.len();
 
@@ -650,7 +777,11 @@ impl OpusEncoder {
             }
         }
 
-        if mode == OpusMode::Hybrid {
+        // The hybrid redundancy flag is only present when >=37 bits remain
+        // (opus_encoder.c: ec_tell+17+20 <= 8*(max_data_bytes-1)); the decoder
+        // gates its read identically. Writing it unconditionally desynced every
+        // frame where SILK left fewer than 37 bits (starved low-rate hybrid).
+        if mode == OpusMode::Hybrid && self.rc.tell() + 37 <= ((n_bytes - 1) * 8) as i32 {
             self.rc.encode_bit_logp(false, 12); // redundancy = 0
         }
 
