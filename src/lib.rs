@@ -855,10 +855,15 @@ impl OpusDecoder {
         // state is blind to the interleaved stereo packets, so its state is stale
         // at every mono<->stereo switch. libopus keeps ONE decoder whose channel-0
         // resampler and stereo state run continuously across the switches.
-        let silk_mono_in_stereo =
-            mode == OpusMode::SilkOnly && packet_channels == 1 && self.channels == 2;
+        // Mono SilkOnly OR CeltOnly packet in a stereo stream: decode through the
+        // PRIMARY (unified path) so inter-frame state stays one continuous chain
+        // across mono<->stereo switches (SILK resampler/stereo state; CELT via
+        // stream_channels=1, C=1/CC=2). Hybrid mono still uses the aux for now.
+        let mono_in_stereo = (mode == OpusMode::SilkOnly || mode == OpusMode::CeltOnly)
+            && packet_channels == 1
+            && self.channels == 2;
 
-        if packet_channels != self.channels && !silk_mono_in_stereo {
+        if packet_channels != self.channels && !mono_in_stereo {
             // The packet's channel count differs from ours (a stream can switch
             // between mono and stereo). Decode it at its native channel count in
             // a persistent auxiliary decoder, then render to our output count:
@@ -1256,6 +1261,8 @@ impl OpusDecoder {
 
             OpusMode::CeltOnly => {
                 let celt_end_band = self.celt_end_band_from_toc(toc);
+                // Mono packet in a stereo stream => C=1, CC=2 (continuous state).
+                self.celt_dec.set_stream_channels(packet_channels);
 
                 for (fi, payload) in frame_payloads.iter().enumerate() {
                     let mut rc = RangeCoder::new_decoder(payload);
