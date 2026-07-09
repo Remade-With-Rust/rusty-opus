@@ -769,6 +769,10 @@ pub struct OpusDecoder {
     // sample = 3/4/6 output samples at WB/MB/NB).
     silk_s_mid: [i16; 2],
 
+    // Range decoder final `rng` from the last decoded frame (conformance/desync
+    // diagnostic: compare against the encoder's stored final range).
+    pub last_range: u32,
+
     // Auxiliary decoder for packets whose channel count differs from ours
     // (a stream may switch between mono and stereo). It decodes at the packet's
     // native channel count; we then up/downmix to our output count. Persistent
@@ -816,6 +820,7 @@ impl OpusDecoder {
             w_celt_planar: vec![0.0f32; 5760 * channels],
             w_celt_out: vec![0.0f32; 5760 * channels],
             silk_s_mid: [0; 2],
+            last_range: 0,
             aux: None,
         })
     }
@@ -855,6 +860,7 @@ impl OpusDecoder {
             let aux = self.aux.as_mut().unwrap();
             let mut buf = vec![0.0f32; frame_size * packet_channels];
             let n = aux.decode(input, frame_size, &mut buf)?;
+            self.last_range = aux.last_range;
             if packet_channels == 1 && self.channels == 2 {
                 for i in 0..n {
                     let v = buf[i];
@@ -1114,6 +1120,7 @@ impl OpusDecoder {
                         };
                         silk_off += out_len;
                     }
+                    self.last_range = rc.rng;
                 }
                 self.prev_mode = Some(OpusMode::SilkOnly);
                 Ok(frame_size)
@@ -1162,6 +1169,7 @@ impl OpusDecoder {
                             }
                         }
                     }
+                    self.last_range = rc.rng;
                 }
                 self.prev_mode = Some(OpusMode::CeltOnly);
                 Ok(frame_size)
@@ -1290,6 +1298,7 @@ impl OpusDecoder {
                         output[out_start + j] =
                             (self.w_silk_out[j] + self.w_celt_out[j]).clamp(-1.0, 1.0);
                     }
+                    self.last_range = rc.rng;
                 }
                 self.prev_mode = Some(OpusMode::Hybrid);
                 Ok(frame_size)

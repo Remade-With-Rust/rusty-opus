@@ -79,9 +79,13 @@ fn main() {
 
     let (mut pos, mut pkt, mut errors, mut samples) = (0usize, 0u32, 0u32, 0usize);
     let mut ch_hist = [0usize; 3];
+    let check_range = env::var("RANGECHK").is_ok();
+    let mut range_mismatch = 0u32;
+    let mut first_mismatch_pkt = 0u32;
     while pos + 8 <= data.len() {
         let len = be32(&data[pos..pos + 4]) as usize;
-        pos += 8; // skip length + final-range
+        let enc_final_range = be32(&data[pos + 4..pos + 8]);
+        pos += 8; // length + final-range
         if len == 0 || pos + len > data.len() {
             break;
         }
@@ -94,6 +98,18 @@ fn main() {
         let fs = packet_frame_size(payload, rate).min(max_frame);
         match dec.decode(payload, fs, &mut pcm) {
             Ok(n) => {
+                if check_range && dec.last_range != enc_final_range {
+                    range_mismatch += 1;
+                    if first_mismatch_pkt == 0 {
+                        first_mismatch_pkt = pkt;
+                    }
+                    if range_mismatch <= 8 {
+                        eprintln!(
+                            "  RANGE MISMATCH pkt {pkt} (toc_ch={pch}): enc={enc_final_range} our={}",
+                            dec.last_range
+                        );
+                    }
+                }
                 for &x in pcm.iter().take(n * channels) {
                     // Match libopus FLOAT2INT16 exactly: scale, clamp, then
                     // round half-to-even (lrintf), not half-away-from-zero.
@@ -115,4 +131,7 @@ fn main() {
         "  packets={pkt} mono_toc={} stereo_toc={} samples/ch={samples} errors={errors}",
         ch_hist[1], ch_hist[2]
     );
+    if check_range {
+        eprintln!("  RANGE: {range_mismatch} mismatches (first at pkt {first_mismatch_pkt})");
+    }
 }
