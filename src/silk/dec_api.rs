@@ -80,39 +80,43 @@ impl SilkDecoder {
         }
 
         if self.channel_state[0].n_frames_decoded == 0 {
-            match payload_size_ms {
-                0 | 10 => {
-                    self.channel_state[0].n_frames_per_packet = 1;
-                    self.channel_state[0].nb_subfr = 2;
-                }
-                20 => {
-                    self.channel_state[0].n_frames_per_packet = 1;
-                    self.channel_state[0].nb_subfr = MAX_NB_SUBFR as i32;
-                }
-                40 => {
-                    self.channel_state[0].n_frames_per_packet = 2;
-                    self.channel_state[0].nb_subfr = MAX_NB_SUBFR as i32;
-                }
-                60 => {
-                    self.channel_state[0].n_frames_per_packet = 3;
-                    self.channel_state[0].nb_subfr = MAX_NB_SUBFR as i32;
-                }
-                _ => return -1,
-            }
-
             let fs_khz_dec = (internal_sample_rate >> 10) + 1;
             if fs_khz_dec != 8 && fs_khz_dec != 12 && fs_khz_dec != 16 {
                 return -1;
             }
             let api_sample_rate = self.channel_state[0].fs_api_hz;
-            let ret = silk_decoder_set_fs(&mut self.channel_state[0], fs_khz_dec, api_sample_rate);
-            if ret < 0 {
-                return ret;
-            }
-
-            if payload_size_ms == 10 {
-                self.channel_state[0].nb_subfr = 2;
-                self.channel_state[0].frame_length = self.channel_state[0].subfr_length * 2;
+            // libopus configures EVERY internal channel here, not just ch0 — the
+            // side channel needs its frame_length/fs set or a stereo side decode
+            // consumes the wrong number of bits and desyncs the range coder.
+            for n in 0..self.n_channels_internal as usize {
+                match payload_size_ms {
+                    0 | 10 => {
+                        self.channel_state[n].n_frames_per_packet = 1;
+                        self.channel_state[n].nb_subfr = 2;
+                    }
+                    20 => {
+                        self.channel_state[n].n_frames_per_packet = 1;
+                        self.channel_state[n].nb_subfr = MAX_NB_SUBFR as i32;
+                    }
+                    40 => {
+                        self.channel_state[n].n_frames_per_packet = 2;
+                        self.channel_state[n].nb_subfr = MAX_NB_SUBFR as i32;
+                    }
+                    60 => {
+                        self.channel_state[n].n_frames_per_packet = 3;
+                        self.channel_state[n].nb_subfr = MAX_NB_SUBFR as i32;
+                    }
+                    _ => return -1,
+                }
+                let ret =
+                    silk_decoder_set_fs(&mut self.channel_state[n], fs_khz_dec, api_sample_rate);
+                if ret < 0 {
+                    return ret;
+                }
+                if payload_size_ms == 10 {
+                    self.channel_state[n].nb_subfr = 2;
+                    self.channel_state[n].frame_length = self.channel_state[n].subfr_length * 2;
+                }
             }
         }
 
@@ -187,15 +191,35 @@ impl SilkDecoder {
         }
 
         let frame_index = self.channel_state[0].n_frames_decoded as usize;
+        let mut decode_only_middle = 0i32;
         if self.n_channels_internal == 2 && lost_flag == FLAG_DECODE_NORMAL {
-            // Predictors decoded here; consumed by the (upcoming) unified stereo
-            // MS->LR reconstruction. Bits must be read to keep the range coder
-            // in sync regardless.
+            // Predictors + mid-only flag. Bits must be read to keep the range
+            // coder in sync.
             let _ = silk_stereo_decode_pred(range_dec);
             if self.channel_state[1].vad_flags[frame_index] == 0 {
-                silk_stereo_decode_mid_only(range_dec);
+                decode_only_middle = if silk_stereo_decode_mid_only(range_dec) {
+                    1
+                } else {
+                    0
+                };
             }
         }
+
+        // Reset the side channel's prediction memory for the first frame that
+        // codes side after a run of mid-only frames (libopus dec_API.c:249-256).
+        if self.n_channels_internal == 2
+            && decode_only_middle == 0
+            && self.prev_decode_only_middle == 1
+        {
+            let ch1 = &mut self.channel_state[1];
+            ch1.out_buf.fill(0);
+            ch1.s_lpc_q14_buf.fill(0);
+            ch1.lag_prev = 100;
+            ch1.last_gain_index = 10;
+            ch1.prev_signal_type = TYPE_NO_VOICE_ACTIVITY;
+            ch1.first_frame_after_reset = 1;
+        }
+
         let cond_coding = if frame_index == 0 {
             CODE_INDEPENDENTLY
         } else {
@@ -203,17 +227,57 @@ impl SilkDecoder {
         };
 
         let mut n_samples_out: i32 = 0;
-        let channel = &mut self.channel_state[0];
         let ret = silk_decode_frame(
-            channel,
+            &mut self.channel_state[0],
             range_dec,
             output,
             &mut n_samples_out,
             lost_flag,
             cond_coding,
         );
+        self.channel_state[0].n_frames_decoded += 1;
 
-        channel.n_frames_decoded += 1;
+        // Stereo: we output only the mid (mono downmix) for now, but the side
+        // frame's bits MUST still be consumed or the range coder desyncs for the
+        // next internal frame of a multi-frame packet (the mid of frames 2/3 then
+        // decodes from garbage). Decode it into a scratch buffer and discard.
+        if self.n_channels_internal == 2 && decode_only_middle == 0 && lost_flag == FLAG_DECODE_NORMAL
+        {
+            // libopus FrameIndex for the side (n=1) = channel_state[0].nFramesDecoded - 1,
+            // evaluated AFTER ch0's own increment, which equals the original
+            // frame_index. (Using frame_index-1 wrongly forced INDEP on the 2nd
+            // internal frame -> wrong bit count -> desync.)
+            let cond1 = if frame_index == 0 {
+                CODE_INDEPENDENTLY
+            } else if self.prev_decode_only_middle == 1 {
+                CODE_INDEPENDENTLY_NO_LTP_SCALING
+            } else {
+                CODE_CONDITIONALLY
+            };
+            let mut side_scratch = [0i16; MAX_FRAME_LENGTH];
+            let mut ns_side: i32 = 0;
+            let ret1 = silk_decode_frame(
+                &mut self.channel_state[1],
+                range_dec,
+                &mut side_scratch,
+                &mut ns_side,
+                lost_flag,
+                cond1,
+            );
+            if ret1 < 0 {
+                return ret1;
+            }
+        }
+
+        // libopus increments channel_state[1].nFramesDecoded on EVERY internal
+        // frame (even mid-only). The side's silk_decode_frame keys its VAD/
+        // signal-type lookup off this counter; leaving it at 0 made every side
+        // frame read vad_flags[0] -> wrong signal type on frame 2+ -> desync.
+        if self.n_channels_internal == 2 {
+            self.channel_state[1].n_frames_decoded += 1;
+        }
+
+        self.prev_decode_only_middle = decode_only_middle;
 
         if ret < 0 { ret } else { n_samples_out }
     }

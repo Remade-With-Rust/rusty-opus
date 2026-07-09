@@ -8,7 +8,12 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
     }
 
     let new_subfr_length = (SUB_FRAME_LENGTH_MS as i32) * fs_khz;
-    let new_frame_length = new_subfr_length * MAX_NB_SUBFR as i32;
+    // libopus keys frame_length AND the pitch-contour table off the CURRENT
+    // nb_subfr (set by the caller before this call): 10 ms frames use nb_subfr=2
+    // with the 10 ms contour CDF, 20 ms use nb_subfr=4. Overwriting nb_subfr to
+    // MAX here forced the 20 ms contour on every 10 ms frame -> wrong bit count
+    // -> range-coder desync on the first 10 ms packet.
+    let new_frame_length = new_subfr_length * dec.nb_subfr;
     // libopus resets the decoder's sample-history state whenever the internal
     // bandwidth (or frame length) changes; otherwise the first frame at the new
     // rate runs its LPC filter on stale history and diverges (garbage at every
@@ -18,7 +23,6 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
     dec.fs_khz = fs_khz;
     dec.fs_api_hz = fs_api_hz;
 
-    dec.nb_subfr = MAX_NB_SUBFR as i32;
     dec.subfr_length = new_subfr_length;
     dec.frame_length = new_frame_length;
     dec.ltp_mem_length = (LTP_MEM_LENGTH_MS as i32) * fs_khz;
@@ -85,6 +89,10 @@ pub fn silk_reset_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
     ps_dec.loss_cnt = 0;
     ps_dec.prev_signal_type = TYPE_NO_VOICE_ACTIVITY;
     ps_dec.indices = Default::default();
+    // silk_decoder_set_fs relies on nb_subfr already holding a valid value (the
+    // caller sets it per-packet); seed it so the very first set_fs computes the
+    // right frame_length / pitch-contour table.
+    ps_dec.nb_subfr = MAX_NB_SUBFR as i32;
 
     0
 }

@@ -95,7 +95,10 @@ fn main() {
         match dec.decode(payload, fs, &mut pcm) {
             Ok(n) => {
                 for &x in pcm.iter().take(n * channels) {
-                    let s = (x.clamp(-1.0, 1.0) * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+                    // Match libopus FLOAT2INT16 exactly: scale, clamp, then
+                    // round half-to-even (lrintf), not half-away-from-zero.
+                    let scaled = (x * 32768.0).clamp(-32768.0, 32767.0);
+                    let s = scaled.round_ties_even() as i16;
                     out.write_all(&s.to_le_bytes()).unwrap();
                 }
                 samples += n;
