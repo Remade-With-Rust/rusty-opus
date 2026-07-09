@@ -2405,6 +2405,42 @@ impl CeltDecoder {
         }
     }
 
+    /// Seed this decoder's inter-frame state from another decoder (typically the
+    /// auxiliary mono decoder), replicating its channel 0 into every channel of
+    /// self. Used at a mono->stereo switch so the primary stereo CeltDecoder's
+    /// overlap/energy/prefilter state is continuous with the preceding mono
+    /// packets (which libopus keeps in one continuous decoder) — without this the
+    /// first stereo frame's MDCT overlap-add starts from silence.
+    pub fn seed_from(&mut self, src: &CeltDecoder) {
+        let overlap = self.mode.overlap;
+        let nb = self.mode.nb_ebands;
+        let per_dm = DECODE_BUFFER_SIZE + overlap;
+        let src_ch = src.channels.max(1);
+        for c in 0..self.channels {
+            let sc = c.min(src_ch - 1);
+            self.decode_mem[c * per_dm..(c + 1) * per_dm]
+                .copy_from_slice(&src.decode_mem[sc * per_dm..(sc + 1) * per_dm]);
+            self.old_band_e[c * nb..(c + 1) * nb]
+                .copy_from_slice(&src.old_band_e[sc * nb..(sc + 1) * nb]);
+            self.old_band_e2[c * nb..(c + 1) * nb]
+                .copy_from_slice(&src.old_band_e2[sc * nb..(sc + 1) * nb]);
+            self.old_band_e3[c * nb..(c + 1) * nb]
+                .copy_from_slice(&src.old_band_e3[sc * nb..(sc + 1) * nb]);
+            self.preemph_mem[c] = src.preemph_mem[sc];
+            self.prefilter_mem[c * COMBFILTER_MAXPERIOD..(c + 1) * COMBFILTER_MAXPERIOD]
+                .copy_from_slice(
+                    &src.prefilter_mem[sc * COMBFILTER_MAXPERIOD..(sc + 1) * COMBFILTER_MAXPERIOD],
+                );
+        }
+        self.prefilter_period = src.prefilter_period;
+        self.prefilter_period_old = src.prefilter_period_old;
+        self.prefilter_gain = src.prefilter_gain;
+        self.prefilter_gain_old = src.prefilter_gain_old;
+        self.prefilter_tapset = src.prefilter_tapset;
+        self.prefilter_tapset_old = src.prefilter_tapset_old;
+        self.rng = src.rng;
+    }
+
     pub fn decode(&mut self, compressed: &[u8], frame_size: usize, pcm: &mut [f32]) -> usize {
         self.decode_impl(compressed, frame_size, pcm, 0, self.mode.nb_ebands)
     }

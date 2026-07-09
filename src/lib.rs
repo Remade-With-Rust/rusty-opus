@@ -780,6 +780,11 @@ pub struct OpusDecoder {
     // native channel count; we then up/downmix to our output count. Persistent
     // so the "other" channel mode keeps its own inter-frame state.
     aux: Option<Box<OpusDecoder>>,
+    // Set when a packet was just decoded by the aux (a mono packet in a stereo
+    // stream); triggers seeding the primary CELT decoder's overlap/energy state
+    // from the aux at the next primary (stereo) CELT/Hybrid packet, so the MDCT
+    // overlap-add is continuous across the mono->stereo switch.
+    prev_used_aux: bool,
 }
 
 impl OpusDecoder {
@@ -825,6 +830,7 @@ impl OpusDecoder {
             silk_s_mid: [0; 2],
             last_range: 0,
             aux: None,
+            prev_used_aux: false,
         })
     }
 
@@ -887,7 +893,22 @@ impl OpusDecoder {
                 output[..m].copy_from_slice(&buf[..m]);
             }
             self.prev_mode = Some(mode);
+            self.prev_used_aux = true;
             return Ok(n);
+        }
+
+        // First primary (native-channel) packet after a run of aux (mono-in-stereo)
+        // packets: seed the primary CELT decoder's inter-frame state from the aux
+        // so the mono->stereo MDCT overlap-add is continuous (matches libopus's
+        // single continuous decoder). SILK carries its own state through the
+        // primary already; this is for the CELT/Hybrid high band.
+        if self.prev_used_aux {
+            self.prev_used_aux = false;
+            if (mode == OpusMode::CeltOnly || mode == OpusMode::Hybrid) && self.channels == 2 {
+                if let Some(aux) = self.aux.as_ref() {
+                    self.celt_dec.seed_from(&aux.celt_dec);
+                }
+            }
         }
 
         let code = toc & 0x03;
