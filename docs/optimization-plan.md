@@ -90,7 +90,23 @@ kernel itself (S5).
 
 ---
 
-## Status — three AVX2 bricks landed, SILK ~+31% over scalar (2026-07-08)
+## Status — 2026-07-09 re-baseline (post conformance campaign + real VBR)
+
+Verified on today's tree (decoder 12/12 RFC-conformant; encoder range-clean on the
+full config matrix; REAL VBR landed — the F4 "our VBR is effectively CBR" root
+cause is now FIXED, `compute_vbr` ported, default mode is true VBR):
+SILK 143x best / 138x median RT (VBR ~16 kbps on the synthetic clip), HYBRID
+127x/123x, CELT 256x/249x. Quality re-verdict vs libopus (oracle-decoded,
+opus_compare + PEAQ ODG on real music): **CELT now BEATS libopus at every CBR
+point measured** (e.g. 64k stereo music 0.41 vs 0.76, ODG -1.48 vs -2.11; the F4
+guitar regression predated the prefilter kill + trim/anti-collapse-rsv/endband
+conformance fixes). SILK speech: parity at 32-48k, ~0.2-0.5 behind at 12-24k
+(libopus's SILK tuning) — that is now a QUALITY lever, not just speed.
+Complexity->nStatesDelayedDecision ladder verified identical to libopus (Path 1
+available via the public complexity knob). Remaining speed levers unchanged: R1
+frame-parallel (recommended) and S1d hard mode — each its own campaign.
+
+## (historical) Status — three AVX2 bricks landed, SILK ~+31% over scalar (2026-07-08)
 
 **S1c** (LPC prediction) + **S2** (warped autocorr) + **S1d/Path 2** (cross-state NSQ
 shaping filter, i64-lane + persistent SoA) — all **byte-identical**, together
