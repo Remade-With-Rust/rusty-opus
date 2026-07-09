@@ -7,12 +7,20 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
         return -1;
     }
 
+    let new_subfr_length = (SUB_FRAME_LENGTH_MS as i32) * fs_khz;
+    let new_frame_length = new_subfr_length * MAX_NB_SUBFR as i32;
+    // libopus resets the decoder's sample-history state whenever the internal
+    // bandwidth (or frame length) changes; otherwise the first frame at the new
+    // rate runs its LPC filter on stale history and diverges (garbage at every
+    // bandwidth transition). Detect the change before overwriting the fields.
+    let changed = dec.fs_khz != fs_khz || dec.frame_length != new_frame_length;
+
     dec.fs_khz = fs_khz;
     dec.fs_api_hz = fs_api_hz;
 
     dec.nb_subfr = MAX_NB_SUBFR as i32;
-    dec.subfr_length = (SUB_FRAME_LENGTH_MS as i32) * fs_khz;
-    dec.frame_length = dec.subfr_length * dec.nb_subfr;
+    dec.subfr_length = new_subfr_length;
+    dec.frame_length = new_frame_length;
     dec.ltp_mem_length = (LTP_MEM_LENGTH_MS as i32) * fs_khz;
     dec.lpc_order = if fs_khz == 8 {
         MIN_LPC_ORDER as i32
@@ -44,6 +52,15 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
         12 => Some(&SILK_NLSF_CB_NB_MB),
         _ => Some(&SILK_NLSF_CB_WB),
     };
+
+    if changed {
+        dec.first_frame_after_reset = 1;
+        dec.lag_prev = 100;
+        dec.last_gain_index = 10;
+        dec.prev_signal_type = TYPE_NO_VOICE_ACTIVITY;
+        dec.out_buf.fill(0);
+        dec.s_lpc_q14_buf.fill(0);
+    }
 
     0
 }
