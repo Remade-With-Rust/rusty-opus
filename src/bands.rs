@@ -1560,7 +1560,12 @@ fn quant_band_n1(
         }
     }
     if let Some(l_out) = lowband_out {
-        l_out[0] = x[0] / 16.0;
+        // libopus: lowband_out[0] = SHR16(X[0],4). In the FLOAT build SHR16(a,shift)
+        // is the IDENTITY (celt/arch.h: `#define SHR16(a,shift) (a)`), so this is
+        // just X[0] — NOT X[0]/16 (that /16 is the fixed-point interpretation). The
+        // stray /16 shrank the n=1 fold source 16x, corrupting the folded high bands
+        // of low-rate frames (e.g. 2.5 ms FB stereo) that fold from these bands.
+        l_out[0] = x[0];
     }
     1
 }
