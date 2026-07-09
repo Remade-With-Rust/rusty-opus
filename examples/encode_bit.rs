@@ -44,6 +44,10 @@ fn main() {
 
     let mut enc = OpusEncoder::new(rate, channels, app).unwrap();
     enc.bitrate_bps = bitrate;
+    // VBR=1 switches off hard CBR (libopus's default mode is VBR).
+    if std::env::var("VBR").is_ok() {
+        enc.use_cbr = false;
+    }
 
     let samples_per_frame = frame_size * channels;
     let total_samples = data.len() / 2;

@@ -87,8 +87,13 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
 
 /// FNV-1a over the full packet stream + a running byte/packet tally.
 fn encode_hash(rate: u32, channels: usize, app: Application, bitrate: i32, pcm: &[f32]) -> (u64, usize, usize) {
+    encode_hash_mode(rate, channels, app, bitrate, pcm, true)
+}
+
+fn encode_hash_mode(rate: u32, channels: usize, app: Application, bitrate: i32, pcm: &[f32], cbr: bool) -> (u64, usize, usize) {
     let mut enc = OpusEncoder::new(rate as i32, channels, app).unwrap();
     enc.bitrate_bps = bitrate;
+    enc.use_cbr = cbr;
     let frame = rate as usize / 50;
     let step = frame * channels;
     let mut out = vec![0u8; 4000];
@@ -111,15 +116,17 @@ fn oracle_bitexact() {
     let secs = 20.0f32;
     // (name, expected_hash, expected_bytes, expected_packets)
     // Re-frozen 2026-07-09 on the conformance-fixed tree (haar1, alloc row 10, anti-collapse rsv, alloc_trim fallback, prefilter off). Layout-stability verified by struct-padding perturbation + scratch-buffer canaries.
-    let cases: [(&str, u64, usize, usize); 3] = [
+    let cases: [(&str, u64, usize, usize); 4] = [
         ("CELT  48k stereo music @128k", 0xff9e_58ff_819e_bba7, 320000, 1000),
-        ("SILK  16k mono speech  @24k ", 0xd9ce_e0b6_4e49_7653, 38500, 1000),
-        ("HYBRID 48k mono speech @32k ", 0x2e84_540c_0bd1_6327, 80000, 1000),
+        ("SILK-VBR 16k mono speech @24k", 0xed4c_4ff8_c61e_3b9b, 40811, 1000),
+        ("HYB-VBR 48k mono speech @32k ", 0x3c0c_9549_a282_bd2d, 83913, 1000),
+        ("VBR CELT 48k st music @128k ", 0xcf9c_a30f_32ee_d888, 321030, 1000),
     ];
     let got = [
         encode_hash(48000, 2, Application::Audio, 128_000, &synth_music(48000, 2, secs)),
-        encode_hash(16000, 1, Application::Voip, 24_000, &synth_speech(16000, secs)),
-        encode_hash(48000, 1, Application::Voip, 32_000, &synth_speech(48000, secs)),
+        encode_hash_mode(16000, 1, Application::Voip, 24_000, &synth_speech(16000, secs), false),
+        encode_hash_mode(48000, 1, Application::Voip, 32_000, &synth_speech(48000, secs), false),
+        encode_hash_mode(48000, 2, Application::Audio, 128_000, &synth_music(48000, 2, secs), false),
     ];
     println!("\n--- byte-identity oracle (freeze these) ---");
     for (i, (name, _, _, _)) in cases.iter().enumerate() {

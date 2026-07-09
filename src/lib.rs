@@ -423,7 +423,15 @@ impl OpusEncoder {
         let cbr_bytes = ((target_bits + 4) / 8) as usize;
         let max_data_bytes = output.len();
 
-        let n_bytes = cbr_bytes.min(max_data_bytes).max(1);
+        // CBR: the packet is exactly the target size. VBR: start the coder on a
+        // generous buffer — SILK-only packets end at whatever SILK produced, and
+        // the CELT layer picks its own frame size (compute_vbr) and shrinks the
+        // coder to it (libopus opus_encoder.c / celt_encoder.c VBR flow).
+        let n_bytes = if self.use_cbr {
+            cbr_bytes.min(max_data_bytes).max(1)
+        } else {
+            max_data_bytes.min(1276).max(cbr_bytes.min(max_data_bytes)).max(3)
+        };
 
         let init_rc_size = n_bytes - 1;
         self.rc.reset_for_encode(init_rc_size as u32);
@@ -437,8 +445,12 @@ impl OpusEncoder {
 
             let frame_ms = (frame_size as i32 * 1000) / self.sampling_rate;
             if !self.silk_initialized || self.silk_enc.s_cmn.fs_khz != silk_fs_khz {
-                let silk_init_bitrate = (((n_bytes - 1) * 8) as i64 * self.sampling_rate as i64
-                    / frame_size as i64) as i32;
+                let silk_init_bitrate = if self.use_cbr {
+                    (((n_bytes - 1) * 8) as i64 * self.sampling_rate as i64 / frame_size as i64)
+                        as i32
+                } else {
+                    self.bitrate_bps
+                };
                 silk_control_encoder(
                     &mut self.silk_enc,
                     silk_fs_khz,
@@ -589,9 +601,12 @@ impl OpusEncoder {
                 let frame_duration_ms = frame_size as i32 * 1000 / self.sampling_rate;
                 let frame20ms = frame_duration_ms >= 20;
                 compute_silk_rate_for_hybrid(self.bitrate_bps, frame20ms)
-            } else {
+            } else if self.use_cbr {
                 (8i64 * (n_bytes - 1) as i64 * silk_rate_for_calc as i64 / silk_frame_len as i64)
                     as i32
+            } else {
+                // VBR: n_bytes is only the buffer cap; target the configured rate.
+                self.bitrate_bps
             };
             let silk_max_bits = if mode == OpusMode::Hybrid {
                 let total_max_bits = ((n_bytes - 1) * 8) as i32;
@@ -654,6 +669,17 @@ impl OpusEncoder {
             self.celt_enc.complexity = self.complexity;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
             let total_packet_bits = ((n_bytes - 1) * 8) as i32;
+            // VBR: hand CELT the target in eighth-bits per frame; it picks the
+            // frame's size (compute_vbr) and shrinks the range coder to it. The
+            // hybrid target covers the whole packet (CELT adds back the SILK
+            // bits via `target += tell`).
+            self.celt_enc.vbr_rate = if self.use_cbr {
+                0
+            } else {
+                let den = self.sampling_rate >> 3; // Fs >> BITRES
+                ((self.bitrate_bps as i64 * frame_size as i64 + (den >> 1) as i64)
+                    / den as i64) as i32
+            };
 
             let celt_input: &[f32] = if self.channels == 1 {
                 input
@@ -737,10 +763,16 @@ impl OpusEncoder {
             return Ok(target_total.min(output.len()));
         }
 
-        let payload_len = n_bytes - 1;
+        // CBR: fixed payload. VBR (CELT/hybrid): the CELT layer shrank the coder
+        // to this frame's chosen size — emit exactly that many payload bytes.
+        let payload_len = if self.use_cbr {
+            n_bytes - 1
+        } else {
+            (self.rc.storage as usize).min(n_bytes - 1)
+        };
         output[1..1 + payload_len].copy_from_slice(&self.rc.buf[..payload_len]);
         self.prev_enc_mode = Some(mode);
-        Ok(n_bytes)
+        Ok(1 + payload_len)
     }
 }
 

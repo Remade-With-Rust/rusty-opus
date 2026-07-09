@@ -1331,6 +1331,59 @@ fn run_prefilter(
 
 const STRIDE_ACCESS_PAD: usize = crate::pvq::MAX_PVQ_N * 8;
 
+/// libopus celt_encoder.c `compute_vbr` (float build), minus the pieces that
+/// need the tonality analysis / surround masking / LFE / temporal-VBR inputs we
+/// don't compute (their boosts are quality refinements, not conformance).
+/// All quantities in eighth-bits per frame.
+#[allow(clippy::too_many_arguments)]
+fn compute_vbr_target(
+    mode: &CeltMode,
+    base_target: i32,
+    lm: i32,
+    last_coded_bands: i32,
+    channels: i32,
+    intensity: i32,
+    constrained_vbr: bool,
+    stereo_saving: f32,
+    tot_boost: i32,
+    tf_estimate: f32,
+) -> i32 {
+    let nb_ebands = mode.nb_ebands as i32;
+    let e_bands = mode.e_bands;
+    let coded_bands = if last_coded_bands != 0 { last_coded_bands } else { nb_ebands };
+    let mut coded_bins = (e_bands[coded_bands as usize] as i32) << lm;
+    if channels == 2 {
+        coded_bins += (e_bands[intensity.min(coded_bands) as usize] as i32) << lm;
+    }
+
+    let mut target = base_target;
+
+    // Stereo savings.
+    if channels == 2 {
+        let coded_stereo_bands = intensity.min(coded_bands);
+        let coded_stereo_dof =
+            ((e_bands[coded_stereo_bands as usize] as i32) << lm) - coded_stereo_bands;
+        // Maximum fraction of the bits we could save if the signal were mono.
+        let max_frac = 0.8f32 * coded_stereo_dof as f32 / coded_bins as f32;
+        let ss = stereo_saving.min(1.0);
+        target -= ((max_frac * target as f32) as i32)
+            .min((((ss - 0.1) * ((coded_stereo_dof << BITRES) as f32)) as i32).max(i32::MIN));
+    }
+    // Boost according to dynalloc (minus the average for calibration).
+    target += tot_boost - (19 << lm);
+    // Transient boost, compensating for the average.
+    let tf_calibration = 0.044f32;
+    target += (2.0 * (tf_estimate - tf_calibration) * target as f32) as i32;
+
+    // Constrained VBR can't sustain large swings.
+    if constrained_vbr {
+        target = base_target + (0.67 * (target - base_target) as f32) as i32;
+    }
+
+    // Never more than double the base rate.
+    target.min(2 * base_target)
+}
+
 pub struct CeltEncoder {
     mode: &'static CeltMode,
     channels: usize,
@@ -1345,6 +1398,14 @@ pub struct CeltEncoder {
     spread_decision: i32,
     intensity: i32,
     last_coded_bands: i32,
+    /// VBR target in eighth-bits per frame (0 = hard CBR). libopus vbr_rate.
+    pub vbr_rate: i32,
+    /// Constrained VBR (libopus default): reservoir-limited drift around target.
+    pub constrained_vbr: bool,
+    vbr_reservoir: i32,
+    vbr_drift: i32,
+    vbr_offset: i32,
+    vbr_count: i32,
     prefilter_mem: Vec<f32>,
     prefilter_period: usize,
     prefilter_gain: f32,
@@ -1648,6 +1709,12 @@ impl CeltEncoder {
             spread_decision: SPREAD_NORMAL,
             intensity: 0,
             last_coded_bands: 0,
+            vbr_rate: 0,
+            constrained_vbr: true,
+            vbr_reservoir: 0,
+            vbr_drift: 0,
+            vbr_offset: 0,
+            vbr_count: 0,
             prefilter_mem: vec![0.0; channels * COMBFILTER_MAXPERIOD],
             prefilter_period: COMBFILTER_MINPERIOD,
             prefilter_gain: 0.0,
@@ -1724,6 +1791,9 @@ impl CeltEncoder {
         let channels = self.channels;
         let nb_ebands = mode.nb_ebands;
         let overlap = mode.overlap;
+        // Bits already in the coder at entry (the SILK part in hybrid mode) — used
+        // by the VBR min-size guard so shrinking never truncates them.
+        let tell0_frac = rc.tell_frac();
 
         let mut lm = 0;
         while (mode.short_mdct_size << lm) != frame_size {
@@ -2155,6 +2225,91 @@ impl CeltEncoder {
             alloc_trim
         } else {
             5
+        };
+
+        // ---- VBR: pick this frame's size and shrink the coder to it ----
+        // (libopus celt_encoder.c `if (vbr_rate>0)`; runs between the trim and the
+        // allocation so the allocator sees the final budget.)
+        let total_bits = if self.vbr_rate > 0 {
+            let hybrid = start_band != 0;
+            let lm_diff = mode.max_lm as i32 - lm as i32;
+            let vbr_rate = self.vbr_rate;
+            let mut base_target = if hybrid {
+                0.max(vbr_rate - ((9 * channels as i32 + 4) << BITRES))
+            } else {
+                vbr_rate - ((40 * channels as i32 + 20) << BITRES)
+            };
+            if self.constrained_vbr {
+                base_target += self.vbr_offset >> lm_diff;
+            }
+            let mut target = if hybrid {
+                // (libopus also nudges by the SILK quantization offset; we don't
+                // track silk_info yet — quality refinement, not conformance.)
+                let mut t = base_target;
+                t += ((tf_estimate - 0.25) * (50 << BITRES) as f32) as i32;
+                if tf_estimate > 0.7 {
+                    t = t.max(50 << BITRES);
+                }
+                t
+            } else {
+                compute_vbr_target(
+                    mode,
+                    base_target,
+                    lm as i32,
+                    self.last_coded_bands,
+                    channels as i32,
+                    self.intensity,
+                    self.constrained_vbr,
+                    stereo_saving,
+                    total_boost,
+                    tf_estimate,
+                )
+            };
+            let tell = rc.tell_frac();
+            target += tell;
+            // Never shrink below what's already coded (+2 bytes of margin); in
+            // hybrid, keep >=37 bits after the SILK part so the redundancy
+            // signalling space assumed by every decoder still exists.
+            let mut min_allowed =
+                ((tell + total_boost + (1 << (BITRES + 3)) - 1) >> (BITRES + 3)) + 2;
+            if hybrid {
+                min_allowed = min_allowed.max(
+                    (tell0_frac + (37 << BITRES) + total_boost + (1 << (BITRES + 3)) - 1)
+                        >> (BITRES + 3),
+                );
+            }
+            let cap_bytes = (total_bits / 8).min(1275 >> (3 - lm as i32));
+            let mut nb_available = (target + (1 << (BITRES + 2))) >> (BITRES + 3);
+            nb_available = nb_available.max(min_allowed).min(cap_bytes);
+
+            // Reservoir/drift tracking (constrained VBR).
+            let delta = target - vbr_rate;
+            let target_q = nb_available << (BITRES + 3);
+            if self.vbr_count < 970 {
+                self.vbr_count += 1;
+            }
+            let alpha = if self.vbr_count < 970 {
+                1.0f32 / (self.vbr_count as f32 + 20.0)
+            } else {
+                0.001f32
+            };
+            if self.constrained_vbr {
+                self.vbr_reservoir += target_q - vbr_rate;
+                self.vbr_drift += (alpha
+                    * ((delta * (1 << lm_diff)) - self.vbr_offset - self.vbr_drift) as f32)
+                    as i32;
+                self.vbr_offset = -self.vbr_drift;
+                if self.vbr_reservoir < 0 {
+                    let adjust = (-self.vbr_reservoir) / (8 << BITRES);
+                    nb_available += adjust;
+                    self.vbr_reservoir = 0;
+                }
+            }
+            let nb_compressed = cap_bytes.min(nb_available).max(2);
+            rc.shrink(nb_compressed as u32);
+            nb_compressed * 8
+        } else {
+            total_bits
         };
 
         let mut intensity = self.intensity;
