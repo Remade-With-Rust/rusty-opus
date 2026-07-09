@@ -22,7 +22,10 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
     dec.subfr_length = new_subfr_length;
     dec.frame_length = new_frame_length;
     dec.ltp_mem_length = (LTP_MEM_LENGTH_MS as i32) * fs_khz;
-    dec.lpc_order = if fs_khz == 8 {
+    // NB (8k) and MB (12k) use a 10th-order LPC (the NB_MB NLSF codebook);
+    // only WB (16k) is 16th-order. Previously MB got order 16, so it read
+    // order-16 NLSF from the order-10 codebook -> garbage LPC on every MB frame.
+    dec.lpc_order = if fs_khz == 8 || fs_khz == 12 {
         MIN_LPC_ORDER as i32
     } else {
         MAX_LPC_ORDER as i32
