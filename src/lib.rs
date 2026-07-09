@@ -324,6 +324,13 @@ impl OpusEncoder {
         Ok(())
     }
 
+    /// Final range-coder state of the last encoded packet (libopus
+    /// OPUS_GET_FINAL_RANGE). Stored in opus_demo `.bit` framing so the reference
+    /// decoder can verify encoder/decoder range-coder agreement per packet.
+    pub fn final_range(&self) -> u32 {
+        self.rc.rng
+    }
+
     pub fn encode(
         &mut self,
         input: &[f32],
