@@ -78,6 +78,10 @@ fn sum_abs(x: &[f32]) -> f32 {
 const MAX_FRAME_SIZE: usize = 2880;
 
 const DECODE_BUFFER_SIZE: usize = 3072;
+/// CELT packet-loss-concealment constants (celt_decoder.c).
+const PLC_LPC_ORDER: usize = 24;
+const PLC_PITCH_LAG_MAX: usize = 720;
+const PLC_PITCH_LAG_MIN: usize = 100;
 
 const INV_TABLE: [u8; 128] = [
     255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25, 23, 22, 21, 20, 19, 18, 17,
@@ -2656,6 +2660,11 @@ pub struct CeltDecoder {
     rng: u32,
     /// Consecutive-loss counter for packet-loss concealment (celt_decode_lost).
     loss_count: u32,
+    /// Pitch lag from the first lost frame, reused across a loss burst.
+    last_pitch_index: i32,
+    /// LPC coefficients (per channel, PLC_LPC_ORDER) computed at the first loss
+    /// and reused for the rest of the burst (pitch-based PLC).
+    plc_lpc: Vec<f32>,
 
     w_tf_res: Vec<i32>,
     w_cap: Vec<i32>,
@@ -2699,6 +2708,8 @@ impl CeltDecoder {
             old_band_e3: vec![-28.0; nb_x_ch],
             rng: 0,
             loss_count: 0,
+            last_pitch_index: 0,
+            plc_lpc: vec![0.0; channels * PLC_LPC_ORDER],
 
             w_tf_res: vec![0; nb_ebands],
             w_cap: vec![0; nb_ebands],
@@ -3367,33 +3378,68 @@ impl CeltDecoder {
         frame_size
     }
 
-    /// Packet-loss concealment for a lost CELT frame — a port of the
-    /// noise-based branch of libopus `celt_decode_lost` (celt_decoder.c). Fills
-    /// the decode buffer with a spectrally-shaped, energy-decayed random
-    /// excitation (CNG-style) synthesized through the IMDCT, then deemphasises
-    /// to `pcm` (interleaved, /32768). Produces real attenuating audio instead
-    /// of silence. The pitch-based branch (better for short tonal losses) is a
-    /// follow-up; this branch is what libopus itself uses once `loss_count >= 5`
-    /// and is safe/artifact-free for every loss length.
+    /// Packet-loss concealment for a lost CELT frame — a port of libopus
+    /// `celt_decode_lost` (celt_decoder.c). For the first few losses of a burst
+    /// it uses the pitch-based branch (LPC-whitened excitation extrapolated at
+    /// the last pitch period, resynthesized through the LPC filter — good for
+    /// tonal/music content); once the burst runs long (`loss_count >= 5`) it
+    /// falls back to the noise-based branch (spectrally-shaped, energy-decayed
+    /// random excitation). Both fill the decode buffer, then this deemphasises
+    /// to `pcm` (interleaved, /32768). Real attenuating audio instead of silence.
     pub fn conceal_lost(&mut self, frame_size: usize, pcm: &mut [f32]) {
+        let n = frame_size;
+        // start==0 for CELT-only; noise-based only once the burst is long.
+        if self.loss_count >= 5 {
+            self.conceal_fill_noise(n);
+        } else {
+            self.conceal_fill_pitch(n);
+        }
+
+        // Deemphasise the concealed frame (decode_mem out_syn) to interleaved pcm.
+        let mode = self.mode;
+        let c = self.channels;
+        let overlap = mode.overlap;
+        let mem_size = DECODE_BUFFER_SIZE + overlap;
+        let out_syn_idx = DECODE_BUFFER_SIZE - n;
+        const SIG_SAT: f32 = 536870911.0;
+        const VERY_SMALL: f32 = 1e-30f32;
+        let coef = mode.preemph[0];
+        for ch in 0..c {
+            let out = ch * mem_size + out_syn_idx;
+            let mut m = self.preemph_mem[ch];
+            for i in 0..n {
+                let x = self.decode_mem[out + i];
+                let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
+                pcm[i * c + ch] = val * (1.0 / 32768.0);
+                m = val * coef;
+            }
+            self.preemph_mem[ch] = m;
+        }
+
+        self.prefilter_period_old = self.prefilter_period;
+        self.prefilter_gain_old = self.prefilter_gain;
+        self.prefilter_period = COMBFILTER_MINPERIOD;
+        self.prefilter_gain = 0.0;
+        self.loss_count += 1;
+    }
+
+    /// Noise-based concealment branch (celt_decode_lost, `noise_based`): fill the
+    /// decode buffer's out_syn region with an energy-decayed random spectrum.
+    fn conceal_fill_noise(&mut self, n: usize) {
         let mode = self.mode;
         let nb_ebands = mode.nb_ebands;
         let overlap = mode.overlap;
         let c = self.channels;
-        let n = frame_size;
         let start = 0usize;
         let end = nb_ebands;
         let eff_end = end.min(mode.eff_ebands);
+        let mem_size = DECODE_BUFFER_SIZE + overlap;
 
-        // LM for this frame size (shortMdctSize << LM == frame_size).
         let mut lm = 0usize;
-        while (mode.short_mdct_size << lm) != frame_size && lm < mode.max_lm {
+        while (mode.short_mdct_size << lm) != n && lm < mode.max_lm {
             lm += 1;
         }
 
-        // Energy decay toward the silence floor (no backgroundLogE tracked, so
-        // floor at -28 like the silence path — over consecutive losses the
-        // concealed energy fades gracefully to quiet).
         let decay = if self.loss_count == 0 { 1.5f32 } else { 0.5f32 };
         for ch in 0..c {
             for i in start..end {
@@ -3402,7 +3448,6 @@ impl CeltDecoder {
             }
         }
 
-        // Random normalised MDCTs per band (celt_lcg_rand + renormalise_vector).
         let mut seed = self.rng;
         self.w_x[..n * c].fill(0.0);
         for ch in 0..c {
@@ -3418,15 +3463,12 @@ impl CeltDecoder {
         }
         self.rng = seed;
 
-        // Shift decode buffer left by N (keep DECODE_BUFFER_SIZE-N+overlap/2).
-        let mem_size = DECODE_BUFFER_SIZE + overlap;
         for ch in 0..c {
             let base = ch * mem_size;
             self.decode_mem
                 .copy_within(base + n..base + DECODE_BUFFER_SIZE + overlap / 2, base);
         }
 
-        // Denormalise the random spectrum with the decayed energies.
         self.w_band_amp[..nb_ebands * c].fill(0.0);
         let band_amp = &mut self.w_band_amp[..nb_ebands * c];
         log2amp(mode, nb_ebands, band_amp, &self.old_band_e, c);
@@ -3434,39 +3476,200 @@ impl CeltDecoder {
         let freq = &mut self.w_freq[..n * c];
         denormalise_bands(mode, &self.w_x, freq, band_amp, start, end, c, 1usize << lm);
 
-        // Synthesise each channel via the IMDCT into out_syn = decode_mem +
-        // DECODE_BUFFER_SIZE - N, then deemphasise to the interleaved output.
         let shift = mode.max_lm - lm;
         let out_syn_idx = DECODE_BUFFER_SIZE - n;
         const SIG_SAT: f32 = 536870911.0;
-        const VERY_SMALL: f32 = 1e-30f32;
-        let coef = mode.preemph[0];
         for ch in 0..c {
-            let base = ch * mem_size;
-            let out = base + out_syn_idx;
-            self.mode
-                .mdct
-                .backward(&freq[ch * n..], &mut self.decode_mem[out..], mode.window, overlap, shift, 1);
+            let out = ch * mem_size + out_syn_idx;
+            self.mode.mdct.backward(
+                &freq[ch * n..],
+                &mut self.decode_mem[out..],
+                mode.window,
+                overlap,
+                shift,
+                1,
+            );
             for i in 0..n {
                 let v = &mut self.decode_mem[out + i];
                 *v = v.clamp(-SIG_SAT, SIG_SAT);
             }
-            let mut m = self.preemph_mem[ch];
-            for i in 0..n {
-                let x = self.decode_mem[out + i];
-                let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
-                pcm[i * c + ch] = val * (1.0 / 32768.0);
-                m = val * coef;
-            }
-            self.preemph_mem[ch] = m;
         }
+    }
 
-        // A concealed frame carries no postfilter.
-        self.prefilter_period_old = self.prefilter_period;
-        self.prefilter_gain_old = self.prefilter_gain;
-        self.prefilter_period = COMBFILTER_MINPERIOD;
-        self.prefilter_gain = 0.0;
-        self.loss_count += 1;
+    /// Pitch-based concealment branch (celt_decode_lost, pitch-based): extrapolate
+    /// the LPC-whitened excitation at the last pitch period with per-period decay,
+    /// resynthesize through the LPC filter, then TDAC-fold the overlap.
+    fn conceal_fill_pitch(&mut self, n: usize) {
+        let mode = self.mode;
+        let overlap = mode.overlap;
+        let c = self.channels;
+        let mem_size = DECODE_BUFFER_SIZE + overlap;
+        const MAX_PERIOD: usize = COMBFILTER_MAXPERIOD;
+        let ord = PLC_LPC_ORDER;
+        let out_syn_idx = DECODE_BUFFER_SIZE - n;
+        const SIG_SAT: f32 = 536870911.0;
+        let window = mode.window;
+
+        // Pitch lag: search on the first loss, reuse across the burst.
+        let mut fade = 1.0f32;
+        if self.loss_count == 0 {
+            let mut lp = vec![0.0f32; DECODE_BUFFER_SIZE >> 1];
+            let slices: Vec<&[f32]> = (0..c)
+                .map(|ch| &self.decode_mem[ch * mem_size..ch * mem_size + DECODE_BUFFER_SIZE])
+                .collect();
+            crate::pitch::pitch_downsample(&slices, &mut lp, DECODE_BUFFER_SIZE >> 1, c, 2);
+            let pr = crate::pitch::pitch_search(
+                &lp[PLC_PITCH_LAG_MAX >> 1..],
+                &lp,
+                DECODE_BUFFER_SIZE - PLC_PITCH_LAG_MAX,
+                PLC_PITCH_LAG_MAX - PLC_PITCH_LAG_MIN,
+            );
+            self.last_pitch_index = (PLC_PITCH_LAG_MAX - pr) as i32;
+        } else {
+            fade = 0.8;
+        }
+        let pitch_index = (self.last_pitch_index.max(1) as usize).min(MAX_PERIOD - 1);
+        let exc_length = (2 * pitch_index).min(MAX_PERIOD);
+
+        let mut etmp = vec![0.0f32; overlap];
+        for ch in 0..c {
+            let base = ch * mem_size;
+            // exc[k] = exc_buf[ord + k] for k in -ord..MAX_PERIOD.
+            let mut exc_buf = vec![0.0f32; MAX_PERIOD + ord];
+            for (i, v) in exc_buf.iter_mut().enumerate() {
+                *v = self.decode_mem[base + DECODE_BUFFER_SIZE - MAX_PERIOD - ord + i];
+            }
+            if self.loss_count == 0 {
+                let mut ac = vec![0.0f32; ord + 1];
+                crate::celt_lpc::autocorr(
+                    &exc_buf[ord..ord + MAX_PERIOD],
+                    &mut ac,
+                    Some(window),
+                    overlap,
+                    ord,
+                    MAX_PERIOD,
+                );
+                ac[0] *= 1.0001; // -40 dB noise floor
+                for i in 1..=ord {
+                    ac[i] -= ac[i] * (0.008 * 0.008) * (i * i) as f32; // lag windowing
+                }
+                let mut lc = vec![0.0f32; ord];
+                crate::celt_lpc::lpc(&mut lc, &ac, ord);
+                self.plc_lpc[ch * ord..ch * ord + ord].copy_from_slice(&lc);
+            }
+            let lc: Vec<f32> = self.plc_lpc[ch * ord..ch * ord + ord].to_vec();
+
+            // Whiten the last exc_length excitation samples (celt_fir with history
+            // — pass the ord preceding samples and read outputs at [ord..]).
+            {
+                let x = &exc_buf[MAX_PERIOD - exc_length..];
+                let mut y = vec![0.0f32; ord + exc_length];
+                crate::celt_lpc::celt_fir(x, &lc, &mut y, ord + exc_length, ord);
+                for i in 0..exc_length {
+                    exc_buf[ord + MAX_PERIOD - exc_length + i] = y[ord + i];
+                }
+            }
+
+            // Decay factor from the excitation energy ratio (avoid adding energy).
+            let decay_length = exc_length >> 1;
+            let mut e1 = 1.0f32;
+            let mut e2 = 1.0f32;
+            for i in 0..decay_length {
+                let a = exc_buf[ord + MAX_PERIOD - decay_length + i];
+                e1 += a * a;
+                let b = exc_buf[ord + MAX_PERIOD - 2 * decay_length + i];
+                e2 += b * b;
+            }
+            e1 = e1.min(e2);
+            let decay = (e1 / e2).sqrt();
+
+            // Shift decode buffer one frame left.
+            self.decode_mem
+                .copy_within(base + n..base + DECODE_BUFFER_SIZE, base);
+
+            // Extrapolate at period `pitch_index`, attenuating each period.
+            let extrapolation_offset = MAX_PERIOD - pitch_index;
+            let extrapolation_len = n + overlap;
+            let mut atten = fade * decay;
+            let mut j = 0usize;
+            let mut s1 = 0.0f32;
+            for i in 0..extrapolation_len {
+                if j >= pitch_index {
+                    j -= pitch_index;
+                    atten *= decay;
+                }
+                self.decode_mem[base + out_syn_idx + i] =
+                    atten * exc_buf[ord + extrapolation_offset + j];
+                let tmp = self.decode_mem
+                    [base + (DECODE_BUFFER_SIZE - MAX_PERIOD - n) + extrapolation_offset + j];
+                s1 += tmp * tmp;
+                j += 1;
+            }
+
+            // Resynthesize: excitation -> signal through the LPC synthesis filter.
+            let mut lpc_mem = [0.0f32; PLC_LPC_ORDER];
+            for (i, v) in lpc_mem.iter_mut().enumerate().take(ord) {
+                *v = self.decode_mem[base + DECODE_BUFFER_SIZE - n - 1 - i];
+            }
+            let extrap: Vec<f32> = self.decode_mem
+                [base + out_syn_idx..base + out_syn_idx + extrapolation_len]
+                .to_vec();
+            crate::celt_lpc::celt_iir(
+                &extrap,
+                &lc,
+                &mut self.decode_mem[base + out_syn_idx..base + out_syn_idx + extrapolation_len],
+                extrapolation_len,
+                ord,
+                &mut lpc_mem[..ord],
+            );
+            for i in 0..extrapolation_len {
+                let v = &mut self.decode_mem[base + out_syn_idx + i];
+                *v = v.clamp(-SIG_SAT, SIG_SAT);
+            }
+
+            // Explosion / NaN guard (the !(S1 > .2*S2) test also catches IIR NaNs).
+            let mut s2 = 0.0f32;
+            for i in 0..extrapolation_len {
+                let t = self.decode_mem[base + out_syn_idx + i];
+                s2 += t * t;
+            }
+            if !(s1 > 0.2 * s2) {
+                for i in 0..extrapolation_len {
+                    self.decode_mem[base + out_syn_idx + i] = 0.0;
+                }
+            } else if s1 < s2 {
+                let ratio = ((s1 + 1.0) / (s2 + 1.0)).sqrt();
+                for i in 0..overlap {
+                    let g = 1.0 - window[i] * (1.0 - ratio);
+                    self.decode_mem[base + out_syn_idx + i] *= g;
+                }
+                for i in overlap..extrapolation_len {
+                    self.decode_mem[base + out_syn_idx + i] *= ratio;
+                }
+            }
+
+            // Re-apply the postfilter to the overlap, then TDAC-fold so the
+            // concealed audio blends with the next frame's MDCT.
+            comb_filter(
+                &mut etmp,
+                &self.decode_mem,
+                0,
+                base + DECODE_BUFFER_SIZE,
+                self.prefilter_period,
+                self.prefilter_period,
+                overlap,
+                -self.prefilter_gain,
+                -self.prefilter_gain,
+                self.prefilter_tapset,
+                self.prefilter_tapset,
+                window,
+                0,
+            );
+            for i in 0..overlap / 2 {
+                self.decode_mem[base + DECODE_BUFFER_SIZE + i] =
+                    window[i] * etmp[overlap - 1 - i] + window[overlap - 1 - i] * etmp[i];
+            }
+        }
     }
 }
 
