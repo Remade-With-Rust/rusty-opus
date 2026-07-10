@@ -118,8 +118,8 @@ fn oracle_bitexact() {
     // Re-frozen 2026-07-09 on the conformance-fixed tree (haar1, alloc row 10, anti-collapse rsv, alloc_trim fallback, prefilter off). Layout-stability verified by struct-padding perturbation + scratch-buffer canaries.
     let cases: [(&str, u64, usize, usize); 4] = [
         ("CELT  48k stereo music @128k", 0x4b6e_9089_ca73_ad01, 320000, 1000),
-        ("SILK-VBR 16k mono speech @24k", 0xed4c_4ff8_c61e_3b9b, 40811, 1000),
-        ("HYB-VBR 48k mono speech @32k ", 0x2cdf_0f32_61e1_f306, 82045, 1000),
+        ("SILK-VBR 16k mono speech @24k", 0x9fac_0844_1850_ce7f, 40815, 1000),
+        ("HYB-VBR 48k mono speech @32k ", 0xa8fc_0662_8928_96a5, 82039, 1000),
         ("VBR CELT 48k st music @128k ", 0xe223_c9ef_7a93_3126, 321421, 1000),
     ];
     let got = [

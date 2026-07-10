@@ -302,6 +302,29 @@ pub fn silk_pitch_analysis_core(
         d_comp[(d_srch[i] as isize - D_COMP_MIN) as usize] = 1;
     }
 
+    // First convolution (3-tap): smear each stage-1 candidate marker.
+    for i in (3..D_COMP_STRIDE).rev() {
+        d_comp[i] += d_comp[i - 1] + d_comp[i - 2];
+    }
+
+    // Rebuild the stage-2 SEARCH-centre list from the smeared markers. This is
+    // the list stage 2 actually iterates (`for k in 0..length_d_srch`): every
+    // 8 kHz lag whose smeared neighbourhood is non-zero, i.e. the dense band
+    // around each stage-1 peak. Collapsing C's two convolutions into one had
+    // dropped this rebuild entirely, so stage 2 only ever searched the sparse
+    // ~8 stage-1 peaks — missing the true pitch whenever a peak sat a lag or
+    // two off, which is exactly the observed voiced->unvoiced misses and
+    // octave-doubled lags.
+    length_d_srch = 0;
+    for i in MIN_LAG_8KHZ..=MAX_LAG_8KHZ {
+        if d_comp[(i as isize + 1 - D_COMP_MIN) as usize] > 0 {
+            d_srch[length_d_srch] = i as i32;
+            length_d_srch += 1;
+        }
+    }
+
+    // Second convolution (4-tap) on top of the first, then rebuild the matrix
+    // lag set (the lags the stage-2 energy matrix is computed for).
     for i in (3..D_COMP_STRIDE).rev() {
         d_comp[i] += d_comp[i - 1] + d_comp[i - 2] + d_comp[i - 3];
     }
@@ -460,9 +483,14 @@ pub fn silk_pitch_analysis_core(
         } else {
             &SILK_CB_LAGS_STAGE2_10_MS[0]
         };
+        // C's "lag must be in range" guard reads the subframe-0 codebook OFFSET
+        // (silk_CB_lags_stage2[0][CBimax_new] <= MIN_LAG_8KHZ), whose values are
+        // all in [-1, 2] — so it never rejects. Our old rewrite `d + offset >=
+        // MIN_LAG_8KHZ` was a REAL short-lag constraint that dropped genuinely
+        // voiced high-pitched frames C keeps. Restore the faithful (no-op) check.
         if cc_max_new_b > cc_max_b
             && cc0_max_new > silk_smulbb(nb_subfr as i32, search_thres2_q13)
-            && (d + lag_cb_ptr_curr_0[cb_i_max_new] as i32) >= MIN_LAG_8KHZ as i32
+            && (lag_cb_ptr_curr_0[cb_i_max_new] as i32) <= MIN_LAG_8KHZ as i32
         {
             cc_max_b = cc_max_new_b;
             cc_max = cc0_max_new;
