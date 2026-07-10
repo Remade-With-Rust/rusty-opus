@@ -64,6 +64,10 @@ pub fn silk_decode_frame(
         silk_plc(ps_dec, &mut ps_dec_ctrl, p_out, 1);
     }
 
+    // Comfort-noise generation: tracks background noise on active silence frames
+    // and overlays it on the PLC output during loss/DTX (silk_CNG).
+    crate::silk::cng::silk_cng(ps_dec, &ps_dec_ctrl, p_out, l);
+
     // Update output buffer (both paths).
     let mv_len = ps_dec.ltp_mem_length - ps_dec.frame_length;
     ps_dec.out_buf.rotate_left(ps_dec.frame_length as usize);

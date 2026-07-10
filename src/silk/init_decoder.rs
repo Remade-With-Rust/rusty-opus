@@ -105,6 +105,7 @@ pub fn silk_init_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
     silk_reset_decoder(ps_dec);
 
     ps_dec.s_cng = Default::default();
+    crate::silk::cng::silk_cng_reset(ps_dec);
 
     ps_dec.s_plc = Default::default();
 

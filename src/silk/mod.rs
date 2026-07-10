@@ -30,6 +30,7 @@ pub mod nlsf_decode;
 pub mod nlsf_del_dec_quant;
 pub mod nlsf_encode;
 pub mod nlsf_unpack;
+pub mod cng;
 pub mod flp;
 pub mod noise_shape_analysis;
 pub mod nsq;
