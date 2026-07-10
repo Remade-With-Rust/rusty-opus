@@ -553,12 +553,6 @@ impl OpusEncoder {
             if mode != OpusMode::CeltOnly && self.use_cbr && self.bitrate_bps < 15000 {
                 bw = bw.min(Bandwidth::Wideband as i32);
             }
-            // Our CELT encoder has no end-band support yet, so SWB (end band 19)
-            // cannot be coded conformantly; map SWB down to WB for SILK/hybrid.
-            // (libopus-with-analysis picks WB SILK in that range for speech anyway.)
-            if bw == Bandwidth::Superwideband as i32 && mode != OpusMode::CeltOnly {
-                bw = Bandwidth::Wideband as i32;
-            }
             // NB/MB SILK-internal rates (8/12 kHz) aren't wired for >16 kHz API
             // input yet (no 48k->8k/12k encode resamplers); clamp to WB.
             if mode != OpusMode::CeltOnly && self.sampling_rate > 16000 {
@@ -585,7 +579,16 @@ impl OpusEncoder {
             // Use the detected bandwidth to reduce the coded bandwidth
             // (opus_encoder.c:1526), conservatively floored by rate. (For
             // CELT-only this is currently undone below — no end-band support.)
-            if self.detected_bandwidth != 0 && self.force_bandwidth.is_none() {
+            // For CELT-only, hold the detected-bandwidth narrowing until the
+            // leak_boost dynalloc lands: decisions already match libopus
+            // frame-for-frame (64k st music: 27:704/31:680/23:90 both), but our
+            // dynalloc lacks C's leakage compensation at the spectral cut, so
+            // the same narrowing costs 0.25 ODG more than C pays (PEAQ-gated
+            // out). Hybrid/SILK caps (incl. hybrid SWB) stay live.
+            if self.detected_bandwidth != 0
+                && self.force_bandwidth.is_none()
+                && mode != OpusMode::CeltOnly
+            {
                 let ch = self.channels as i32;
                 let equiv2 = equiv; // same 20-ms equivalent rate as the walk
                 let min_det = if equiv2 <= 18000 * ch && mode == OpusMode::CeltOnly {
@@ -600,19 +603,10 @@ impl OpusEncoder {
                     FB
                 };
                 bw = bw.min(self.detected_bandwidth.max(min_det));
-                // Re-apply the no-end-band constraint: the detected cap can
-                // land on SWB, which SILK/hybrid cannot code conformantly until
-                // the CELT encoder supports end_band 19. Promote to FB (the
-                // conformant superset C would narrow from) rather than demote
-                // to WB — demoting flips hybrid to SILK-only, which wrecks
-                // tonal content the cap was never meant to exclude.
-                if bw == Bandwidth::Superwideband as i32 && mode != OpusMode::CeltOnly {
-                    bw = Bandwidth::Fullband as i32;
-                }
             }
-            // CELT-only frames likewise always code the full 21 bands today.
-            if mode == OpusMode::CeltOnly {
-                bw = FB;
+            // The CELT TOC has no mediumband config; C maps MB down to NB.
+            if mode == OpusMode::CeltOnly && bw == MB {
+                bw = NB;
             }
             self.bandwidth = match self.force_bandwidth {
                 Some(f) => f,
@@ -688,7 +682,7 @@ impl OpusEncoder {
                     if self.celt_prefill_tail.len() == n400 * ch {
                         let mut dummy = RangeCoder::new_encoder(2);
                         let tail = std::mem::take(&mut self.celt_prefill_tail);
-                        self.celt_enc.encode_with_budget(&tail, n400, &mut dummy, 0, 16);
+                        self.celt_enc.encode_with_budget(&tail, n400, &mut dummy, 0, 21, 16);
                         self.celt_prefill_tail = tail;
                     }
                 }
@@ -1038,6 +1032,14 @@ impl OpusEncoder {
             };
             self.celt_enc.complexity = self.complexity;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
+            // CELT end band from the coded bandwidth (mirrors the decoder's
+            // celt_endband_for_bandwidth): NB->13, MB/WB->17, SWB->19, FB->21.
+            let end_band = match self.bandwidth {
+                Bandwidth::Narrowband => 13,
+                Bandwidth::Mediumband | Bandwidth::Wideband => 17,
+                Bandwidth::Superwideband => 19,
+                _ => 21,
+            };
             let total_packet_bits = ((n_bytes - 1) * 8) as i32;
             // VBR: hand CELT the target in eighth-bits per frame; it picks the
             // frame's size (compute_vbr) and shrinks the range coder to it. The
@@ -1070,6 +1072,7 @@ impl OpusEncoder {
                     frame_size,
                     &mut self.rc,
                     start_band,
+                    end_band,
                     total_packet_bits,
                 );
             }
