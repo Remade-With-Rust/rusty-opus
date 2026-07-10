@@ -150,6 +150,61 @@ const SILK_RESAMPLER_FRAC_FIR_12: [[i16; 4]; 12] = [
 const RESAMPLER_MAX_BATCH_SIZE_MS: i32 = 10;
 const RESAMPLER_ORDER_FIR_12: usize = 8;
 
+/// Contiguous 8-tap coefficients per fractional phase, `[phase][tap]`, laid out
+/// exactly as the scalar interpolator consumes them:
+/// `[t[ti][0..3], t[11-ti][3], t[11-ti][2], t[11-ti][1], t[11-ti][0]]`.
+/// This makes the per-sample interpolation a single 8-wide dot product.
+const fn build_fir12_8() -> [[i16; 8]; 12] {
+    let mut o = [[0i16; 8]; 12];
+    let mut ti = 0;
+    while ti < 12 {
+        o[ti][0] = SILK_RESAMPLER_FRAC_FIR_12[ti][0];
+        o[ti][1] = SILK_RESAMPLER_FRAC_FIR_12[ti][1];
+        o[ti][2] = SILK_RESAMPLER_FRAC_FIR_12[ti][2];
+        o[ti][3] = SILK_RESAMPLER_FRAC_FIR_12[ti][3];
+        o[ti][4] = SILK_RESAMPLER_FRAC_FIR_12[11 - ti][3];
+        o[ti][5] = SILK_RESAMPLER_FRAC_FIR_12[11 - ti][2];
+        o[ti][6] = SILK_RESAMPLER_FRAC_FIR_12[11 - ti][1];
+        o[ti][7] = SILK_RESAMPLER_FRAC_FIR_12[11 - ti][0];
+        ti += 1;
+    }
+    o
+}
+const FIR_COEFS_12_8: [[i16; 8]; 12] = build_fir12_8();
+
+/// Bit-exact 8-tap fractional-FIR dot product: `Σ buf[bi+j] * coef[ti][j]` in
+/// wrapping i32. Matches the scalar `silk_smlabb` chain exactly (i32 addition is
+/// associative under wrapping, so `madd`'s pairwise sum is identical). SSE2
+/// `_mm_madd_epi16` on x86, scalar elsewhere.
+#[inline]
+fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize) -> i32 {
+    let c = &FIR_COEFS_12_8[ti];
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("sse2") {
+            return unsafe { resampler_fir12_8_sse2(&buf[bi..bi + 8], c) };
+        }
+    }
+    let mut r = 0i32;
+    for j in 0..8 {
+        r = r.wrapping_add((buf[bi + j] as i32) * (c[j] as i32));
+    }
+    r
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn resampler_fir12_8_sse2(buf8: &[i16], c: &[i16; 8]) -> i32 {
+    use std::arch::x86_64::*;
+    let b = _mm_loadu_si128(buf8.as_ptr() as *const __m128i);
+    let cc = _mm_loadu_si128(c.as_ptr() as *const __m128i);
+    let m = _mm_madd_epi16(b, cc); // 4x i32: pairwise products summed
+    // Horizontal sum the 4 lanes (i32 add is associative under wrapping).
+    let t = _mm_add_epi32(m, _mm_shuffle_epi32(m, 0b01_00_11_10)); // [2,3,0,1]
+    let t = _mm_add_epi32(t, _mm_shuffle_epi32(t, 0b00_00_00_01)); // + lane 1
+    _mm_cvtsi128_si32(t)
+}
+
 const DELAY_MATRIX_DEC: [[i8; 6]; 3] =
     [[4, 0, 2, 0, 0, 0], [0, 9, 4, 7, 4, 4], [0, 3, 12, 7, 7, 7]];
 
@@ -338,45 +393,7 @@ impl SilkResampler {
                 let table_index = silk_smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let buf_idx = (index_q16 >> 16) as usize;
 
-                let mut res_q15 = silk_smulbb(
-                    buf[buf_idx] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][0] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 1] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][1] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 2] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][2] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 3] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][3] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 4] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][3] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 5] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][2] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 6] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][1] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 7] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][0] as i32,
-                );
+                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index);
 
                 if out_idx < out.len() {
                     out[out_idx] = silk_sat16(silk_rshift_round(res_q15, 15)) as i16;
@@ -419,45 +436,7 @@ impl SilkResampler {
                 let table_index = silk_smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let buf_idx = (index_q16 >> 16) as usize;
 
-                let mut res_q15 = silk_smulbb(
-                    buf[buf_idx] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][0] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 1] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][1] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 2] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][2] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 3] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[table_index][3] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 4] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][3] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 5] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][2] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 6] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][1] as i32,
-                );
-                res_q15 = silk_smlabb(
-                    res_q15,
-                    buf[buf_idx + 7] as i32,
-                    SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][0] as i32,
-                );
+                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index);
 
                 if out_idx < out.len() {
                     out[out_idx] = silk_sat16(silk_rshift_round(res_q15, 15)) as i16;
