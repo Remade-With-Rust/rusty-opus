@@ -17,6 +17,7 @@ pub mod prof;
 pub mod pvq;
 pub mod quant_bands;
 pub mod range_coder;
+pub mod repacketizer;
 pub mod rate;
 pub mod silk;
 
