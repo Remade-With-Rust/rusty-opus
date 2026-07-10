@@ -50,6 +50,17 @@ fn main() {
     // The .sw corpus is s16: match opus_demo's short-API noise floors.
     enc.lsb_depth = 16;
     enc.use_dtx = std::env::var("DTX").is_ok();
+    match std::env::var("SIGNAL").ok().as_deref() {
+        Some("voice") => enc.signal_type = Some(opus_rs::SignalType::Voice),
+        Some("music") => enc.signal_type = Some(opus_rs::SignalType::Music),
+        _ => {}
+    }
+    match std::env::var("MAXBW").ok().as_deref() {
+        Some("nb") => enc.max_bandwidth = opus_rs::Bandwidth::Narrowband,
+        Some("wb") => enc.max_bandwidth = opus_rs::Bandwidth::Wideband,
+        Some("swb") => enc.max_bandwidth = opus_rs::Bandwidth::Superwideband,
+        _ => {}
+    }
     if std::env::var("FEC").is_ok() {
         enc.use_inband_fec = true;
         enc.packet_loss_perc = 30;

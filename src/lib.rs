@@ -41,6 +41,14 @@ pub enum Application {
     RestrictedLowDelay = 2051,
 }
 
+/// OPUS_SET_SIGNAL hint: bias mode selection toward speech or music. `None` =
+/// OPUS_AUTO (let the analysis decide).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalType {
+    Voice,
+    Music,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bandwidth {
     Auto = -1000,
@@ -92,6 +100,10 @@ pub struct OpusEncoder {
     first_frame: bool,
     /// Overrides automatic bandwidth selection when set (OPUS_SET_BANDWIDTH).
     pub force_bandwidth: Option<Bandwidth>,
+    /// OPUS_SET_SIGNAL: force the voice/music bias (None = auto from analysis).
+    pub signal_type: Option<SignalType>,
+    /// OPUS_SET_MAX_BANDWIDTH: cap the automatically-selected bandwidth.
+    pub max_bandwidth: Bandwidth,
     /// Tonality/music/bandwidth analysis (libopus src/analysis.c); runs when
     /// complexity >= 7 and the API rate is >= 16 kHz.
     tonality: analysis::TonalityAnalysisState,
@@ -363,6 +375,8 @@ impl OpusEncoder {
             auto_bandwidth: 0,
             first_frame: true,
             force_bandwidth: None,
+            signal_type: None,
+            max_bandwidth: Bandwidth::Fullband,
             tonality: analysis::TonalityAnalysisState::new(sampling_rate),
             analysis_kfft: kiss_fft::KissFftState::new(480),
             lsb_depth: 24,
@@ -417,6 +431,11 @@ impl OpusEncoder {
     /// opus_encoder.c:1296 voice_est ladder (signal_type is AUTO for us):
     /// analysis-driven when voice_ratio is known, else application defaults.
     fn compute_voice_est(&self) -> i32 {
+        match self.signal_type {
+            Some(SignalType::Voice) => return 127,
+            Some(SignalType::Music) => return 0,
+            None => {}
+        }
         if self.voice_ratio >= 0 {
             let mut v = self.voice_ratio * 327 >> 8;
             // For AUDIO, never be more than 90% confident of having speech.
@@ -659,6 +678,16 @@ impl OpusEncoder {
                 };
                 bw = bw.min(self.detected_bandwidth.max(min_det));
             }
+            // Cap by OPUS_SET_MAX_BANDWIDTH before the force override
+            // (opus_encoder.c: bandwidth = IMIN(bandwidth, max_bandwidth)), but
+            // keep the WB floor for non-CELT >16 kHz input — NB/MB SILK from
+            // 48 kHz needs the 48->8/12k encode resamplers we don't have, so a
+            // max_bandwidth of NB/MB there would emit an uncodeable config.
+            let mut max_bw = self.max_bandwidth as i32;
+            if mode != OpusMode::CeltOnly && self.sampling_rate > 16000 {
+                max_bw = max_bw.max(Bandwidth::Wideband as i32);
+            }
+            bw = bw.min(max_bw);
             // The CELT TOC has no mediumband config; C maps MB down to NB.
             if mode == OpusMode::CeltOnly && bw == MB {
                 bw = NB;
