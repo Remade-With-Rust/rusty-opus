@@ -77,6 +77,10 @@ pub struct SilkShapeState {
     pub harm_boost_smth_q16: i32,
     pub harm_shape_gain_smth_q16: i32,
     pub tilt_smth_q16: i32,
+    /// Float noise-shaping smoothing state, used only by the float SILK
+    /// analysis path (`silk::flp`). Mirrors `silk_shape_state_FLP`.
+    pub flp_harm_shape_gain_smth: f32,
+    pub flp_tilt_smth: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -267,6 +271,13 @@ pub struct SilkEncoderState {
     pub stereo: SilkStereoState,
 
     pub resampler_delay_buf: [i16; 48],
+
+    /// Normalized pitch correlation carried across frames by the float SILK
+    /// analysis path (`psEnc->LTPCorr` in `silk_encoder_state_FLP`).
+    pub flp_ltp_corr: f32,
+    /// When set, the encoder runs the float SILK analysis (`silk::flp`) in
+    /// place of the fixed-point analysis. The NSQ stays fixed-point.
+    pub use_flp: bool,
 }
 
 impl Default for SilkEncoderState {
@@ -282,6 +293,8 @@ impl Default for SilkEncoderState {
             ps_nlsf_cb: None,
             stereo: SilkStereoState::default(),
             resampler_delay_buf: [0; 48],
+            flp_ltp_corr: 0.0,
+            use_flp: false,
         }
     }
 }
