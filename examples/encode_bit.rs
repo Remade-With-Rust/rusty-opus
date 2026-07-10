@@ -47,6 +47,8 @@ fn main() {
     // Explicit rate-control mode: CBR unless VBR=1 (the OpusEncoder default is
     // VBR, mirroring libopus; the conformance harness pins CBR for stable A/Bs).
     enc.use_cbr = std::env::var("VBR").is_err();
+    // The .sw corpus is s16: match opus_demo's short-API noise floors.
+    enc.lsb_depth = 16;
     if let Ok(bw) = std::env::var("FORCE_BW") {
         enc.force_bandwidth = Some(match bw.as_str() {
             "nb" => opus_rs::Bandwidth::Narrowband,

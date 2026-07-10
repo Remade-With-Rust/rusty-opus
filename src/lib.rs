@@ -2,6 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
 
+pub mod analysis;
+pub mod analysis_data;
 pub mod bands;
 pub mod celt;
 pub mod celt_lpc;
@@ -81,6 +83,16 @@ pub struct OpusEncoder {
     first_frame: bool,
     /// Overrides automatic bandwidth selection when set (OPUS_SET_BANDWIDTH).
     pub force_bandwidth: Option<Bandwidth>,
+    /// Tonality/music/bandwidth analysis (libopus src/analysis.c); runs when
+    /// complexity >= 7 and the API rate is >= 16 kHz.
+    tonality: analysis::TonalityAnalysisState,
+    analysis_kfft: Option<kiss_fft::KissFftState>,
+    /// Input bit depth assumed by the analysis noise floors. The float API
+    /// default is 24; set 16 for s16-sourced content (opus_demo parity).
+    pub lsb_depth: i32,
+    /// 0..100 voice probability from the analysis (-1 = unknown), C voice_ratio.
+    voice_ratio: i32,
+    detected_bandwidth: i32,
     hp_mem: Vec<i32>,
 
     buf_filtered: Vec<i16>,
@@ -92,6 +104,13 @@ pub struct OpusEncoder {
     down2_state_second: [i32; 2],
     down2_3_state: [i32; 6],
     down_1_3_state: silk::resampler::SilkResamplerDown1_3,
+    down2_3_state_r: [i32; 6],
+    down_1_3_state_r: silk::resampler::SilkResamplerDown1_3,
+    buf_left: Vec<i16>,
+    buf_right: Vec<i16>,
+    /// Last 2.5 ms of the previous frame's input (planar), for the CELT
+    /// prefill after a mode-transition reset (opus_encoder.c:2060).
+    celt_prefill_tail: Vec<f32>,
 
     rc: RangeCoder,
 }
@@ -310,6 +329,11 @@ impl OpusEncoder {
             auto_bandwidth: 0,
             first_frame: true,
             force_bandwidth: None,
+            tonality: analysis::TonalityAnalysisState::new(sampling_rate),
+            analysis_kfft: kiss_fft::KissFftState::new(480),
+            lsb_depth: 24,
+            voice_ratio: -1,
+            detected_bandwidth: 0,
             hp_mem: vec![0; channels * 2],
 
             buf_filtered: Vec::new(),
@@ -321,6 +345,11 @@ impl OpusEncoder {
             down2_state_second: [0; 2],
             down2_3_state: [0; 6],
             down_1_3_state: silk::resampler::SilkResamplerDown1_3::default(),
+            down2_3_state_r: [0; 6],
+            down_1_3_state_r: silk::resampler::SilkResamplerDown1_3::default(),
+            buf_left: Vec::new(),
+            buf_right: Vec::new(),
+            celt_prefill_tail: Vec::new(),
             rc: RangeCoder::new_encoder(1),
         })
     }
@@ -347,6 +376,25 @@ impl OpusEncoder {
         self.rc.rng
     }
 
+    /// opus_encoder.c:1296 voice_est ladder (signal_type is AUTO for us):
+    /// analysis-driven when voice_ratio is known, else application defaults.
+    fn compute_voice_est(&self) -> i32 {
+        if self.voice_ratio >= 0 {
+            let mut v = self.voice_ratio * 327 >> 8;
+            // For AUDIO, never be more than 90% confident of having speech.
+            if self.application == Application::Audio {
+                v = v.min(115);
+            }
+            v
+        } else {
+            match self.application {
+                Application::Voip => 115,
+                Application::Audio => 48,
+                Application::RestrictedLowDelay => 0,
+            }
+        }
+    }
+
     pub fn encode(
         &mut self,
         input: &[f32],
@@ -360,6 +408,59 @@ impl OpusEncoder {
 
         let frame_rate = frame_rate_from_params(self.sampling_rate, frame_size)
             .ok_or("Invalid frame size for sampling rate")?;
+
+        // ---- Tonality analysis (opus_encoder.c:1123) ----
+        let mut analysis_info = analysis::AnalysisInfo::default();
+        if self.complexity >= 7 && self.sampling_rate >= 16000 {
+            if let Some(kfft) = &self.analysis_kfft {
+                analysis_info = analysis::run_analysis(
+                    &mut self.tonality,
+                    kfft,
+                    input,
+                    frame_size,
+                    frame_size,
+                    self.channels,
+                    self.sampling_rate,
+                    self.lsb_depth,
+                );
+            }
+        } else if self.tonality.initialized() {
+            self.tonality.reset();
+        }
+
+        // voice_ratio / detected_bandwidth from the analysis (opus_encoder.c:1154).
+        let silence_thresh = 1.0f32 / (1i64 << self.lsb_depth) as f32;
+        let is_silence = input[..(frame_size * self.channels).min(input.len())]
+            .iter()
+            .fold(0.0f32, |m, &v| m.max(v.abs()))
+            <= silence_thresh;
+        if !is_silence {
+            self.voice_ratio = -1;
+        }
+        self.detected_bandwidth = 0;
+        if analysis_info.valid {
+            // signal_type is AUTO: pick the hysteresis-correct probability.
+            let prob = if self.prev_enc_mode.is_none() {
+                analysis_info.music_prob
+            } else if self.prev_enc_mode == Some(OpusMode::CeltOnly) {
+                analysis_info.music_prob_max
+            } else {
+                analysis_info.music_prob_min
+            };
+            self.voice_ratio = (0.5 + 100.0 * (1.0 - prob)).floor() as i32;
+            let ab = analysis_info.bandwidth;
+            self.detected_bandwidth = if ab <= 12 {
+                Bandwidth::Narrowband as i32
+            } else if ab <= 14 {
+                Bandwidth::Mediumband as i32
+            } else if ab <= 16 {
+                Bandwidth::Wideband as i32
+            } else if ab <= 18 {
+                Bandwidth::Superwideband as i32
+            } else {
+                Bandwidth::Fullband as i32
+            };
+        }
 
         // Mode selection: match C's opus_encode_native() behavior.
         // C reference auto-selects between SILK_ONLY and CELT_ONLY; Hybrid is
@@ -377,11 +478,7 @@ impl OpusEncoder {
             );
             let prev_was_celt = self.prev_enc_mode == Some(OpusMode::CeltOnly);
             let has_prev_mode = self.prev_enc_mode.is_some();
-            let voice_est = match self.application {
-                Application::Voip => 115,
-                Application::Audio => 48,
-                Application::RestrictedLowDelay => 0,
-            };
+            let voice_est = self.compute_voice_est();
             let threshold = compute_mode_threshold(
                 self.application,
                 self.channels,
@@ -411,11 +508,7 @@ impl OpusEncoder {
                 self.complexity,
                 self.packet_loss_perc,
             );
-            let voice_est: i32 = match self.application {
-                Application::Voip => 115,
-                Application::Audio => 48,
-                Application::RestrictedLowDelay => 0,
-            };
+            let voice_est: i32 = self.compute_voice_est();
             let (vt, mt) = if self.channels == 2 {
                 (
                     &STEREO_VOICE_BANDWIDTH_THRESHOLDS,
@@ -489,6 +582,34 @@ impl OpusEncoder {
             if bw == Bandwidth::Mediumband as i32 && self.sampling_rate > 12000 {
                 bw = Bandwidth::Wideband as i32;
             }
+            // Use the detected bandwidth to reduce the coded bandwidth
+            // (opus_encoder.c:1526), conservatively floored by rate. (For
+            // CELT-only this is currently undone below — no end-band support.)
+            if self.detected_bandwidth != 0 && self.force_bandwidth.is_none() {
+                let ch = self.channels as i32;
+                let equiv2 = equiv; // same 20-ms equivalent rate as the walk
+                let min_det = if equiv2 <= 18000 * ch && mode == OpusMode::CeltOnly {
+                    NB
+                } else if equiv2 <= 24000 * ch && mode == OpusMode::CeltOnly {
+                    MB
+                } else if equiv2 <= 30000 * ch {
+                    Bandwidth::Wideband as i32
+                } else if equiv2 <= 44000 * ch {
+                    Bandwidth::Superwideband as i32
+                } else {
+                    FB
+                };
+                bw = bw.min(self.detected_bandwidth.max(min_det));
+                // Re-apply the no-end-band constraint: the detected cap can
+                // land on SWB, which SILK/hybrid cannot code conformantly until
+                // the CELT encoder supports end_band 19. Promote to FB (the
+                // conformant superset C would narrow from) rather than demote
+                // to WB — demoting flips hybrid to SILK-only, which wrecks
+                // tonal content the cap was never meant to exclude.
+                if bw == Bandwidth::Superwideband as i32 && mode != OpusMode::CeltOnly {
+                    bw = Bandwidth::Fullband as i32;
+                }
+            }
             // CELT-only frames likewise always code the full 21 bands today.
             if mode == OpusMode::CeltOnly {
                 bw = FB;
@@ -521,6 +642,14 @@ impl OpusEncoder {
             mode = OpusMode::SilkOnly;
         }
 
+        // Stereo HYBRID is not validated yet (the stereo SILK layer desyncs in
+        // the hybrid configuration); code those frames as CELT fullband. Plain
+        // stereo SILK-only (<= WB) is fine and stays.
+        if self.channels == 2 && mode == OpusMode::Hybrid {
+            mode = OpusMode::CeltOnly;
+            self.bandwidth = Bandwidth::Fullband;
+        }
+
         if mode == OpusMode::CeltOnly {
             match frame_rate {
                 400 | 200 | 100 | 50 => {}
@@ -539,6 +668,47 @@ impl OpusEncoder {
             match frame_rate {
                 400 | 200 | 100 | 50 | 25 => {}
                 _ => return Err("Unsupported frame size for SILK-only mode"),
+            }
+        }
+
+        let n400 = (self.sampling_rate / 400) as usize;
+
+        // ---- Mode-transition resets (opus_encoder.c:1449 + 2054) ----
+        // The decoder resets its CELT state on ANY mode change (when there is
+        // no redundancy) and its SILK state when leaving CELT-only; the
+        // encoder must mirror both or the streams desync from that frame on.
+        if let Some(prev) = self.prev_enc_mode {
+            if prev != mode {
+                if mode != OpusMode::SilkOnly {
+                    let ch = self.channels;
+                    self.celt_enc = CeltEncoder::new(modes::default_mode(), ch);
+                    // Prefill 2.5 ms so the fresh state has real preemph/overlap
+                    // history instead of a hard edge (opus_encoder.c:2060).
+                    let n400 = (self.sampling_rate / 400) as usize;
+                    if self.celt_prefill_tail.len() == n400 * ch {
+                        let mut dummy = RangeCoder::new_encoder(2);
+                        let tail = std::mem::take(&mut self.celt_prefill_tail);
+                        self.celt_enc.encode_with_budget(&tail, n400, &mut dummy, 0, 16);
+                        self.celt_prefill_tail = tail;
+                    }
+                }
+                if mode != OpusMode::CeltOnly && prev == OpusMode::CeltOnly {
+                    self.silk_initialized = false;
+                }
+            }
+        }
+
+        // Save THIS frame's last 2.5 ms (planar) for a possible prefill at the
+        // next mode transition. (The transition block above consumed the
+        // PREVIOUS frame's tail.)
+        {
+            let ch = self.channels;
+            self.celt_prefill_tail.resize(n400 * ch, 0.0);
+            let base = frame_size - n400;
+            for c in 0..ch {
+                for i in 0..n400 {
+                    self.celt_prefill_tail[c * n400 + i] = input[(base + i) * ch + c];
+                }
             }
         }
 
@@ -593,6 +763,8 @@ impl OpusEncoder {
                 self.down2_state_second = [0; 2];
                 self.down2_3_state = [0; 6];
                 self.down_1_3_state = silk::resampler::SilkResamplerDown1_3::default();
+                self.down2_3_state_r = [0; 6];
+                self.down_1_3_state_r = silk::resampler::SilkResamplerDown1_3::default();
             }
 
             self.silk_enc.s_cmn.use_in_band_fec = if self.use_inband_fec { 1 } else { 0 };
@@ -640,7 +812,77 @@ impl OpusEncoder {
 
             let input_i16 = &self.buf_filtered;
 
-            let silk_input: &[i16] = if mode == OpusMode::SilkOnly && self.sampling_rate > 16000 {
+            let silk_input: &[i16] = if self.channels == 2 {
+                // Stereo SILK/hybrid: deinterleave, resample EACH channel to the
+                // SILK-internal rate (separate filter states), then split
+                // mid/side — C's order (per-channel resampling inside
+                // silk_Encode, then silk_stereo_LR_to_MS). The old code only
+                // handled stereo at <=16 kHz and fed resampled INTERLEAVED
+                // audio to a stereo-configured SILK above that (never
+                // exercised until the analysis started picking stereo hybrid).
+                let frame_length = input_i16.len() / 2;
+                self.buf_left.resize(frame_length, 0);
+                self.buf_right.resize(frame_length, 0);
+                for i in 0..frame_length {
+                    self.buf_left[i] = input_i16[2 * i];
+                    self.buf_right[i] = input_i16[2 * i + 1];
+                }
+                let need_resample = self.sampling_rate > 16000;
+                let ds_len = if !need_resample {
+                    frame_length
+                } else if self.sampling_rate == 48000 {
+                    frame_length / 3
+                } else {
+                    frame_length * 2 / 3
+                };
+                if need_resample {
+                    self.buf_stereo_mid.resize(ds_len, 0);
+                    self.buf_stereo_side.resize(ds_len, 0);
+                    if self.sampling_rate == 48000 {
+                        silk::resampler::silk_resampler_down_1_3(
+                            &mut self.down_1_3_state,
+                            &mut self.buf_stereo_mid,
+                            &self.buf_left,
+                        );
+                        silk::resampler::silk_resampler_down_1_3(
+                            &mut self.down_1_3_state_r,
+                            &mut self.buf_stereo_side,
+                            &self.buf_right,
+                        );
+                    } else {
+                        silk_resampler_down2_3(
+                            &mut self.down2_3_state,
+                            &mut self.buf_stereo_mid,
+                            &self.buf_left,
+                            frame_length as i32,
+                        );
+                        silk_resampler_down2_3(
+                            &mut self.down2_3_state_r,
+                            &mut self.buf_stereo_side,
+                            &self.buf_right,
+                            frame_length as i32,
+                        );
+                    }
+                    self.buf_left.resize(ds_len, 0);
+                    self.buf_right.resize(ds_len, 0);
+                    self.buf_left.copy_from_slice(&self.buf_stereo_mid[..ds_len]);
+                    self.buf_right.copy_from_slice(&self.buf_stereo_side[..ds_len]);
+                }
+                self.buf_stereo_mid.resize(ds_len, 0);
+                self.buf_stereo_side.resize(ds_len, 0);
+                for i in 0..ds_len {
+                    let l = self.buf_left[i] as i32;
+                    let r = self.buf_right[i] as i32;
+                    self.buf_stereo_mid[i] = ((l + r) / 2) as i16;
+                    self.buf_stereo_side[i] = (l - r) as i16;
+                }
+                self.silk_enc.stereo.side.resize(ds_len, 0);
+                self.silk_enc
+                    .stereo
+                    .side
+                    .copy_from_slice(&self.buf_stereo_side[..ds_len]);
+                &self.buf_stereo_mid
+            } else if mode == OpusMode::SilkOnly && self.sampling_rate > 16000 {
                 if self.sampling_rate == 48000 {
                     // 48k -> 16k via the same direct FIR the Hybrid path uses. The
                     // old down2 + down2_3 two-stage chain ALIASES: a 1 kHz sine
@@ -667,23 +909,6 @@ impl OpusEncoder {
                 } else {
                     input_i16
                 }
-            } else if mode == OpusMode::SilkOnly && self.channels == 2 {
-                let frame_length = input_i16.len() / 2;
-                self.buf_stereo_mid.resize(frame_length, 0);
-                self.buf_stereo_side.resize(frame_length, 0);
-                for i in 0..frame_length {
-                    let l = input_i16[2 * i] as i32;
-                    let r = input_i16[2 * i + 1] as i32;
-                    self.buf_stereo_mid[i] = ((l + r) / 2) as i16;
-                    self.buf_stereo_side[i] = (l - r) as i16;
-                }
-
-                self.silk_enc.stereo.side.resize(frame_length, 0);
-                self.silk_enc
-                    .stereo
-                    .side
-                    .copy_from_slice(&self.buf_stereo_side[..frame_length]);
-                &self.buf_stereo_mid
             } else if mode == OpusMode::Hybrid && self.sampling_rate > 16000 {
                 if self.sampling_rate == 48000 {
                     let silk_frame_size = frame_size / 3;
@@ -797,6 +1022,20 @@ impl OpusEncoder {
         };
 
         if mode == OpusMode::CeltOnly || mode == OpusMode::Hybrid {
+            self.celt_enc.analysis = celt::AnalysisInfo {
+                valid: analysis_info.valid,
+                tonality: analysis_info.tonality,
+                tonality_slope: analysis_info.tonality_slope,
+                noisiness: analysis_info.noisiness,
+                activity: analysis_info.activity,
+                music_prob: analysis_info.music_prob,
+                music_prob_min: analysis_info.music_prob_min,
+                music_prob_max: analysis_info.music_prob_max,
+                bandwidth: analysis_info.bandwidth,
+                activity_probability: analysis_info.activity_probability,
+                max_pitch_ratio: analysis_info.max_pitch_ratio,
+                leak_boost: analysis_info.leak_boost,
+            };
             self.celt_enc.complexity = self.complexity;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
             let total_packet_bits = ((n_bytes - 1) * 8) as i32;

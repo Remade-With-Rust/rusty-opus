@@ -1411,7 +1411,7 @@ pub struct CeltEncoder {
     w_transient_tmp: Vec<f32>,
     w_transient_tmp2: Vec<f32>,
 
-    analysis: AnalysisInfo,
+    pub(crate) analysis: AnalysisInfo,
     loss_rate: i32,
 }
 

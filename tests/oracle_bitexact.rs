@@ -117,10 +117,10 @@ fn oracle_bitexact() {
     // (name, expected_hash, expected_bytes, expected_packets)
     // Re-frozen 2026-07-09 on the conformance-fixed tree (haar1, alloc row 10, anti-collapse rsv, alloc_trim fallback, prefilter off). Layout-stability verified by struct-padding perturbation + scratch-buffer canaries.
     let cases: [(&str, u64, usize, usize); 4] = [
-        ("CELT  48k stereo music @128k", 0x399c_9e3d_2fb6_9ab4, 320000, 1000),
+        ("CELT  48k stereo music @128k", 0xf52d_618e_a4fe_02c6, 320000, 1000),
         ("SILK-VBR 16k mono speech @24k", 0xed4c_4ff8_c61e_3b9b, 40811, 1000),
-        ("HYB-VBR 48k mono speech @32k ", 0x2d71_56d7_839e_e6cb, 84123, 1000),
-        ("VBR CELT 48k st music @128k ", 0x304a_d7fe_0d1a_1478, 321054, 1000),
+        ("HYB-VBR 48k mono speech @32k ", 0x1f0d_6ac9_6db0_b3b7, 82110, 1000),
+        ("VBR CELT 48k st music @128k ", 0xff5a_1572_1ca5_7ba4, 321043, 1000),
     ];
     let got = [
         encode_hash(48000, 2, Application::Audio, 128_000, &synth_music(48000, 2, secs)),

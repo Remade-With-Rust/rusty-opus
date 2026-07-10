@@ -258,6 +258,11 @@ fn test_snr_voip_48k() {
     let mut enc = OpusEncoder::new(sample_rate, 1, Application::Voip).unwrap();
     enc.bitrate_bps = 32000;
     enc.use_cbr = true;
+    // Pin the hybrid-FB path this floor was calibrated on (13.37 dB): at
+    // complexity >= 7 the tonality analysis correctly reroutes a pure tone
+    // through SILK-WB -> CELT (a 440 Hz sine IS narrowband music), which is a
+    // different path than this regression test guards.
+    enc.complexity = 6;
 
     let mut dec = OpusDecoder::new(sample_rate, 1).unwrap();
     let decoded = encode_decode(&mut enc, &mut dec, &signal, frame_size);
