@@ -2654,6 +2654,8 @@ pub struct CeltDecoder {
     old_band_e2: Vec<f32>,
     old_band_e3: Vec<f32>,
     rng: u32,
+    /// Consecutive-loss counter for packet-loss concealment (celt_decode_lost).
+    loss_count: u32,
 
     w_tf_res: Vec<i32>,
     w_cap: Vec<i32>,
@@ -2696,6 +2698,7 @@ impl CeltDecoder {
             old_band_e2: vec![-28.0; nb_x_ch],
             old_band_e3: vec![-28.0; nb_x_ch],
             rng: 0,
+            loss_count: 0,
 
             w_tf_res: vec![0; nb_ebands],
             w_cap: vec![0; nb_ebands],
@@ -3359,8 +3362,111 @@ impl CeltDecoder {
         }
 
         self.rng = rc.rng;
+        self.loss_count = 0;
 
         frame_size
+    }
+
+    /// Packet-loss concealment for a lost CELT frame — a port of the
+    /// noise-based branch of libopus `celt_decode_lost` (celt_decoder.c). Fills
+    /// the decode buffer with a spectrally-shaped, energy-decayed random
+    /// excitation (CNG-style) synthesized through the IMDCT, then deemphasises
+    /// to `pcm` (interleaved, /32768). Produces real attenuating audio instead
+    /// of silence. The pitch-based branch (better for short tonal losses) is a
+    /// follow-up; this branch is what libopus itself uses once `loss_count >= 5`
+    /// and is safe/artifact-free for every loss length.
+    pub fn conceal_lost(&mut self, frame_size: usize, pcm: &mut [f32]) {
+        let mode = self.mode;
+        let nb_ebands = mode.nb_ebands;
+        let overlap = mode.overlap;
+        let c = self.channels;
+        let n = frame_size;
+        let start = 0usize;
+        let end = nb_ebands;
+        let eff_end = end.min(mode.eff_ebands);
+
+        // LM for this frame size (shortMdctSize << LM == frame_size).
+        let mut lm = 0usize;
+        while (mode.short_mdct_size << lm) != frame_size && lm < mode.max_lm {
+            lm += 1;
+        }
+
+        // Energy decay toward the silence floor (no backgroundLogE tracked, so
+        // floor at -28 like the silence path — over consecutive losses the
+        // concealed energy fades gracefully to quiet).
+        let decay = if self.loss_count == 0 { 1.5f32 } else { 0.5f32 };
+        for ch in 0..c {
+            for i in start..end {
+                let e = &mut self.old_band_e[ch * nb_ebands + i];
+                *e = (*e - decay).max(-28.0);
+            }
+        }
+
+        // Random normalised MDCTs per band (celt_lcg_rand + renormalise_vector).
+        let mut seed = self.rng;
+        self.w_x[..n * c].fill(0.0);
+        for ch in 0..c {
+            for i in start..eff_end {
+                let boffs = n * ch + ((mode.e_bands[i] as usize) << lm);
+                let blen = ((mode.e_bands[i + 1] - mode.e_bands[i]) as usize) << lm;
+                for j in 0..blen {
+                    seed = crate::bands::celt_lcg_rand(seed);
+                    self.w_x[boffs + j] = ((seed as i32) >> 20) as f32;
+                }
+                crate::bands::renormalise_vector(&mut self.w_x[boffs..boffs + blen], blen, 1.0);
+            }
+        }
+        self.rng = seed;
+
+        // Shift decode buffer left by N (keep DECODE_BUFFER_SIZE-N+overlap/2).
+        let mem_size = DECODE_BUFFER_SIZE + overlap;
+        for ch in 0..c {
+            let base = ch * mem_size;
+            self.decode_mem
+                .copy_within(base + n..base + DECODE_BUFFER_SIZE + overlap / 2, base);
+        }
+
+        // Denormalise the random spectrum with the decayed energies.
+        self.w_band_amp[..nb_ebands * c].fill(0.0);
+        let band_amp = &mut self.w_band_amp[..nb_ebands * c];
+        log2amp(mode, nb_ebands, band_amp, &self.old_band_e, c);
+        self.w_freq[..n * c].fill(0.0);
+        let freq = &mut self.w_freq[..n * c];
+        denormalise_bands(mode, &self.w_x, freq, band_amp, start, end, c, 1usize << lm);
+
+        // Synthesise each channel via the IMDCT into out_syn = decode_mem +
+        // DECODE_BUFFER_SIZE - N, then deemphasise to the interleaved output.
+        let shift = mode.max_lm - lm;
+        let out_syn_idx = DECODE_BUFFER_SIZE - n;
+        const SIG_SAT: f32 = 536870911.0;
+        const VERY_SMALL: f32 = 1e-30f32;
+        let coef = mode.preemph[0];
+        for ch in 0..c {
+            let base = ch * mem_size;
+            let out = base + out_syn_idx;
+            self.mode
+                .mdct
+                .backward(&freq[ch * n..], &mut self.decode_mem[out..], mode.window, overlap, shift, 1);
+            for i in 0..n {
+                let v = &mut self.decode_mem[out + i];
+                *v = v.clamp(-SIG_SAT, SIG_SAT);
+            }
+            let mut m = self.preemph_mem[ch];
+            for i in 0..n {
+                let x = self.decode_mem[out + i];
+                let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
+                pcm[i * c + ch] = val * (1.0 / 32768.0);
+                m = val * coef;
+            }
+            self.preemph_mem[ch] = m;
+        }
+
+        // A concealed frame carries no postfilter.
+        self.prefilter_period_old = self.prefilter_period;
+        self.prefilter_gain_old = self.prefilter_gain;
+        self.prefilter_period = COMBFILTER_MINPERIOD;
+        self.prefilter_gain = 0.0;
+        self.loss_count += 1;
     }
 }
 

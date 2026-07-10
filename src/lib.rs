@@ -1401,7 +1401,9 @@ impl OpusDecoder {
         }
         let mode = self.prev_mode.unwrap_or(OpusMode::SilkOnly);
         if mode == OpusMode::CeltOnly {
-            // No CELT PLC port yet — graceful silence.
+            // CELT packet-loss concealment (noise-based celt_decode_lost): real
+            // attenuating audio instead of silence.
+            self.celt_dec.conceal_lost(frame_size, output);
             self.prev_mode = Some(mode);
             return Ok(frame_size);
         }
