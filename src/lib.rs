@@ -691,6 +691,20 @@ impl OpusEncoder {
             mode = OpusMode::SilkOnly;
         }
 
+        // Stereo hybrid is now CONFORMANT (the CELT intensity-clamp fix), but
+        // our FIXED-point stereo SILK executes it worse than plain CELT-FB above
+        // ~28 kb/s: PEAQ on stereo speech (ODG) measured hybrid −2.196/−2.193 vs
+        // CELT-FB −2.136/−2.057 at 32k/48k (CELT-FB wins), while at 24k hybrid
+        // −2.198 beats CELT-FB −2.240. libopus's FLOAT stereo SILK hybrid beats
+        // both everywhere — the gap is fixed-vs-float, not a bug. So route
+        // stereo hybrid to CELT-FB except at the low rates where it wins. (Force
+        // via OPUS_SET_BANDWIDTH if the true hybrid path is wanted.) The clean
+        // fix is float stereo SILK — a large port, tracked in the roadmap.
+        if self.channels == 2 && mode == OpusMode::Hybrid && self.bitrate_bps > 28000 {
+            mode = OpusMode::CeltOnly;
+            self.bandwidth = Bandwidth::Fullband;
+        }
+
         if mode == OpusMode::CeltOnly {
             match frame_rate {
                 400 | 200 | 100 | 50 => {}
