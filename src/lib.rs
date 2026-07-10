@@ -585,6 +585,12 @@ impl OpusEncoder {
             // dynalloc lacks C's leakage compensation at the spectral cut, so
             // the same narrowing costs 0.25 ODG more than C pays (PEAQ-gated
             // out). Hybrid/SILK caps (incl. hybrid SWB) stay live.
+            // CELT-only keeps FULL bandwidth by choice: C's detected-bandwidth
+            // narrowing costs PEAQ universally (libopus's own -2.11 at 64k st
+            // IS its narrowed score; our FB encode scores -1.65 on the same
+            // clip). leak_boost did NOT change this verdict (tested 2026-07-09
+            // with the full dynalloc live: narrowing still -2.37). Hybrid/SILK
+            // caps stay (they pick coding MODE, not spectral truncation).
             if self.detected_bandwidth != 0
                 && self.force_bandwidth.is_none()
                 && mode != OpusMode::CeltOnly
@@ -1031,6 +1037,7 @@ impl OpusEncoder {
                 leak_boost: analysis_info.leak_boost,
             };
             self.celt_enc.complexity = self.complexity;
+            self.celt_enc.lsb_depth = self.lsb_depth;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
             // CELT end band from the coded bandwidth (mirrors the decoder's
             // celt_endband_for_bandwidth): NB->13, MB/WB->17, SWB->19, FB->21.

@@ -337,6 +337,7 @@ fn tf_analysis(
     lm: i32,
     tf_estimate: f32,
     tf_chan: usize,
+    importance: &[f32],
 ) -> i32 {
     let _prof = crate::prof::scope(crate::prof::Stage::CeltTf);
     debug_assert!(len <= MAX_NB_EBANDS);
@@ -390,7 +391,6 @@ fn tf_analysis(
     }
 
     let mut tf_select = 0;
-    let importance = [1.0f32; MAX_NB_EBANDS];
     let mut selcost = [0.0f32; 2];
 
     for sel in 0..2 {
@@ -426,7 +426,8 @@ fn tf_analysis(
         selcost[sel] = cost0.min(cost1);
     }
 
-    if selcost[1] < selcost[0] {
+    // C: tf_select=1 is only allowed on transients (celt_encoder.c:108).
+    if selcost[1] < selcost[0] && is_transient {
         tf_select = 1;
     }
 
@@ -1320,6 +1321,7 @@ fn compute_vbr_target(
     stereo_saving: f32,
     tot_boost: i32,
     tf_estimate: f32,
+    max_depth: f32,
 ) -> i32 {
     let nb_ebands = mode.nb_ebands as i32;
     let e_bands = mode.e_bands;
@@ -1348,6 +1350,14 @@ fn compute_vbr_target(
     let tf_calibration = 0.044f32;
     target += (2.0 * (tf_estimate - tf_calibration) * target as f32) as i32;
 
+    // Don't allocate more than 8 bits above the "depth" of the signal.
+    {
+        let bins = (e_bands[nb_ebands as usize - 2] as i32) << lm;
+        let mut floor_depth = ((channels * bins << BITRES) as f32 * max_depth) as i32;
+        floor_depth = floor_depth.max(target >> 2);
+        target = target.min(floor_depth);
+    }
+
     // Constrained VBR can't sustain large swings.
     if constrained_vbr {
         target = base_target + (0.67 * (target - base_target) as f32) as i32;
@@ -1371,6 +1381,8 @@ pub struct CeltEncoder {
     spread_decision: i32,
     intensity: i32,
     last_coded_bands: i32,
+    /// Input bit depth for the dynalloc noise floors (opus lsb_depth).
+    pub lsb_depth: i32,
     /// VBR target in eighth-bits per frame (0 = hard CBR). libopus vbr_rate.
     pub vbr_rate: i32,
     /// Constrained VBR (libopus default): reservoir-limited drift around target.
@@ -1393,6 +1405,7 @@ pub struct CeltEncoder {
     w_band_e: Vec<f32>,
     w_x: Vec<f32>,
     w_band_log_e: Vec<f32>,
+    w_band_log_e2: Vec<f32>,
     w_error: Vec<f32>,
     w_tf_res: Vec<i32>,
     w_cap: Vec<i32>,
@@ -1525,136 +1538,196 @@ fn median5(v: &[f32]) -> f32 {
     x[2]
 }
 
+/// Full port of celt_encoder.c dynalloc_analysis: per-band boosts (offsets),
+/// the tf importance weights, the spreading-decision SMR weights, and maxDepth
+/// (the signal depth over the noise floor, used as the VBR ceiling). Consumes
+/// the pre-transient band logs (band_log_e2) and the analysis leak_boost.
 #[allow(clippy::too_many_arguments)]
-fn dynalloc_analysis_simple(
+fn dynalloc_analysis(
     mode: &CeltMode,
     band_log_e: &[f32],
-    old_band_e: &[f32],
+    band_log_e2: &[f32],
     start: usize,
     end: usize,
     channels: usize,
+    offsets: &mut [i32],
+    lsb_depth: i32,
+    is_transient: bool,
+    vbr: bool,
+    constrained_vbr: bool,
     lm: usize,
     effective_bytes: usize,
-    is_transient: bool,
-    offsets: &mut [i32],
-    cap: &[i32],
-) {
+    analysis: &AnalysisInfo,
+    importance: &mut [f32],
+    spread_weight: &mut [i32],
+) -> f32 {
     let _prof = crate::prof::scope(crate::prof::Stage::CeltAlloc);
-    offsets.fill(0);
-    if effective_bytes < (30 + 5 * lm) {
-        return;
-    }
-
     let nb = mode.nb_ebands;
-    let mut follower = vec![0.0f32; nb * channels];
+    offsets.fill(0);
 
+    // Noise floor: eMeans, depth, band width (logN) and the preemphasis tilt
+    // (~ square of the bark band index).
+    let mut noise_floor = [0.0f32; MAX_NB_EBANDS];
+    for i in 0..end {
+        noise_floor[i] = 0.0625 * mode.log_n[i] as f32 + 0.5 + (9 - lsb_depth) as f32
+            - mode.e_means[i]
+            + 0.0062 * ((i + 5) * (i + 5)) as f32;
+    }
+    let mut max_depth = -31.9f32;
     for c in 0..channels {
-        let base = c * nb;
-        let mut band_log_e3 = vec![0.0f32; end];
         for i in 0..end {
-            let mut e = band_log_e[base + i];
-            if lm == 0 && i < 8 {
-                e = e.max(old_band_e[base + i]);
-            }
-            band_log_e3[i] = e;
-        }
-
-        let mut last = 0usize;
-        follower[base] = band_log_e3[0];
-        for i in 1..end {
-            if band_log_e3[i] > band_log_e3[i - 1] + 0.5 {
-                last = i;
-            }
-            follower[base + i] = (follower[base + i - 1] + 1.5).min(band_log_e3[i]);
-        }
-        for i in (0..last).rev() {
-            follower[base + i] =
-                follower[base + i].min((follower[base + i + 1] + 2.0).min(band_log_e3[i]));
-        }
-
-        let offset = 1.0f32;
-        if end >= 5 {
-            for i in 2..end - 2 {
-                follower[base + i] =
-                    follower[base + i].max(median5(&band_log_e3[i - 2..i + 3]) - offset);
-            }
-        }
-        if end >= 3 {
-            let l = median3(band_log_e3[0], band_log_e3[1], band_log_e3[2]) - offset;
-            follower[base] = follower[base].max(l);
-            follower[base + 1] = follower[base + 1].max(l);
-
-            let r = median3(
-                band_log_e3[end - 3],
-                band_log_e3[end - 2],
-                band_log_e3[end - 1],
-            ) - offset;
-            follower[base + end - 2] = follower[base + end - 2].max(r);
-            follower[base + end - 1] = follower[base + end - 1].max(r);
+            max_depth = max_depth.max(band_log_e[c * nb + i] - noise_floor[i]);
         }
     }
 
-    if channels == 2 {
+    // Simple masking model for the spreading decision: ignore fully masked bands.
+    {
+        let mut mask = [0.0f32; MAX_NB_EBANDS];
+        let mut sig = [0.0f32; MAX_NB_EBANDS];
+        for i in 0..end {
+            mask[i] = band_log_e[i] - noise_floor[i];
+        }
+        if channels == 2 {
+            for i in 0..end {
+                mask[i] = mask[i].max(band_log_e[nb + i] - noise_floor[i]);
+            }
+        }
+        sig[..end].copy_from_slice(&mask[..end]);
+        for i in 1..end {
+            mask[i] = mask[i].max(mask[i - 1] - 2.0);
+        }
+        for i in (0..end.saturating_sub(1)).rev() {
+            mask[i] = mask[i].max(mask[i + 1] - 3.0);
+        }
+        for i in 0..end {
+            // SMR: mask never more than 72 dB below the peak, never below floor.
+            let smr = sig[i] - (0.0f32.max(max_depth - 12.0)).max(mask[i]);
+            let shift = 5.min(0.max(-((0.5 + smr).floor() as i32)));
+            spread_weight[i] = 32 >> shift;
+        }
+    }
+
+    // Make sure dynamic allocation can't bust the budget.
+    if effective_bytes > 50 && lm >= 1 {
+        let mut follower = [0.0f32; 2 * MAX_NB_EBANDS];
+        let mut last = 0usize;
+        for c in 0..channels {
+            let base = c * nb;
+            follower[base] = band_log_e2[base];
+            for i in 1..end {
+                // The last band at least .5 dB higher than the previous one is
+                // the last we'll consider (band-limited signals).
+                if band_log_e2[base + i] > band_log_e2[base + i - 1] + 0.5 {
+                    last = i;
+                }
+                follower[base + i] =
+                    (follower[base + i - 1] + 1.5).min(band_log_e2[base + i]);
+            }
+            for i in (0..last).rev() {
+                follower[base + i] = follower[base + i]
+                    .min((follower[base + i + 1] + 2.0).min(band_log_e2[base + i]));
+            }
+
+            // Median filter so dynalloc doesn't trigger unnecessarily.
+            let offset = 1.0f32;
+            if end >= 5 {
+                for i in 2..end - 2 {
+                    follower[base + i] = follower[base + i]
+                        .max(median5(&band_log_e2[base + i - 2..base + i + 3]) - offset);
+                }
+            }
+            if end >= 3 {
+                let tmp = median3(
+                    band_log_e2[base],
+                    band_log_e2[base + 1],
+                    band_log_e2[base + 2],
+                ) - offset;
+                follower[base] = follower[base].max(tmp);
+                follower[base + 1] = follower[base + 1].max(tmp);
+                let tmp = median3(
+                    band_log_e2[base + end - 3],
+                    band_log_e2[base + end - 2],
+                    band_log_e2[base + end - 1],
+                ) - offset;
+                follower[base + end - 2] = follower[base + end - 2].max(tmp);
+                follower[base + end - 1] = follower[base + end - 1].max(tmp);
+            }
+
+            for i in 0..end {
+                follower[base + i] = follower[base + i].max(noise_floor[i]);
+            }
+        }
+        if channels == 2 {
+            for i in start..end {
+                // Consider 24 dB "cross-talk".
+                follower[nb + i] = follower[nb + i].max(follower[i] - 4.0);
+                follower[i] = follower[i].max(follower[nb + i] - 4.0);
+                follower[i] = 0.5
+                    * ((band_log_e[i] - follower[i]).max(0.0)
+                        + (band_log_e[nb + i] - follower[nb + i]).max(0.0));
+            }
+        } else {
+            for i in start..end {
+                follower[i] = (band_log_e[i] - follower[i]).max(0.0);
+            }
+        }
         for i in start..end {
-            let l = follower[i];
-            let r = follower[nb + i];
-            let r2 = r.max(l - 4.0);
-            let l2 = l.max(r - 4.0);
-            follower[i] =
-                ((band_log_e[i] - l2).max(0.0) + (band_log_e[nb + i] - r2).max(0.0)) * 0.5;
+            importance[i] = (0.5 + 13.0 * (follower[i].min(4.0)).exp2()).floor();
+        }
+        // For non-transient CBR/CVBR frames, halve the dynalloc contribution.
+        if (!vbr || constrained_vbr) && !is_transient {
+            for f in follower.iter_mut().take(end).skip(start) {
+                *f *= 0.5;
+            }
+        }
+        for i in start..end {
+            if i < 8 {
+                follower[i] *= 2.0;
+            }
+            if i >= 12 {
+                follower[i] *= 0.5;
+            }
+        }
+        if analysis.valid {
+            for i in start..end.min(19) {
+                follower[i] += analysis.leak_boost[i] as f32 * (1.0 / 64.0);
+            }
+        }
+        let mut tot_boost = 0i32;
+        for i in start..end {
+            follower[i] = follower[i].min(4.0);
+
+            let width =
+                channels as i32 * (mode.e_bands[i + 1] - mode.e_bands[i]) as i32 * (1 << lm);
+            let (boost, boost_bits) = if width < 6 {
+                let b = follower[i] as i32;
+                (b, (b * width) << BITRES)
+            } else if width > 48 {
+                let b = (follower[i] * 8.0) as i32;
+                (b, ((b * width) << BITRES) / 8)
+            } else {
+                let b = (follower[i] * width as f32 / 6.0) as i32;
+                (b, (b * 6) << BITRES)
+            };
+            // For CBR and non-transient CVBR frames, limit dynalloc to 2/3 of
+            // the bits.
+            if (!vbr || (constrained_vbr && !is_transient))
+                && ((tot_boost + boost_bits) >> BITRES >> 3) > 2 * effective_bytes as i32 / 3
+            {
+                let cap = (2 * effective_bytes as i32 / 3) << BITRES << 3;
+                offsets[i] = cap - tot_boost;
+                break;
+            } else {
+                offsets[i] = boost;
+                tot_boost += boost_bits;
+            }
         }
     } else {
         for i in start..end {
-            follower[i] = (band_log_e[i] - follower[i]).max(0.0);
+            importance[i] = 13.0;
         }
     }
-
-    if !is_transient {
-        for i in start..end {
-            follower[i] *= 0.5;
-        }
-    }
-
-    let mut tot_boost = 0i32;
-    for i in start..end {
-        let mut f = follower[i].min(4.0);
-        if i < 8 {
-            f *= 2.0;
-        }
-        if i >= 12 {
-            f *= 0.5;
-        }
-
-        let width = channels as i32 * (mode.e_bands[i + 1] - mode.e_bands[i]) as i32 * (1 << lm);
-        let (boost, boost_bits) = if width < 6 {
-            let b = f.floor().max(0.0) as i32;
-            (b, (b * width) << BITRES)
-        } else if width > 48 {
-            let b = (f * 8.0).floor().max(0.0) as i32;
-            (b, ((b * width) << BITRES) / 8)
-        } else {
-            let b = (f * width as f32 / 6.0).floor().max(0.0) as i32;
-            (b, (b * 6) << BITRES)
-        };
-
-        // Keep dynalloc bounded so allocator still has base bits in CBR usage.
-        let cap_bits = ((2 * effective_bytes as i32) / 3) << (BITRES + 3);
-        if tot_boost + boost_bits > cap_bits {
-            offsets[i] = ((cap_bits - tot_boost) >> BITRES).max(0);
-            break;
-        }
-
-        let quanta = (width << BITRES).min((6 << BITRES).max(width));
-        let mut boost_count = boost;
-        let mut as_bits = boost_count * quanta;
-        if as_bits > cap[i] {
-            as_bits = cap[i];
-            boost_count = as_bits / quanta;
-        }
-
-        offsets[i] = boost_count.max(0);
-        tot_boost += boost_bits.max(0);
-    }
+    max_depth
 }
 
 impl CeltEncoder {
@@ -1680,6 +1753,7 @@ impl CeltEncoder {
             spread_decision: SPREAD_NORMAL,
             intensity: 0,
             last_coded_bands: 0,
+            lsb_depth: 24,
             vbr_rate: 0,
             constrained_vbr: true,
             vbr_reservoir: 0,
@@ -1701,6 +1775,7 @@ impl CeltEncoder {
 
             w_x: vec![0.0; frame_x_ch + STRIDE_ACCESS_PAD],
             w_band_log_e: vec![0.0; nb_x_ch],
+            w_band_log_e2: vec![0.0; nb_x_ch],
             w_error: vec![0.0; nb_x_ch],
             w_tf_res: vec![0; nb_ebands],
             w_cap: vec![0; nb_ebands],
@@ -1890,11 +1965,11 @@ impl CeltEncoder {
         };
 
         let freq = &mut self.w_freq[..frame_size * channels];
-        let (shift, b) = if is_transient {
-            (mode.max_lm, 1 << lm)
-        } else {
-            (mode.max_lm - lm, 1)
-        };
+        // The first MDCT pass is always LONG blocks: for non-transients it is
+        // the coding transform; for transients it feeds bandLogE2 (the
+        // pre-transient spectrum dynalloc smooths against, celt_encoder.c
+        // secondMdct) and the short re-MDCT below produces the coding one.
+        let (shift, b) = (mode.max_lm - lm, 1);
         let n = frame_size / b;
 
         for c in 0..channels {
@@ -1940,10 +2015,6 @@ impl CeltEncoder {
             let _ = freq[0];
         }
 
-        let band_log_e = &mut self.w_band_log_e[..nb_ebands * channels];
-        band_log_e.fill(-14.0);
-        crate::bands::amp2log2(mode, start_band, end_band, band_e, band_log_e, channels);
-
         let total_bits = explicit_total_bits.unwrap_or_else(|| (rc.buf.len() * 8) as i32);
         self.w_error[..nb_ebands * channels].fill(0.0);
         let error = &mut self.w_error[..nb_ebands * channels];
@@ -1981,6 +2052,19 @@ impl CeltEncoder {
             }
         }
 
+        // bandLogE2: the long-MDCT logs + 0.5*LM when we re-MDCT short
+        // (celt_encoder.c secondMdct); else a copy of the final logs (set after
+        // the final amp2log2 below).
+        let mut second_mdct_logs = false;
+        if short_blocks && self.complexity >= 8 {
+            let band_log_e2 = &mut self.w_band_log_e2[..nb_ebands * channels];
+            band_log_e2.fill(-14.0);
+            crate::bands::amp2log2(mode, 0, end_band, band_e, band_log_e2, channels);
+            for v in band_log_e2.iter_mut() {
+                *v += 0.5 * lm as f32;
+            }
+            second_mdct_logs = true;
+        }
         if short_blocks {
             let b = 1 << lm;
             let n = frame_size / b;
@@ -2010,6 +2094,17 @@ impl CeltEncoder {
             );
         }
 
+        // Final band logs come AFTER the (possibly short) coding MDCT — C order
+        // (celt_encoder.c:1742). C computes real logs for ALL bands below end
+        // (amp2Log2 effEnd==end), incl. below start in hybrid: dynalloc's noise
+        // floor and the spreading mask read them.
+        let band_log_e = &mut self.w_band_log_e[..nb_ebands * channels];
+        band_log_e.fill(-14.0);
+        crate::bands::amp2log2(mode, 0, end_band, band_e, band_log_e, channels);
+        if !second_mdct_logs {
+            self.w_band_log_e2[..nb_ebands * channels].copy_from_slice(band_log_e);
+        }
+
         let intra_ener = if self.complexity >= 4 {
             false
         } else {
@@ -2036,9 +2131,38 @@ impl CeltEncoder {
             0,
             false,
         );
+        // Dynalloc analysis runs BEFORE tf (celt_encoder.c order): its
+        // importance[] weights the tf Viterbi costs and spread_weight[] feeds
+        // the spreading decision. The boost FLAGS are still written later, in
+        // bitstream order.
+        let effective_bytes = ((total_bits / 8) as usize).max(1);
+        let mut importance = [13.0f32; MAX_NB_EBANDS];
+        let mut spread_weight = [32i32; MAX_NB_EBANDS];
+        self.w_offsets[..nb_ebands].fill(0);
+        let max_depth = {
+            let band_log_e2 = &self.w_band_log_e2[..nb_ebands * channels];
+            dynalloc_analysis(
+                mode,
+                band_log_e,
+                band_log_e2,
+                start_band,
+                end_band,
+                channels,
+                &mut self.w_offsets[..nb_ebands],
+                self.lsb_depth,
+                is_transient,
+                self.vbr_rate > 0,
+                self.constrained_vbr,
+                lm,
+                effective_bytes,
+                &self.analysis,
+                &mut importance,
+                &mut spread_weight,
+            )
+        };
+
         self.w_tf_res[..nb_ebands].fill(0);
         let tf_res = &mut self.w_tf_res[..nb_ebands];
-        let effective_bytes = ((total_bits / 8) as usize).max(1);
         let lambda = 80.max(20480 / effective_bytes + 2) as i32;
 
         let tf_select = if self.complexity >= 2 && effective_bytes >= 15 * channels {
@@ -2053,6 +2177,7 @@ impl CeltEncoder {
                 lm as i32,
                 tf_estimate,
                 tf_chan,
+                &importance,
             )
         } else {
             0
@@ -2095,7 +2220,6 @@ impl CeltEncoder {
                 self.spread_decision = SPREAD_NORMAL;
             } else {
                 let update_hf = lm == mode.max_lm;
-                let spread_weights = [32i32; 21];
                 self.spread_decision = spreading_decision(
                     mode,
                     x,
@@ -2107,7 +2231,7 @@ impl CeltEncoder {
                     end_band,
                     channels,
                     (1 << lm) as usize,
-                    &spread_weights,
+                    &spread_weight,
                 );
             }
             rc.encode_icdf(self.spread_decision, &SPREAD_ICDF, 5);
@@ -2125,22 +2249,7 @@ impl CeltEncoder {
                 >> 2;
         }
 
-        self.w_offsets[..nb_ebands].fill(0);
         let offsets = &mut self.w_offsets[..nb_ebands];
-
-        dynalloc_analysis_simple(
-            mode,
-            band_log_e,
-            &self.old_band_e,
-            start_band,
-            end_band,
-            channels,
-            lm,
-            effective_bytes,
-            is_transient,
-            offsets,
-            cap,
-        );
 
         let mut dynalloc_logp = 6i32;
         let total_bits_bitres = total_bits << BITRES;
@@ -2239,6 +2348,7 @@ impl CeltEncoder {
                     stereo_saving,
                     total_boost,
                     tf_estimate,
+                    max_depth,
                 )
             };
             let tell = rc.tell_frac();
@@ -2323,12 +2433,14 @@ impl CeltEncoder {
             0
         };
 
-        // signalBandwidth: end-1 (never steer band-skip below the coded end).
-        // C feeds the analysis bandwidth here (rate-floored ladder,
-        // celt_encoder.c:2174) but our allocator's skip path loses much more
-        // PEAQ than C's with the same values (music st 64k -1.64 -> -2.36) —
-        // debug the skip semantics before enabling. Recorded follow-up.
+        // signalBandwidth: end-1 by CHOICE (C uses the analysis bandwidth,
+        // celt_encoder.c:2174, to let the allocator skip top bands — but that
+        // narrowing loses ~0.7 ODG on music even with leak_boost live, and
+        // libopus's own narrowed scores lose to our full-band ones). PEAQ-gated
+        // out twice; do not re-enable without a corpus win.
         let signal_bandwidth = end_band as i32 - 1;
+        let _ = equiv_rate;
+
         self.last_coded_bands = clt_compute_allocation(
             mode,
             start_band,
