@@ -284,6 +284,22 @@ impl Repacketizer {
         end: usize,
         pad_to: Option<usize>,
     ) -> Result<Vec<u8>, &'static str> {
+        self.out_range_full(begin, end, pad_to, false)
+    }
+
+    /// Emit all frames with the self-delimited framing multistream uses (the
+    /// last frame's length is coded so the packet's total size is derivable).
+    pub fn out_self_delimited(&self) -> Result<Vec<u8>, &'static str> {
+        self.out_range_full(0, self.frames.len(), None, true)
+    }
+
+    fn out_range_full(
+        &self,
+        begin: usize,
+        end: usize,
+        pad_to: Option<usize>,
+        self_delimited: bool,
+    ) -> Result<Vec<u8>, &'static str> {
         if begin >= end || end > self.frames.len() {
             return Err("bad arg");
         }
@@ -336,6 +352,9 @@ impl Repacketizer {
                     encode_size(l as i32, &mut out);
                 }
             }
+            if self_delimited {
+                encode_size(lens[count - 1] as i32, &mut out);
+            }
             for f in &self.frames[begin..end] {
                 out.extend_from_slice(f);
             }
@@ -347,6 +366,9 @@ impl Repacketizer {
             return Ok(out);
         }
 
+        if self_delimited {
+            encode_size(lens[count - 1] as i32, &mut out);
+        }
         for f in &self.frames[begin..end] {
             out.extend_from_slice(f);
         }
@@ -442,5 +464,29 @@ mod tests {
         let out = rp.out().unwrap();
         assert_eq!(out[0] & 0x3, 1); // code 1 (equal sizes)
         assert_eq!(rp.nb_frames(), 2);
+    }
+}
+
+#[cfg(test)]
+mod sd_tests {
+    use super::*;
+    #[test]
+    fn self_delimited_roundtrip() {
+        // 3-frame vbr packet -> self-delimited -> parse(self_delimited) recovers frames.
+        let toc = 12u8 << 3;
+        let mut rp = Repacketizer::new();
+        let mut p = vec![toc | 0x3, 3 | 0x80];
+        encode_size(3, &mut p); encode_size(5, &mut p);
+        p.extend_from_slice(&[1u8;3]); p.extend_from_slice(&[2u8;5]); p.extend_from_slice(&[3u8;4]);
+        rp.cat(&p).unwrap();
+        let sd = rp.out_self_delimited().unwrap();
+        // append trailing bytes to simulate concatenation; parse must stop at packet_offset
+        let mut stream = sd.clone(); stream.extend_from_slice(&[0xEE;7]);
+        let (t, frames, off) = parse_packet(&stream, true).unwrap();
+        assert_eq!(t, toc | 0x3);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(&stream[frames[0].0..frames[0].0+frames[0].1], &[1,1,1]);
+        assert_eq!(&stream[frames[2].0..frames[2].0+frames[2].1], &[3,3,3,3]);
+        assert_eq!(off, sd.len()); // packet ends exactly at the SD boundary
     }
 }
