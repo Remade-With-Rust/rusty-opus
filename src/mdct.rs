@@ -257,6 +257,7 @@ impl MdctLookup {
         shift: usize,
         stride: usize,
     ) {
+        let _prof = crate::prof::scope(crate::prof::Stage::CeltMdct);
         // A malformed frame can carry an out-of-range `shift` or a `stride`/size
         // inconsistent with the input buffer; bail gracefully rather than panic on
         // the FFT-state index or the (checked) pre/post-rotation reads. Inert for

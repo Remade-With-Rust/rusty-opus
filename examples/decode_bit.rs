@@ -82,6 +82,7 @@ fn main() {
     let check_range = env::var("RANGECHK").is_ok();
     let mut range_mismatch = 0u32;
     let mut first_mismatch_pkt = 0u32;
+    opus_rs::prof::reset();
     while pos + 8 <= data.len() {
         let len = be32(&data[pos..pos + 4]) as usize;
         let enc_final_range = be32(&data[pos + 4..pos + 8]);
@@ -96,7 +97,11 @@ fn main() {
         ch_hist[pch] += 1;
 
         let fs = packet_frame_size(payload, rate).min(max_frame);
-        match dec.decode(payload, fs, &mut pcm) {
+        let dec_res = {
+            let _t = opus_rs::prof::scope(opus_rs::prof::Stage::Total);
+            dec.decode(payload, fs, &mut pcm)
+        };
+        match dec_res {
             Ok(n) => {
                 if check_range && dec.last_range != enc_final_range {
                     range_mismatch += 1;
@@ -134,4 +139,5 @@ fn main() {
     if check_range {
         eprintln!("  RANGE: {range_mismatch} mismatches (first at pkt {first_mismatch_pkt})");
     }
+    opus_rs::prof::dump();
 }
