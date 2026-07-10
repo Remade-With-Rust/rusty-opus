@@ -108,6 +108,10 @@ pub struct OpusEncoder {
     down_1_3_state_r: silk::resampler::SilkResamplerDown1_3,
     down_fir_l: Option<silk::resampler::SilkDownFirResampler>,
     down_fir_r: Option<silk::resampler::SilkDownFirResampler>,
+    /// Last 10 ms of API-rate mono input, for the SILK prefill after a
+    /// CELT-only -> SILK/hybrid transition (opus_encoder.c:1449 prefill=1).
+    silk_prefill_tail: Vec<i16>,
+    silk_prefill_pending: bool,
     buf_left: Vec<i16>,
     buf_right: Vec<i16>,
     /// Last 2.5 ms of the previous frame's input (planar), for the CELT
@@ -367,6 +371,8 @@ impl OpusEncoder {
             down_1_3_state_r: silk::resampler::SilkResamplerDown1_3::default(),
             down_fir_l: None,
             down_fir_r: None,
+            silk_prefill_tail: Vec::new(),
+            silk_prefill_pending: false,
             buf_left: Vec::new(),
             buf_right: Vec::new(),
             celt_prefill_tail: Vec::new(),
@@ -714,6 +720,19 @@ impl OpusEncoder {
                 }
                 if mode != OpusMode::CeltOnly && prev == OpusMode::CeltOnly {
                     self.silk_initialized = false;
+                    self.silk_prefill_pending = true;
+                }
+            }
+        }
+
+        // SILK prefill tail: last 10 ms of API-rate mono input.
+        if self.channels == 1 {
+            let n10 = (self.sampling_rate / 100) as usize;
+            if frame_size >= n10 {
+                self.silk_prefill_tail.resize(n10, 0);
+                for i in 0..n10 {
+                    self.silk_prefill_tail[i] = (input[frame_size - n10 + i] * 32768.0)
+                        .clamp(-32768.0, 32767.0) as i16;
                 }
             }
         }
@@ -789,6 +808,26 @@ impl OpusEncoder {
                     silk::resampler::SilkDownFirResampler::new(self.sampling_rate, 16000);
                 self.down_fir_r =
                     silk::resampler::SilkDownFirResampler::new(self.sampling_rate, 16000);
+            }
+
+            // SILK prefill after CELT-only (opus_encoder.c prefill=1): run 10 ms
+            // of the previous audio through the fresh resampler + SILK warmup
+            // path so the first coded SILK frame has real LTP/shape history.
+            if self.silk_prefill_pending {
+                self.silk_prefill_pending = false;
+                let n10 = (self.sampling_rate / 100) as usize;
+                if self.channels == 1 && self.silk_prefill_tail.len() == n10 {
+                    let need = silk_fs_khz as usize * 10;
+                    let mut resampled = vec![0i16; need];
+                    if self.sampling_rate > 16000 {
+                        if let Some(r) = &mut self.down_fir_l {
+                            r.process(&mut resampled, &self.silk_prefill_tail);
+                        }
+                    } else {
+                        resampled.copy_from_slice(&self.silk_prefill_tail[..need]);
+                    }
+                    silk::enc_api::silk_encode_prefill(&mut self.silk_enc, &resampled, 0);
+                }
             }
 
             self.silk_enc.s_cmn.use_in_band_fec = if self.use_inband_fec { 1 } else { 0 };
