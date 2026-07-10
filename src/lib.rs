@@ -1454,6 +1454,106 @@ impl OpusDecoder {
         Ok(frame_size)
     }
 
+    /// Forward-error-correction decode: reconstruct a LOST frame from the LBRR
+    /// (low-bitrate redundancy) embedded in the NEXT received `packet`. Drives
+    /// the SILK decoder in FLAG_DECODE_LBRR mode, which self-selects: it decodes
+    /// the redundant frame when the packet carries LBRR for it, and falls back
+    /// to PLC extrapolation when it doesn't. CELT-only or multi-frame packets
+    /// fall back to plain PLC (no SILK LBRR to recover). After this call the
+    /// caller decodes `packet` normally for the following frame.
+    pub fn decode_fec(
+        &mut self,
+        packet: &[u8],
+        frame_size: usize,
+        output: &mut [f32],
+    ) -> Result<usize, &'static str> {
+        if packet.is_empty() {
+            return self.decode_plc(frame_size, output);
+        }
+        let toc = packet[0];
+        let mode = mode_from_toc(toc);
+        // FEC only lives in SILK/hybrid low band; code-0 (single frame) only.
+        if mode == OpusMode::CeltOnly || (toc & 0x03) != 0 {
+            return self.decode_plc(frame_size, output);
+        }
+        let bandwidth = bandwidth_from_toc(toc);
+        let payload = &packet[1..];
+
+        let out_samples = frame_size * self.channels;
+        for v in output.iter_mut().take(out_samples) {
+            *v = 0.0;
+        }
+        let frame_ms = (frame_size as i32 * 1000 / self.sampling_rate).max(1);
+        let internal_rate = if mode == OpusMode::Hybrid {
+            16000
+        } else {
+            match bandwidth {
+                Bandwidth::Narrowband => 8000,
+                Bandwidth::Mediumband => 12000,
+                _ => 16000,
+            }
+        };
+        if self.sampling_rate != internal_rate && internal_rate != self.prev_internal_rate {
+            self.silk_resampler.init(internal_rate, self.sampling_rate);
+            self.prev_internal_rate = internal_rate;
+        }
+        let internal_frame = (frame_ms * internal_rate / 1000) as usize;
+        let ratio = self.sampling_rate as f64 / internal_rate as f64;
+        self.silk_dec.produce_lr = false;
+        self.silk_dec.n_channels_internal = 1;
+
+        let mut rc = RangeCoder::new_decoder(payload);
+        let n16 = internal_frame;
+        if n16 + 2 > self.w_pcm_i16.len() {
+            return Err("opus FEC: frame exceeds buffer");
+        }
+        self.w_pcm_i16[0] = self.silk_s_mid[0];
+        self.w_pcm_i16[1] = self.silk_s_mid[1];
+        let ret = self.silk_dec.decode(
+            &mut rc,
+            &mut self.w_pcm_i16[2..n16 + 2],
+            silk::decode_frame::FLAG_DECODE_LBRR,
+            true,
+            frame_ms,
+            internal_rate,
+        );
+        if ret < 0 {
+            return Err("SILK FEC failed");
+        }
+        let dec = ret as usize;
+        if dec >= 2 {
+            self.silk_s_mid[0] = self.w_pcm_i16[dec];
+            self.silk_s_mid[1] = self.w_pcm_i16[dec + 1];
+        }
+        if self.sampling_rate == internal_rate {
+            for i in 0..dec {
+                let v = self.w_pcm_i16[1 + i] as f32 / 32768.0;
+                for ch in 0..self.channels {
+                    let idx = i * self.channels + ch;
+                    if idx < output.len() {
+                        output[idx] = v;
+                    }
+                }
+            }
+        } else {
+            let out_len = (dec as f64 * ratio) as usize;
+            let src: Vec<i16> = self.w_pcm_i16[1..1 + dec].to_vec();
+            self.silk_resampler
+                .process(&mut self.w_pcm_resampled[..out_len], &src, dec as i32);
+            for i in 0..out_len {
+                let v = self.w_pcm_resampled[i] as f32 / 32768.0;
+                for ch in 0..self.channels {
+                    let idx = i * self.channels + ch;
+                    if idx < output.len() {
+                        output[idx] = v;
+                    }
+                }
+            }
+        }
+        self.prev_mode = Some(mode);
+        Ok(frame_size)
+    }
+
     pub fn decode(
         &mut self,
         input: &[u8],
