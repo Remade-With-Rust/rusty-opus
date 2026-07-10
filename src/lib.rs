@@ -71,6 +71,15 @@ pub struct OpusEncoder {
 
     pub use_inband_fec: bool,
 
+    /// Discontinuous transmission: after enough consecutive inactive frames,
+    /// emit a 1-byte (TOC-only) packet so the decoder runs comfort-noise/PLC.
+    pub use_dtx: bool,
+    /// Consecutive inactive milliseconds, in Q1 (opus_encoder.c nb_no_activity).
+    nb_no_activity_ms_q1: i32,
+    /// Final range-coder state of the last packet (0 for DTX/PLC packets, which
+    /// carry no coded range — opus_encoder.c st->rangeFinal).
+    range_final: u32,
+
     pub packet_loss_perc: i32,
     silk_initialized: bool,
     mode: OpusMode,
@@ -343,6 +352,9 @@ impl OpusEncoder {
             complexity: 9,
             use_cbr: false,
             use_inband_fec: false,
+            use_dtx: false,
+            nb_no_activity_ms_q1: 0,
+            range_final: 0,
             packet_loss_perc: 0,
             silk_initialized: false,
             prev_enc_mode: None,
@@ -399,7 +411,7 @@ impl OpusEncoder {
     /// OPUS_GET_FINAL_RANGE). Stored in opus_demo `.bit` framing so the reference
     /// decoder can verify encoder/decoder range-coder agreement per packet.
     pub fn final_range(&self) -> u32 {
-        self.rc.rng
+        self.range_final
     }
 
     /// opus_encoder.c:1296 voice_est ladder (signal_type is AUTO for us):
@@ -463,6 +475,17 @@ impl OpusEncoder {
         if !is_silence {
             self.voice_ratio = -1;
         }
+        // Voice-activity flag for DTX (opus_encoder.c:1160). Silence is always
+        // inactive; with analysis, use the VAD probability; without it, assume
+        // active (conservative — never DTX away real audio). We skip the
+        // peak-energy SNR fallback, which only ever ADDS activity.
+        let activity = if is_silence {
+            false
+        } else if analysis_info.valid {
+            analysis_info.activity_probability >= 0.1
+        } else {
+            true
+        };
         self.detected_bandwidth = 0;
         if analysis_info.valid {
             // signal_type is AUTO: pick the hysteresis-correct probability.
@@ -753,6 +776,41 @@ impl OpusEncoder {
 
         let toc = gen_toc(mode, frame_rate, self.bandwidth, self.channels);
         output[0] = toc;
+
+        // ---- DTX decision (opus_encoder.c:2137 decide_dtx_mode) ----
+        // After enough consecutive inactive frames, emit a TOC-only 1-byte
+        // packet: the decoder sees an empty payload and runs comfort-noise /
+        // PLC. We decide before the (skipped) SILK/CELT encode — SILK's own DTX
+        // likewise stops coding, so the encoder state simply doesn't advance;
+        // the codecs resync on the next active frame.
+        if self.use_dtx && (analysis_info.valid || is_silence) {
+            let frame_ms_q1 = 2 * 1000 * frame_size as i32 / self.sampling_rate;
+            let dtx = if !activity {
+                self.nb_no_activity_ms_q1 += frame_ms_q1;
+                const LO: i32 = silk::define::NB_SPEECH_FRAMES_BEFORE_DTX * 20 * 2; // 400
+                const HI: i32 = (silk::define::NB_SPEECH_FRAMES_BEFORE_DTX + silk::define::MAX_CONSECUTIVE_DTX) * 20 * 2; // 1200
+                if self.nb_no_activity_ms_q1 > LO {
+                    if self.nb_no_activity_ms_q1 <= HI {
+                        true
+                    } else {
+                        self.nb_no_activity_ms_q1 = LO;
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                self.nb_no_activity_ms_q1 = 0;
+                false
+            };
+            if dtx {
+                self.prev_enc_mode = Some(mode);
+                self.range_final = 0;
+                return Ok(1);
+            }
+        } else {
+            self.nb_no_activity_ms_q1 = 0;
+        }
 
         let target_bits =
             (self.bitrate_bps as i64 * frame_size as i64 / self.sampling_rate as i64) as i32;
@@ -1116,6 +1174,7 @@ impl OpusEncoder {
         }
 
         self.rc.done();
+        self.range_final = self.rc.rng;
 
         if mode == OpusMode::SilkOnly {
             let mut ret = silk_ret_bytes.min(self.rc.storage as usize);

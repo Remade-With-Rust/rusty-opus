@@ -49,6 +49,7 @@ fn main() {
     enc.use_cbr = std::env::var("VBR").is_err();
     // The .sw corpus is s16: match opus_demo's short-API noise floors.
     enc.lsb_depth = 16;
+    enc.use_dtx = std::env::var("DTX").is_ok();
     if let Ok(bw) = std::env::var("FORCE_BW") {
         enc.force_bandwidth = Some(match bw.as_str() {
             "nb" => opus_rs::Bandwidth::Narrowband,
