@@ -106,6 +106,8 @@ pub struct OpusEncoder {
     down_1_3_state: silk::resampler::SilkResamplerDown1_3,
     down2_3_state_r: [i32; 6],
     down_1_3_state_r: silk::resampler::SilkResamplerDown1_3,
+    down_fir_l: Option<silk::resampler::SilkDownFirResampler>,
+    down_fir_r: Option<silk::resampler::SilkDownFirResampler>,
     buf_left: Vec<i16>,
     buf_right: Vec<i16>,
     /// Last 2.5 ms of the previous frame's input (planar), for the CELT
@@ -226,6 +228,7 @@ fn compute_silk_rate_for_hybrid(
 #[cfg(test)]
 mod silk_rate_tests {
     use super::compute_silk_rate_for_hybrid;
+    use crate::Bandwidth;
 
     #[test]
     fn test_reference_table_exact_entries() {
@@ -362,6 +365,8 @@ impl OpusEncoder {
             down_1_3_state: silk::resampler::SilkResamplerDown1_3::default(),
             down2_3_state_r: [0; 6],
             down_1_3_state_r: silk::resampler::SilkResamplerDown1_3::default(),
+            down_fir_l: None,
+            down_fir_r: None,
             buf_left: Vec::new(),
             buf_right: Vec::new(),
             celt_prefill_tail: Vec::new(),
@@ -780,6 +785,10 @@ impl OpusEncoder {
                 self.down_1_3_state = silk::resampler::SilkResamplerDown1_3::default();
                 self.down2_3_state_r = [0; 6];
                 self.down_1_3_state_r = silk::resampler::SilkResamplerDown1_3::default();
+                self.down_fir_l =
+                    silk::resampler::SilkDownFirResampler::new(self.sampling_rate, 16000);
+                self.down_fir_r =
+                    silk::resampler::SilkDownFirResampler::new(self.sampling_rate, 16000);
             }
 
             self.silk_enc.s_cmn.use_in_band_fec = if self.use_inband_fec { 1 } else { 0 };
@@ -853,30 +862,9 @@ impl OpusEncoder {
                 if need_resample {
                     self.buf_stereo_mid.resize(ds_len, 0);
                     self.buf_stereo_side.resize(ds_len, 0);
-                    if self.sampling_rate == 48000 {
-                        silk::resampler::silk_resampler_down_1_3(
-                            &mut self.down_1_3_state,
-                            &mut self.buf_stereo_mid,
-                            &self.buf_left,
-                        );
-                        silk::resampler::silk_resampler_down_1_3(
-                            &mut self.down_1_3_state_r,
-                            &mut self.buf_stereo_side,
-                            &self.buf_right,
-                        );
-                    } else {
-                        silk_resampler_down2_3(
-                            &mut self.down2_3_state,
-                            &mut self.buf_stereo_mid,
-                            &self.buf_left,
-                            frame_length as i32,
-                        );
-                        silk_resampler_down2_3(
-                            &mut self.down2_3_state_r,
-                            &mut self.buf_stereo_side,
-                            &self.buf_right,
-                            frame_length as i32,
-                        );
+                    if let (Some(rl), Some(rr)) = (&mut self.down_fir_l, &mut self.down_fir_r) {
+                        rl.process(&mut self.buf_stereo_mid, &self.buf_left);
+                        rr.process(&mut self.buf_stereo_side, &self.buf_right);
                     }
                     self.buf_left.resize(ds_len, 0);
                     self.buf_right.resize(ds_len, 0);
@@ -905,43 +893,29 @@ impl OpusEncoder {
                     // verified), wrecking every SILK-only encode from 48 kHz input.
                     let silk_frame_size = frame_size / 3;
                     self.buf_silk_input.resize(silk_frame_size, 0);
-                    silk::resampler::silk_resampler_down_1_3(
-                        &mut self.down_1_3_state,
-                        &mut self.buf_silk_input,
-                        input_i16,
-                    );
+                    if let Some(r) = &mut self.down_fir_l {
+                        r.process(&mut self.buf_silk_input, input_i16);
+                    }
                     &self.buf_silk_input
                 } else if self.sampling_rate == 24000 {
                     let silk_frame_size = frame_size * 2 / 3;
                     self.buf_silk_input.resize(silk_frame_size, 0);
-                    silk_resampler_down2_3(
-                        &mut self.down2_3_state,
-                        &mut self.buf_silk_input,
-                        input_i16,
-                        frame_size as i32,
-                    );
+                    if let Some(r) = &mut self.down_fir_l {
+                        r.process(&mut self.buf_silk_input, input_i16);
+                    }
                     &self.buf_silk_input
                 } else {
                     input_i16
                 }
             } else if mode == OpusMode::Hybrid && self.sampling_rate > 16000 {
-                if self.sampling_rate == 48000 {
-                    let silk_frame_size = frame_size / 3;
-                    self.buf_silk_input.resize(silk_frame_size, 0);
-                    silk::resampler::silk_resampler_down_1_3(
-                        &mut self.down_1_3_state,
-                        &mut self.buf_silk_input,
-                        input_i16,
-                    );
+                let silk_frame_size = if self.sampling_rate == 48000 {
+                    frame_size / 3
                 } else {
-                    let silk_frame_size = frame_size * 2 / 3;
-                    self.buf_silk_input.resize(silk_frame_size, 0);
-                    silk_resampler_down2_3(
-                        &mut self.down2_3_state,
-                        &mut self.buf_silk_input,
-                        input_i16,
-                        frame_size as i32,
-                    );
+                    frame_size * 2 / 3
+                };
+                self.buf_silk_input.resize(silk_frame_size, 0);
+                if let Some(r) = &mut self.down_fir_l {
+                    r.process(&mut self.buf_silk_input, input_i16);
                 }
                 &self.buf_silk_input
             } else {
