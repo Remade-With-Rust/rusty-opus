@@ -425,6 +425,26 @@ pub fn silk_encode_frame(
         .copy_within(frame_length..frame_length + move_len, 0);
 
     ps_enc.s_cmn.prev_lag = s_enc_ctrl.pitch_l[ps_enc.s_cmn.nb_subfr as usize - 1];
+    if std::env::var("SILKD").is_ok() {
+        let ix = &ps_enc.s_cmn.indices;
+        let n = ix.nlsf_indices;
+        eprintln!(
+            "SILKD - st={} qo={} lag={} cont={} per={} ltps={} interp={} seed={} g={},{},{},{} ltp={},{},{},{} nlsf={},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{} lastgain={}",
+            ix.signal_type, ix.quant_offset_type, ix.lag_index, ix.contour_index,
+            ix.per_index, ix.ltp_scale_index, ix.nlsf_interp_coef_q2, ix.seed,
+            ix.gains_indices[0], ix.gains_indices[1], ix.gains_indices[2], ix.gains_indices[3],
+            ix.ltp_index[0], ix.ltp_index[1], ix.ltp_index[2], ix.ltp_index[3],
+            n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7], n[8], n[9], n[10], n[11], n[12], n[13], n[14], n[15], n[16],
+            ps_enc.s_shape.last_gain_index
+        );
+        eprintln!(
+            "SILKD2 sa={} tilt={} ltpcorr={} prevlag={}",
+            ps_enc.s_cmn.speech_activity_q8,
+            ps_enc.s_cmn.input_tilt_q15,
+            ps_enc.ltp_corr_q15,
+            ps_enc.s_cmn.prev_lag
+        );
+    }
     ps_enc.s_cmn.prev_signal_type = ps_enc.s_cmn.indices.signal_type as i32;
     ps_enc.s_cmn.first_frame_after_reset = 0;
 
