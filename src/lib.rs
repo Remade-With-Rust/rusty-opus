@@ -177,7 +177,12 @@ fn compute_mode_threshold(
     threshold
 }
 
-fn compute_silk_rate_for_hybrid(rate_bps: i32, frame20ms: bool) -> i32 {
+fn compute_silk_rate_for_hybrid(
+    rate_bps: i32,
+    bandwidth: Bandwidth,
+    frame20ms: bool,
+    vbr: bool,
+) -> i32 {
     const RATE_TABLE: &[(i32, i32, i32)] = &[
         (0, 0, 0),
         (12000, 10000, 10000),
@@ -192,7 +197,7 @@ fn compute_silk_rate_for_hybrid(rate_bps: i32, frame20ms: bool) -> i32 {
     while i < n && RATE_TABLE[i].0 <= rate_bps {
         i += 1;
     }
-    if i == n {
+    let mut silk_rate = if i == n {
         let (x_last, r10_last, r20_last) = RATE_TABLE[n - 1];
         let base = if frame20ms { r20_last } else { r10_last };
         base + (rate_bps - x_last) / 2
@@ -205,7 +210,17 @@ fn compute_silk_rate_for_hybrid(rate_bps: i32, frame20ms: bool) -> i32 {
             (lo10, hi10)
         };
         (lo * (x1 - rate_bps) + hi * (rate_bps - x0)) / (x1 - x0)
+    };
+    // C tail adjustments (opus_encoder.c:789): tiny SILK boost for CBR, and
+    // +300 for SWB hybrid (the CELT part starts at band 17 either way but
+    // covers less spectrum, so SILK earns a bigger share).
+    if !vbr {
+        silk_rate += 100;
     }
+    if bandwidth == Bandwidth::Superwideband {
+        silk_rate += 300;
+    }
+    silk_rate
 }
 
 #[cfg(test)]
@@ -214,28 +229,28 @@ mod silk_rate_tests {
 
     #[test]
     fn test_reference_table_exact_entries() {
-        assert_eq!(compute_silk_rate_for_hybrid(12000, true), 10000);
-        assert_eq!(compute_silk_rate_for_hybrid(16000, true), 13500);
-        assert_eq!(compute_silk_rate_for_hybrid(20000, true), 16000);
-        assert_eq!(compute_silk_rate_for_hybrid(24000, true), 18000);
-        assert_eq!(compute_silk_rate_for_hybrid(32000, true), 22000);
-        assert_eq!(compute_silk_rate_for_hybrid(64000, true), 38000);
+        assert_eq!(compute_silk_rate_for_hybrid(12000, Bandwidth::Fullband, true, true), 10000);
+        assert_eq!(compute_silk_rate_for_hybrid(16000, Bandwidth::Fullband, true, true), 13500);
+        assert_eq!(compute_silk_rate_for_hybrid(20000, Bandwidth::Fullband, true, true), 16000);
+        assert_eq!(compute_silk_rate_for_hybrid(24000, Bandwidth::Fullband, true, true), 18000);
+        assert_eq!(compute_silk_rate_for_hybrid(32000, Bandwidth::Fullband, true, true), 22000);
+        assert_eq!(compute_silk_rate_for_hybrid(64000, Bandwidth::Fullband, true, true), 38000);
     }
 
     #[test]
     fn test_32kbps_gives_22kbps_silk() {
-        assert_eq!(compute_silk_rate_for_hybrid(32000, true), 22000);
+        assert_eq!(compute_silk_rate_for_hybrid(32000, Bandwidth::Fullband, true, true), 22000);
     }
 
     #[test]
     fn test_interpolation_between_table_entries() {
-        let r = compute_silk_rate_for_hybrid(18000, true);
+        let r = compute_silk_rate_for_hybrid(18000, Bandwidth::Fullband, true, true);
         assert_eq!(r, 14750);
     }
 
     #[test]
     fn test_above_table_max_gives_half_extra() {
-        let r = compute_silk_rate_for_hybrid(72000, true);
+        let r = compute_silk_rate_for_hybrid(72000, Bandwidth::Fullband, true, true);
         assert_eq!(r, 38000 + (72000 - 64000) / 2);
     }
 }
@@ -952,7 +967,7 @@ impl OpusEncoder {
             let silk_bitrate = if mode == OpusMode::Hybrid {
                 let frame_duration_ms = frame_size as i32 * 1000 / self.sampling_rate;
                 let frame20ms = frame_duration_ms >= 20;
-                compute_silk_rate_for_hybrid(self.bitrate_bps, frame20ms)
+                compute_silk_rate_for_hybrid(self.bitrate_bps, curr_bw, frame20ms, !self.use_cbr)
             } else if self.use_cbr {
                 (8i64 * (n_bytes - 1) as i64 * silk_rate_for_calc as i64 / silk_frame_len as i64)
                     as i32
@@ -972,7 +987,9 @@ impl OpusEncoder {
                     let frame20ms = frame_duration_ms >= 20;
                     let max_bit_rate = compute_silk_rate_for_hybrid(
                         total_max_bits * self.sampling_rate / frame_size as i32,
+                        curr_bw,
                         frame20ms,
+                        !self.use_cbr,
                     );
                     max_bit_rate * frame_size as i32 / self.sampling_rate
                 }
