@@ -34,6 +34,7 @@ pub mod noise_shape_analysis;
 pub mod nsq;
 pub mod nsq_del_dec;
 pub mod pitch_analysis;
+pub mod plc;
 pub mod resampler;
 pub mod shell_coder;
 pub mod sigm;
