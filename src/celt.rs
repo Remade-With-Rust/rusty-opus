@@ -2207,7 +2207,12 @@ impl CeltEncoder {
                 &INTEN_HYSTERESIS,
                 self.intensity,
             );
-            self.intensity = self.intensity.clamp(0, nb_ebands as i32);
+            // Clamp to [start, end], NOT [0, nb_ebands] (celt_encoder.c:2034).
+            // clt_compute_allocation codes `intensity - start` in a field of
+            // width `end + 1 - start`; a value below start (which happens in
+            // stereo HYBRID, start_band = 17) underflowed that field and
+            // desynced the range coder on the first stereo-hybrid frame.
+            self.intensity = self.intensity.clamp(start_band as i32, end_band as i32);
         }
 
         if self.complexity == 0 {

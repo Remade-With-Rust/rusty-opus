@@ -691,14 +691,6 @@ impl OpusEncoder {
             mode = OpusMode::SilkOnly;
         }
 
-        // Stereo HYBRID is not validated yet (the stereo SILK layer desyncs in
-        // the hybrid configuration); code those frames as CELT fullband. Plain
-        // stereo SILK-only (<= WB) is fine and stays.
-        if self.channels == 2 && mode == OpusMode::Hybrid {
-            mode = OpusMode::CeltOnly;
-            self.bandwidth = Bandwidth::Fullband;
-        }
-
         if mode == OpusMode::CeltOnly {
             match frame_rate {
                 400 | 200 | 100 | 50 => {}
