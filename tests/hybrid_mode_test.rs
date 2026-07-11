@@ -1,6 +1,6 @@
 /// Tests for Hybrid (SILK + CELT) mode encoding and decoding.
 /// Hybrid mode uses SILK for low-frequency content and CELT for high-frequency content.
-use opus_rs::{Application, OpusEncoder};
+use rusty_opus::{Application, OpusEncoder};
 use std::f32::consts::PI;
 
 /// Test that Hybrid mode can be enabled and produces valid packets
@@ -178,9 +178,9 @@ fn test_hybrid_mode_invalid_sample_rates() {
 /// Test CELT start_band functionality with start_band > 0
 #[test]
 fn test_celt_encode_with_start_band() {
-    use opus_rs::celt::CeltEncoder;
-    use opus_rs::modes::default_mode;
-    use opus_rs::range_coder::RangeCoder;
+    use rusty_opus::celt::CeltEncoder;
+    use rusty_opus::modes::default_mode;
+    use rusty_opus::range_coder::RangeCoder;
 
     let mode = default_mode();
     let frame_size = 960;
@@ -217,9 +217,9 @@ fn test_celt_encode_with_start_band() {
 /// Test CELT decode_with_start_band works without crashing
 #[test]
 fn test_celt_decode_with_start_band() {
-    use opus_rs::celt::{CeltDecoder, CeltEncoder};
-    use opus_rs::modes::default_mode;
-    use opus_rs::range_coder::RangeCoder;
+    use rusty_opus::celt::{CeltDecoder, CeltEncoder};
+    use rusty_opus::modes::default_mode;
+    use rusty_opus::range_coder::RangeCoder;
 
     let mode = default_mode();
     let frame_size = 960;
@@ -264,7 +264,7 @@ fn rms_i16(samples: &[i16]) -> f64 {
 
 #[test]
 fn test_downsample_48_to_16_sample_count() {
-    use opus_rs::silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
+    use rusty_opus::silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
 
     let frame_size = 960usize; // 20 ms at 48 kHz
     let input: Vec<i16> = (0..frame_size)
@@ -297,7 +297,7 @@ fn test_downsample_48_to_16_sample_count() {
 /// At 24kHz a 20 ms frame is 480 samples. After ×2/3 we expect 320 samples.
 #[test]
 fn test_downsample_24_to_16_sample_count() {
-    use opus_rs::silk::resampler::silk_resampler_down2_3;
+    use rusty_opus::silk::resampler::silk_resampler_down2_3;
 
     let frame_size = 480usize; // 20 ms at 24 kHz
     let input: Vec<i16> = (0..frame_size).map(|i| i as i16).collect();
@@ -318,7 +318,7 @@ fn test_downsample_24_to_16_sample_count() {
 
 #[test]
 fn test_downsample_48_to_16_antialiasing() {
-    use opus_rs::silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
+    use rusty_opus::silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
 
     let in_rate = 48000usize;
     // 4 frames = 80 ms – enough to let the IIR filter settle
@@ -367,7 +367,7 @@ fn test_downsample_48_to_16_antialiasing() {
 
 #[test]
 fn test_downsample_48_to_16_passband_preserved() {
-    use opus_rs::silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
+    use rusty_opus::silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
 
     let in_rate = 48000usize;
     let frame_size = 960 * 4; // 80 ms – let the filter settle

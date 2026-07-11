@@ -4,8 +4,8 @@
 //!
 //!   cargo test --release --test parallel_encode -- --ignored --nocapture
 
-use opus_rs::parallel::{encode_parallel, encode_serial, encode_streams, ParallelConfig};
-use opus_rs::{Application, OpusDecoder};
+use rusty_opus::parallel::{encode_parallel, encode_serial, encode_streams, ParallelConfig};
+use rusty_opus::{Application, OpusDecoder};
 
 struct Lcg(u64);
 impl Lcg {

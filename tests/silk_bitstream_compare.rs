@@ -4,7 +4,7 @@
 /// fixed-point Rust encoder against a mismatched floating-point reference, which
 /// can never produce byte-identical output. Fixed-point compatibility coverage
 /// remains in `tests/silk_fixed_point_compare.rs`.
-use opus_rs::{Application, OpusEncoder};
+use rusty_opus::{Application, OpusEncoder};
 use std::f32::consts::PI;
 
 /// Test TOC byte structure is correct for SILK NB 20ms CBR

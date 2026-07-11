@@ -1,6 +1,6 @@
-use opus_rs::celt::{CeltDecoder, CeltEncoder};
-use opus_rs::modes::default_mode;
-use opus_rs::range_coder::RangeCoder;
+use rusty_opus::celt::{CeltDecoder, CeltEncoder};
+use rusty_opus::modes::default_mode;
+use rusty_opus::range_coder::RangeCoder;
 
 /// Test CELT loopback at a realistic bitrate (160 bytes per frame @ 960 samples)
 /// to isolate whether the CELT codec itself works, vs the OpusEncoder wrapper.

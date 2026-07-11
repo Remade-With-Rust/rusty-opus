@@ -8,7 +8,7 @@
 
 use std::io::{Read, Write};
 
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
     let mut buf = Vec::new();

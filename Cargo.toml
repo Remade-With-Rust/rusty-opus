@@ -1,11 +1,11 @@
 [package]
 edition = "2024"
-authors = ["jinti<shenjindi@fourz.cn>"]
-name = "opus-rs"
+authors = ["jinti<shenjindi@fourz.cn>", "Remade-With-Rust"]
+name = "rusty-opus"
 version = "0.1.23"
-description = "pure Rust implementation of Opus codec"
+description = "pure Rust Opus codec — performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
 license = "BSD-3-Clause"
-repository = "https://github.com/restsend/opus-rs"
+repository = "https://github.com/Remade-With-Rust/rusty-opus"
 
 [features]
 # Dev-only stage profiler (src/prof.rs): per-stage tick buckets + dump().

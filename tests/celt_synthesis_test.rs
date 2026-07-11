@@ -1,4 +1,4 @@
-use opus_rs::modes::default_mode;
+use rusty_opus::modes::default_mode;
 
 #[test]
 fn celt_synthesis_chain_bypass() {
@@ -156,10 +156,10 @@ fn celt_synthesis_chain_bypass() {
 /// This isolates whether the energy quantization alone causes the issue.
 #[test]
 fn celt_energy_roundtrip_only() {
-    use opus_rs::bands::{amp2log2, compute_band_energies, denormalise_bands, normalise_bands};
-    use opus_rs::quant_bands::{quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
-    use opus_rs::range_coder::RangeCoder;
-    use opus_rs::rate::clt_compute_allocation;
+    use rusty_opus::bands::{amp2log2, compute_band_energies, denormalise_bands, normalise_bands};
+    use rusty_opus::quant_bands::{quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
+    use rusty_opus::range_coder::RangeCoder;
+    use rusty_opus::rate::clt_compute_allocation;
 
     let mode = default_mode();
     let channels = 1;
@@ -282,7 +282,7 @@ fn celt_energy_roundtrip_only() {
                 * 2;
         }
         let alloc_trim = 6; // default
-        rc.encode_icdf(alloc_trim, &opus_rs::modes::TRIM_ICDF, 7);
+        rc.encode_icdf(alloc_trim, &rusty_opus::modes::TRIM_ICDF, 7);
 
         // TF
         for i in 0..nb_ebands {

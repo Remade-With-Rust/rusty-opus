@@ -1,6 +1,6 @@
 #[test]
 fn test_mdct_shift3() {
-    use opus_rs::modes::default_mode;
+    use rusty_opus::modes::default_mode;
 
     let mode = default_mode();
 

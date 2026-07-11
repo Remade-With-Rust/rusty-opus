@@ -1,6 +1,6 @@
-use opus_rs::silk::define::*;
-use opus_rs::silk::lpc_analysis::{silk_burg_modified_fix, silk_find_lpc_fix};
-use opus_rs::silk::structs::SilkEncoderStateCommon;
+use rusty_opus::silk::define::*;
+use rusty_opus::silk::lpc_analysis::{silk_burg_modified_fix, silk_find_lpc_fix};
+use rusty_opus::silk::structs::SilkEncoderStateCommon;
 use std::f32::consts::PI;
 
 /// Create a test encoder state with typical parameters

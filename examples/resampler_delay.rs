@@ -2,7 +2,7 @@
 // A correct decoder has a CONSTANT total delay across NB/MB/WB; if the per-rate
 // delays differ, that difference is the bandwidth-transition alignment step that
 // breaks conformance.
-use opus_rs::SilkResampler;
+use rusty_opus::SilkResampler;
 
 fn measure(fs_in: i32) -> f64 {
     let out_rate = 48000;

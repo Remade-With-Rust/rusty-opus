@@ -1,6 +1,6 @@
 // WAV file encoder/decoder test using OpusEncoder/OpusDecoder
-use opus_rs::silk::resampler::SilkResampler;
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::silk::resampler::SilkResampler;
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;

@@ -1,7 +1,7 @@
 /// SILK encoder-decoder loopback test
 /// Encodes a 440Hz sine wave with SILK and decodes it back,
 /// then verifies the output is valid (non-zero) and has reasonable SNR.
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 /// Generate a 440Hz sine wave at the given sample rate
 fn generate_sine(sample_rate: i32, duration_ms: i32, frequency: f32) -> Vec<f32> {

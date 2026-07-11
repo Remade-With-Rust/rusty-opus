@@ -1,5 +1,5 @@
-use opus_rs::silk::define::*;
-use opus_rs::silk::pitch_analysis::silk_pitch_analysis_core;
+use rusty_opus::silk::define::*;
+use rusty_opus::silk::pitch_analysis::silk_pitch_analysis_core;
 use std::f32::consts::PI;
 
 #[test]

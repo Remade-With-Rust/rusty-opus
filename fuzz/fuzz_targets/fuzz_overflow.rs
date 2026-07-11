@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 16 {

@@ -15,7 +15,7 @@
 ///   - voip  48 kHz (HybridFB,  32 kbps): 13.37 dB
 ///   - audio 16 kHz (SilkOnly,  24 kbps): 21.65 dB
 ///   - audio 48 kHz (HybridFB,  32 kbps): 21.31 dB
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 

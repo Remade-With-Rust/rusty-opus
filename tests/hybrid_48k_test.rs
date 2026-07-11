@@ -1,4 +1,4 @@
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 #[test]
 fn test_48k_hybrid_quality() {

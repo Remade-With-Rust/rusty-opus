@@ -15,7 +15,7 @@
 //!   application: voip | audio | lowdelay
 //!   frame_ms: 2.5 | 5 | 10 | 20 | 40 | 60
 
-use opus_rs::{Application, OpusEncoder};
+use rusty_opus::{Application, OpusEncoder};
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -51,14 +51,14 @@ fn main() {
     enc.lsb_depth = 16;
     enc.use_dtx = std::env::var("DTX").is_ok();
     match std::env::var("SIGNAL").ok().as_deref() {
-        Some("voice") => enc.signal_type = Some(opus_rs::SignalType::Voice),
-        Some("music") => enc.signal_type = Some(opus_rs::SignalType::Music),
+        Some("voice") => enc.signal_type = Some(rusty_opus::SignalType::Voice),
+        Some("music") => enc.signal_type = Some(rusty_opus::SignalType::Music),
         _ => {}
     }
     match std::env::var("MAXBW").ok().as_deref() {
-        Some("nb") => enc.max_bandwidth = opus_rs::Bandwidth::Narrowband,
-        Some("wb") => enc.max_bandwidth = opus_rs::Bandwidth::Wideband,
-        Some("swb") => enc.max_bandwidth = opus_rs::Bandwidth::Superwideband,
+        Some("nb") => enc.max_bandwidth = rusty_opus::Bandwidth::Narrowband,
+        Some("wb") => enc.max_bandwidth = rusty_opus::Bandwidth::Wideband,
+        Some("swb") => enc.max_bandwidth = rusty_opus::Bandwidth::Superwideband,
         _ => {}
     }
     if std::env::var("FEC").is_ok() {
@@ -67,10 +67,10 @@ fn main() {
     }
     if let Ok(bw) = std::env::var("FORCE_BW") {
         enc.force_bandwidth = Some(match bw.as_str() {
-            "nb" => opus_rs::Bandwidth::Narrowband,
-            "wb" => opus_rs::Bandwidth::Wideband,
-            "swb" => opus_rs::Bandwidth::Superwideband,
-            _ => opus_rs::Bandwidth::Fullband,
+            "nb" => rusty_opus::Bandwidth::Narrowband,
+            "wb" => rusty_opus::Bandwidth::Wideband,
+            "swb" => rusty_opus::Bandwidth::Superwideband,
+            _ => rusty_opus::Bandwidth::Fullband,
         });
     }
 

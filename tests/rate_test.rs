@@ -1,6 +1,6 @@
-use opus_rs::modes::default_mode;
-use opus_rs::range_coder::RangeCoder;
-use opus_rs::rate::{BITRES, clt_compute_allocation, pulses2bits};
+use rusty_opus::modes::default_mode;
+use rusty_opus::range_coder::RangeCoder;
+use rusty_opus::rate::{BITRES, clt_compute_allocation, pulses2bits};
 
 #[test]
 fn test_rate_allocation_constraints() {
@@ -56,7 +56,7 @@ fn test_rate_allocation_constraints() {
         // not an actual pulse count. Verify it is non-negative and within the cap.
         assert!(pulses[i] >= 0, "Negative pulses in band {}", i);
         // Convert bits -> pulse count, then verify round-trip bits are consistent.
-        let pulse_count = opus_rs::rate::bits2pulses(mode, i, 3, pulses[i]);
+        let pulse_count = rusty_opus::rate::bits2pulses(mode, i, 3, pulses[i]);
         let _bits_calc = pulses2bits(mode, i, 3, pulse_count);
     }
 

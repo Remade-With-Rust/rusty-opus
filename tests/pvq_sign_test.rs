@@ -1,4 +1,4 @@
-use opus_rs::pvq::{cwrsi, icwrs};
+use rusty_opus::pvq::{cwrsi, icwrs};
 
 #[test]
 fn test_pvq_sign() {

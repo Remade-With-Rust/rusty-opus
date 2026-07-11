@@ -1,7 +1,7 @@
 // Test basic MDCT functionality
 #[cfg(test)]
 mod tests {
-    use opus_rs::mdct::MdctLookup;
+    use rusty_opus::mdct::MdctLookup;
 
     #[test]
     fn test_mdct_identity() {

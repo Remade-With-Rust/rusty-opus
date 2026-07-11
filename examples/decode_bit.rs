@@ -6,7 +6,7 @@
 // — the format the official `opus_compare` expects.
 //
 // Usage: cargo run --release --example decode_bit -- <rate> <channels> <in.bit> <out.pcm>
-use opus_rs::OpusDecoder;
+use rusty_opus::OpusDecoder;
 use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -82,7 +82,7 @@ fn main() {
     let check_range = env::var("RANGECHK").is_ok();
     let mut range_mismatch = 0u32;
     let mut first_mismatch_pkt = 0u32;
-    opus_rs::prof::reset();
+    rusty_opus::prof::reset();
     while pos + 8 <= data.len() {
         let len = be32(&data[pos..pos + 4]) as usize;
         let enc_final_range = be32(&data[pos + 4..pos + 8]);
@@ -98,7 +98,7 @@ fn main() {
 
         let fs = packet_frame_size(payload, rate).min(max_frame);
         let dec_res = {
-            let _t = opus_rs::prof::scope(opus_rs::prof::Stage::Total);
+            let _t = rusty_opus::prof::scope(rusty_opus::prof::Stage::Total);
             dec.decode(payload, fs, &mut pcm)
         };
         match dec_res {
@@ -139,5 +139,5 @@ fn main() {
     if check_range {
         eprintln!("  RANGE: {range_mismatch} mismatches (first at pkt {first_mismatch_pkt})");
     }
-    opus_rs::prof::dump();
+    rusty_opus::prof::dump();
 }

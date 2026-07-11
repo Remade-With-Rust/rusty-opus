@@ -1,5 +1,5 @@
 /// Tests for stereo encoding and decoding
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 use std::f32::consts::PI;
 
 /// Test basic stereo encoding and decoding

@@ -19,7 +19,7 @@ fn gen_pcm(fs: i32, num_samples: usize) -> Vec<f32> {
 }
 
 fn run_config(fs: i32, bitrate: i32, complexity: i32, c_ref_hex: &[&str], label: &str) {
-    use opus_rs::{Application, OpusEncoder};
+    use rusty_opus::{Application, OpusEncoder};
     let frame_size = fs as usize / 50;
     let total_samples = frame_size * c_ref_hex.len();
     let pcm = gen_pcm(fs, total_samples);

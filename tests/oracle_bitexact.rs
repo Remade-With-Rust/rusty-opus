@@ -16,7 +16,7 @@
 //! The scenario synths are duplicated from `profile_encode.rs` verbatim so the
 //! oracle stands alone (a bench edit can't silently move the gate).
 
-use opus_rs::{Application, OpusEncoder};
+use rusty_opus::{Application, OpusEncoder};
 
 struct Lcg(u64);
 impl Lcg {

@@ -1,4 +1,4 @@
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 /// Append an Opus frame length per RFC 6716 §3.1: 0..=251 in one byte;
 /// 252..=1275 in two bytes `b0` (252..255) then `b1`, where `len = b1*4 + b0`.

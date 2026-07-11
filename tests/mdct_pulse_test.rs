@@ -1,4 +1,4 @@
-use opus_rs::mdct::MdctLookup;
+use rusty_opus::mdct::MdctLookup;
 use std::f32::consts::PI;
 
 #[test]

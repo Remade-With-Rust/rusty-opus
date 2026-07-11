@@ -1,6 +1,6 @@
-use opus_rs::celt::CeltDecoder;
-use opus_rs::modes::default_mode;
-use opus_rs::range_coder::RangeCoder;
+use rusty_opus::celt::CeltDecoder;
+use rusty_opus::modes::default_mode;
+use rusty_opus::range_coder::RangeCoder;
 
 #[test]
 fn test_celt_silence() {

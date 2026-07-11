@@ -1,4 +1,4 @@
-use opus_rs::modes::default_mode;
+use rusty_opus::modes::default_mode;
 
 #[test]
 fn test_preemphasis_roundtrip() {

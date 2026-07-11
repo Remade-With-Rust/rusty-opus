@@ -2,7 +2,7 @@
 // consecutive pairs into 40ms code-3 packets, (b) pad each to +5 bytes then
 // unpad, verifying frame identity. Writes the merged stream in opus_demo .bit
 // framing for oracle decode.
-use opus_rs::repacketizer::{pad_packet, unpad_packet, Repacketizer, parse_packet};
+use rusty_opus::repacketizer::{pad_packet, unpad_packet, Repacketizer, parse_packet};
 use std::fs::File; use std::io::{Read, Write};
 fn main() {
     let a: Vec<String> = std::env::args().collect();

@@ -6,8 +6,8 @@
 //!
 //! Usage: analysis_trace <rate> <channels> <frame_ms> <in.sw>
 
-use opus_rs::analysis::{TonalityAnalysisState, run_analysis};
-use opus_rs::kiss_fft::KissFftState;
+use rusty_opus::analysis::{TonalityAnalysisState, run_analysis};
+use rusty_opus::kiss_fft::KissFftState;
 use std::fs::File;
 use std::io::Read;
 

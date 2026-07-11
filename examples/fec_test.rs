@@ -1,7 +1,7 @@
 // Decode with 1-in-N loss, recovering each lost frame via FEC from the NEXT
 // packet (decode_fec), then decoding that packet normally. Compares the FEC
 // reconstruction energy to plain PLC.
-use opus_rs::OpusDecoder;
+use rusty_opus::OpusDecoder;
 use std::fs::File; use std::io::Read;
 fn main() {
     let a: Vec<String> = std::env::args().collect();

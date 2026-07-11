@@ -9,21 +9,21 @@ fn configure_criterion() -> Criterion {
         .measurement_time(std::time::Duration::from_millis(500)) // 500ms per bench
         .warm_up_time(std::time::Duration::from_millis(100)) // 100ms warmup
 }
-use opus_rs::celt_lpc::autocorr;
-use opus_rs::kiss_fft::{KissCpx, KissFftState, opus_fft_impl};
-use opus_rs::modes::default_mode;
-use opus_rs::pvq::{alg_quant, alg_unquant, decode_pulses, encode_pulses, pvq_search};
-use opus_rs::range_coder::RangeCoder;
-use opus_rs::rate::clt_compute_allocation;
-use opus_rs::silk::define::*;
-use opus_rs::silk::lpc_analysis::silk_burg_modified_fix;
-use opus_rs::silk::nsq::silk_nsq;
-use opus_rs::silk::pitch_analysis::silk_pitch_analysis_core;
-use opus_rs::silk::sigproc_fix::{
+use rusty_opus::celt_lpc::autocorr;
+use rusty_opus::kiss_fft::{KissCpx, KissFftState, opus_fft_impl};
+use rusty_opus::modes::default_mode;
+use rusty_opus::pvq::{alg_quant, alg_unquant, decode_pulses, encode_pulses, pvq_search};
+use rusty_opus::range_coder::RangeCoder;
+use rusty_opus::rate::clt_compute_allocation;
+use rusty_opus::silk::define::*;
+use rusty_opus::silk::lpc_analysis::silk_burg_modified_fix;
+use rusty_opus::silk::nsq::silk_nsq;
+use rusty_opus::silk::pitch_analysis::silk_pitch_analysis_core;
+use rusty_opus::silk::sigproc_fix::{
     silk_autocorr, silk_inner_prod_aligned, silk_lpc_analysis_filter,
 };
-use opus_rs::silk::structs::*;
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::silk::structs::*;
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 fn sine_i16(samples: usize, sample_rate: u32, freq: u32) -> Vec<i16> {
     (0..samples)

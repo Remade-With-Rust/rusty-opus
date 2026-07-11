@@ -1,4 +1,4 @@
-use opus_rs::silk::resampler::{
+use rusty_opus::silk::resampler::{
     SilkResampler, SilkResamplerDown1_6, silk_resampler_down_1_6, silk_resampler_down2_3,
 };
 

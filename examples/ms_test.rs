@@ -1,7 +1,7 @@
 // Multistream 5.1 round-trip: distinct tone per channel, encode -> decode,
 // verify each output channel correlates with its OWN input tone (mapping right).
-use opus_rs::multistream::{OpusMSEncoder, OpusMSDecoder};
-use opus_rs::Application;
+use rusty_opus::multistream::{OpusMSEncoder, OpusMSDecoder};
+use rusty_opus::Application;
 fn main() {
     let rate=48000usize; let ch=6usize; let fsz=960usize; let frames=50usize;
     // per-channel tone: channel c = sine at (300+120*c) Hz

@@ -12,7 +12,7 @@
 //! 128 kbps Audio), SILK-only (16 kHz mono speech, 24 kbps VoIP), and Hybrid
 //! (48 kHz mono speech, 32 kbps VoIP → SILK WB + CELT high bands).
 
-use opus_rs::{Application, OpusEncoder};
+use rusty_opus::{Application, OpusEncoder};
 
 /// Deterministic LCG — no external RNG, byte-identical clips forever.
 struct Lcg(u64);
@@ -187,11 +187,11 @@ fn profile_breakdown() {
     let passes = 15;
     for sc in scenarios(secs) {
         // Collect a snapshot per pass; report the per-stage median.
-        let mut per_stage: Vec<Vec<(f64, u64)>> = vec![Vec::new(); opus_rs::prof::N];
+        let mut per_stage: Vec<Vec<(f64, u64)>> = vec![Vec::new(); rusty_opus::prof::N];
         for _ in 0..passes {
-            opus_rs::prof::reset();
+            rusty_opus::prof::reset();
             encode_clip(&sc);
-            let snap = opus_rs::prof::snapshot();
+            let snap = rusty_opus::prof::snapshot();
             for (i, v) in snap.iter().enumerate() {
                 per_stage[i].push(*v);
             }
@@ -201,13 +201,13 @@ fn profile_breakdown() {
             v[v.len() / 2]
         };
         let stages: Vec<(f64, u64)> = per_stage.iter_mut().map(med).collect();
-        let total = stages[opus_rs::prof::Stage::Total as usize].0.max(1e-9);
-        let sub: f64 = stages[..opus_rs::prof::INFO_FIRST]
+        let total = stages[rusty_opus::prof::Stage::Total as usize].0.max(1e-9);
+        let sub: f64 = stages[..rusty_opus::prof::INFO_FIRST]
             .iter()
             .map(|s| s.0)
             .sum();
         println!("\n=== {} — {:.1} ms total (median of {passes}) ===", sc.name, total);
-        let mut rows: Vec<(usize, f64, u64)> = stages[..opus_rs::prof::Stage::Total as usize]
+        let mut rows: Vec<(usize, f64, u64)> = stages[..rusty_opus::prof::Stage::Total as usize]
             .iter()
             .enumerate()
             .filter(|(_, s)| s.1 > 0)
@@ -217,7 +217,7 @@ fn profile_breakdown() {
         for (i, ms, calls) in rows {
             println!(
                 "  {:<18} {:>8.2} ms  {:>5.1}%   ({} calls, {:.0} ns/call)",
-                opus_rs::prof::name(i),
+                rusty_opus::prof::name(i),
                 ms,
                 100.0 * ms / total,
                 calls,

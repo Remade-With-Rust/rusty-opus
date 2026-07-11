@@ -1,8 +1,8 @@
 /// Unit tests for Hybrid mode and CELT fixes
-use opus_rs::celt::{CeltDecoder, CeltEncoder};
-use opus_rs::modes::default_mode;
-use opus_rs::range_coder::RangeCoder;
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::celt::{CeltDecoder, CeltEncoder};
+use rusty_opus::modes::default_mode;
+use rusty_opus::range_coder::RangeCoder;
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 use std::f32::consts::PI;
 
 /// Test that RangeCoder payload is correctly extracted with front + back combination

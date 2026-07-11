@@ -1,6 +1,6 @@
-use opus_rs::bands::compute_band_energies;
-use opus_rs::bands::normalise_bands;
-use opus_rs::modes::default_mode;
+use rusty_opus::bands::compute_band_energies;
+use rusty_opus::bands::normalise_bands;
+use rusty_opus::modes::default_mode;
 
 #[test]
 fn test_bands_match() {

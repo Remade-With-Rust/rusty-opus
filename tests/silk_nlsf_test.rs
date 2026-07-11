@@ -1,8 +1,8 @@
-use opus_rs::silk::define::*;
-use opus_rs::silk::nlsf_decode::silk_nlsf_decode;
-use opus_rs::silk::nlsf_encode::silk_nlsf_encode;
-use opus_rs::silk::tables_nlsf::{SILK_NLSF_CB_NB_MB, SILK_NLSF_CB_WB};
-use opus_rs::{Application, OpusEncoder};
+use rusty_opus::silk::define::*;
+use rusty_opus::silk::nlsf_decode::silk_nlsf_decode;
+use rusty_opus::silk::nlsf_encode::silk_nlsf_encode;
+use rusty_opus::silk::tables_nlsf::{SILK_NLSF_CB_NB_MB, SILK_NLSF_CB_WB};
+use rusty_opus::{Application, OpusEncoder};
 use std::f32::consts::PI;
 
 #[test]

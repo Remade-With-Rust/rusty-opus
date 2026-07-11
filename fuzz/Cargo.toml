@@ -1,5 +1,5 @@
 [package]
-name = "opus-rs-fuzz"
+name = "rusty-opus-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-opus-rs = { path = ".." }
+rusty-opus = { path = ".." }
 
 [dev-dependencies]
 

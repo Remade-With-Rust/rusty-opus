@@ -1,7 +1,7 @@
 // Test MDCT with sine wave matching loopback test
 #[cfg(test)]
 mod tests {
-    use opus_rs::mdct::MdctLookup;
+    use rusty_opus::mdct::MdctLookup;
 
     #[test]
     fn test_mdct_sine_wave() {

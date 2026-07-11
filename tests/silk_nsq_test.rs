@@ -1,7 +1,7 @@
-use opus_rs::silk::define::*;
-use opus_rs::silk::nsq::silk_nsq;
-use opus_rs::silk::nsq_del_dec::silk_nsq_del_dec;
-use opus_rs::silk::structs::*;
+use rusty_opus::silk::define::*;
+use rusty_opus::silk::nsq::silk_nsq;
+use rusty_opus::silk::nsq_del_dec::silk_nsq_del_dec;
+use rusty_opus::silk::structs::*;
 
 /// Create a 16kHz wideband encoder state for testing
 fn create_wb_encoder_state() -> SilkEncoderStateCommon {

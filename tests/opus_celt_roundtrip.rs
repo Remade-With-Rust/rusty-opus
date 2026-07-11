@@ -1,4 +1,4 @@
-use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 fn snr_with_delay(input: &[f32], output: &[f32], delay: usize) -> f32 {
     let mut signal = 0.0f64;

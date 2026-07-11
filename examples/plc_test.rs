@@ -1,6 +1,6 @@
 // Decode a .bit stream (opus_demo framing) with simulated packet loss: every
 // Nth packet is dropped (decoded as lost -> PLC). Reports energy continuity.
-use opus_rs::OpusDecoder;
+use rusty_opus::OpusDecoder;
 use std::fs::File;
 use std::io::{Read, Write};
 fn main() {
