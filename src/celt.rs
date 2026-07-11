@@ -1117,7 +1117,19 @@ fn comb_filter_inplace(
         i += 1;
     }
 
-    // Constant region: only new filter (t1, g1)
+    // Constant region: only new filter (t1, g1). The feedback delay t1 >=
+    // COMBFILTER_MINPERIOD (15) >= 10, so an 8-wide vector at [idx, idx+8) never
+    // reads its own writes: the batch's read span [idx-t1-2, idx-t1+9] is disjoint
+    // from the write span [idx, idx+8) iff t1 >= 10 — the past outputs it reads are
+    // already finalized, exactly as the scalar loop sees them.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if i + 8 <= n && t1 >= 10 && std::arch::is_x86_feature_detected!("avx2") {
+            unsafe {
+                i = comb_filter_const_avx2(buf, y_idx, i, n, t1, g10, g11, g12);
+            }
+        }
+    }
     while i < n {
         let idx = y_idx + i;
         let s = buf[idx];
@@ -1129,6 +1141,49 @@ fn comb_filter_inplace(
         buf[idx] = s + g10 * r1 + g11 * (r1p1 + r1m1) + g12 * (r1p2 + r1m2);
         i += 1;
     }
+}
+
+/// AVX2 comb-filter constant region: 8 samples/iter, bit-exact vs the scalar
+/// tail below. Uses separate mul+add (NOT FMA) in the scalar op order
+/// `s + g10*r1 + g11*(r1p1+r1m1) + g12*(r1p2+r1m2)` so every rounding matches.
+/// Requires `t1 >= 10` (the batch reads [idx-t1-2, idx-t1+9] stay clear of the
+/// [idx, idx+8) writes). Returns the index `i` where the scalar tail resumes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn comb_filter_const_avx2(
+    buf: &mut [f32],
+    y_idx: usize,
+    mut i: usize,
+    n: usize,
+    t1: usize,
+    g10: f32,
+    g11: f32,
+    g12: f32,
+) -> usize {
+    use std::arch::x86_64::*;
+    let vg10 = _mm256_set1_ps(g10);
+    let vg11 = _mm256_set1_ps(g11);
+    let vg12 = _mm256_set1_ps(g12);
+    let p = buf.as_mut_ptr();
+    while i + 8 <= n {
+        let idx = y_idx + i;
+        let base = idx - t1; // >= 2 (t1 <= idx-2, and idx >= y_idx >= t1+2)
+        let s = _mm256_loadu_ps(p.add(idx));
+        let r1 = _mm256_loadu_ps(p.add(base));
+        let r1p1 = _mm256_loadu_ps(p.add(base + 1));
+        let r1m1 = _mm256_loadu_ps(p.add(base - 1));
+        let r1p2 = _mm256_loadu_ps(p.add(base + 2));
+        let r1m2 = _mm256_loadu_ps(p.add(base - 2));
+        let a = _mm256_add_ps(r1p1, r1m1);
+        let b = _mm256_add_ps(r1p2, r1m2);
+        // out = ((s + g10*r1) + g11*a) + g12*b  (left-to-right, two-rounding, no FMA)
+        let mut out = _mm256_add_ps(s, _mm256_mul_ps(vg10, r1));
+        out = _mm256_add_ps(out, _mm256_mul_ps(vg11, a));
+        out = _mm256_add_ps(out, _mm256_mul_ps(vg12, b));
+        _mm256_storeu_ps(p.add(idx), out);
+        i += 8;
+    }
+    i
 }
 
 fn run_prefilter(
