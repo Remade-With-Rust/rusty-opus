@@ -139,7 +139,7 @@ media infrastructure for an AI-first world.
 
 More standalone codec engines from the same family:
 [`rusty_h264`](https://crates.io/crates/rusty_h264) (H.264, on crates.io) ·
-[`rusty_vp9`](https://crates.io/crates/rusty_vp9) (VP9) · [`rusty_mp3`](https://crates.io/crates/rusty_mp3) (MP3) · [`rusty_aac`](https://crates.io/crates/rusty_aac) (AAC-LC) ·
+[`rusty_vp9`](https://crates.io/crates/rusty_vp9) (VP9) · [`rusty_mp3`](https://crates.io/crates/rusty_mp3) (MP3) · [`rusty_aac`](https://crates.io/crates/rusty_aac) (AAC-LC) · [`rusty_vorbis`](https://crates.io/crates/rusty_vorbis) (Vorbis) ·
 [rusty-av1-toolkit](https://github.com/Remade-With-Rust/rusty-av1-toolkit) (AV1).
 
 **[Remade With Rust](https://github.com/remade-with-rust)** is an initiative by
