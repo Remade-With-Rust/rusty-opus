@@ -1735,6 +1735,15 @@ impl OpusDecoder {
                 if m < 1 || m > 48 {
                     return Err("Code 3: invalid frame count");
                 }
+                // libopus opus.c opus_packet_parse_impl (code 3):
+                //   if (count <= 0 || framesize*(opus_int32)count > 5760)
+                //      return OPUS_INVALID_PACKET;
+                // (framesize at 48 kHz; 5760 = 120 ms, the RFC 6716 packet cap.)
+                // A hostile frame count past this cap would otherwise shrink our
+                // per-frame size below the redundancy-fade windows further down.
+                if m as i32 * repacketizer::samples_per_frame(toc, 48000) > 5760 {
+                    return Err("Code 3: packet duration exceeds 120 ms");
+                }
                 frame_count = m;
                 let vbr = (count_byte & 0x80) != 0;
                 let padding = (count_byte & 0x40) != 0;
@@ -1803,6 +1812,22 @@ impl OpusDecoder {
                 }
             }
             _ => unreachable!(),
+        }
+
+        // libopus opus_decoder.c opus_decode_native:
+        //   if (count*packet_frame_size > frame_size)
+        //      return OPUS_BUFFER_TOO_SMALL;
+        // The packet's own TOC duration must fit the caller's frame_size. We split
+        // the caller's buffer as sub_frame_size = frame_size / frame_count, so a
+        // malformed multi-frame packet (large frame count vs. a small caller
+        // buffer) would otherwise make sub_frame_size smaller than the 2.5/5 ms
+        // redundancy-fade region — the fuzzer-found out-of-bounds/underflow panics
+        // in redundancy_fade_start/redundancy_fade_end. C rejects such packets
+        // here; so do we.
+        let packet_frame_samples =
+            repacketizer::samples_per_frame(toc, self.sampling_rate) as usize;
+        if frame_count * packet_frame_samples > frame_size {
+            return Err("Output buffer too small");
         }
 
         self.frame_size = frame_size;
@@ -2507,6 +2532,14 @@ fn celt_endband_for_bandwidth(bw: Bandwidth) -> usize {
 /// interleaved output region of one frame. `red` is PLANAR (F5 per channel).
 /// celt_to_silk: redundant frame occupies the START of the frame — first 2.5 ms
 /// copied verbatim, next 2.5 ms fades redundant -> main.
+///
+/// Indexing invariant: `out.len() >= f5 * channels` (writes reach sample
+/// f5-1 = 2*f2_5-1). A malformed multi-frame packet used to violate this (a
+/// hostile frame count made the per-frame region tinier than F5, fuzzer-found
+/// OOB panics here); decode() now rejects such packets up front exactly as C
+/// libopus does (opus_decode_native's count*packet_frame_size > frame_size ->
+/// OPUS_BUFFER_TOO_SMALL, and the 120 ms cap of opus_packet_parse_impl), so a
+/// redundant frame always has >= 10 ms of frame to fade into, as in C.
 fn redundancy_fade_start(
     out: &mut [f32],
     red: &[f32],
@@ -2531,6 +2564,15 @@ fn redundancy_fade_start(
 
 /// SILK->CELT: redundant frame occupies the END of the frame — the last 2.5 ms
 /// fades main -> redundant (second half of the redundant frame).
+///
+/// Indexing invariant: `frame_samples >= f2_5` and `out.len() >=
+/// frame_samples * channels` (the index `frame_samples - f2_5 + i` would
+/// otherwise underflow). A malformed multi-frame packet used to violate this
+/// (fuzzer-found subtract-with-overflow panic here); decode() now rejects such
+/// packets up front exactly as C libopus does (opus_decode_native's
+/// count*packet_frame_size > frame_size -> OPUS_BUFFER_TOO_SMALL, plus the
+/// 120 ms cap of opus_packet_parse_impl), so redundancy only ever runs on
+/// frames of >= 10 ms, as in C.
 fn redundancy_fade_end(
     out: &mut [f32],
     frame_samples: usize,

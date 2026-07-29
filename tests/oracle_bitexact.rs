@@ -68,7 +68,13 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
             phase -= 1.0;
         }
         let exc = if voiced {
-            (1.0 - phase).powi(3) * if phase < 0.1 { 1.5 } else { 0.3 }
+            // NOT .powi(3): powi lowers differently per opt level (O0 calls
+            // __powisf2, O2 expands inline), so the synth PCM — and thus the
+            // frozen hashes — differed between `cargo test` and `--release`.
+            // Explicit (x*x)*x is bit-identical at every opt level AND to the
+            // release powi expansion, so the frozen hashes are unchanged.
+            let x = 1.0 - phase;
+            ((x * x) * x) * if phase < 0.1 { 1.5 } else { 0.3 }
         } else {
             rng.next_f32() * 0.4
         };

@@ -777,7 +777,14 @@ fn tonality_analysis(
         band_tonality[b] = (t_e / (1e-15 + e)).max(stationarity * tonal.prev_band_tonality[b]);
         frame_tonality += band_tonality[b];
         if b >= NB_TBANDS - NB_TONAL_SKIP_BANDS {
-            frame_tonality -= band_tonality[b - NB_TBANDS + NB_TONAL_SKIP_BANDS];
+            // C analysis.c: `band_tonality[b-NB_TBANDS+NB_TONAL_SKIP_BANDS]` with
+            // `int b` — the intermediate (b - NB_TBANDS) is negative there, but the
+            // guarded final index is >= 0. Written left-to-right in usize, that
+            // intermediate underflows (debug panic; release wraps back to the same
+            // final index C computes). Reorder so no intermediate goes negative:
+            // the guard gives b + NB_TONAL_SKIP_BANDS >= NB_TBANDS, and the final
+            // index is identical to the C reference in all builds.
+            frame_tonality -= band_tonality[b + NB_TONAL_SKIP_BANDS - NB_TBANDS];
         }
         max_frame_tonality =
             max_frame_tonality.max((1.0 + 0.03 * (b as f32 - NB_TBANDS as f32)) * frame_tonality);

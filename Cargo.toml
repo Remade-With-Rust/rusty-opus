@@ -2,7 +2,7 @@
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>", "Remade-With-Rust"]
 name = "rusty-opus"
-version = "0.1.23"
+version = "0.1.24"
 description = "pure Rust Opus codec — performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
 license = "BSD-3-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty-opus"
