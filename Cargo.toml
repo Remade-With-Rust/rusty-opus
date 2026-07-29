@@ -6,6 +6,14 @@ version = "0.1.23"
 description = "pure Rust Opus codec — performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
 license = "BSD-3-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty-opus"
+homepage = "https://github.com/Remade-With-Rust/rusty-opus"
+readme = "README.md"
+keywords = ["opus", "audio", "codec", "decoder", "encoder"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+rust-version = "1.85"
+# Keep the published crate to the codec itself: no fuzz harness, no local
+# debug traces, no WIP analysis tests.
+exclude = ["fuzz/", "*.txt", "bench_quick.sh", "tests/analyze_encode.rs"]
 
 [features]
 # Dev-only stage profiler (src/prof.rs): per-stage tick buckets + dump().
