@@ -1,6 +1,7 @@
 # rusty-opus
 
 [![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/remade-with-rust)
+[![By Mata Network](https://img.shields.io/badge/by-Mata%20Network-5b2be0)](https://www.mata.network)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue)](COPYING)
 [![Pure Rust](https://img.shields.io/badge/pure-Rust%20%C2%B7%20no%20C%20%C2%B7%20no%20FFI-orange?logo=rust&logoColor=fff)](#)
 
@@ -124,6 +125,26 @@ single-threaded per stream.
 
 SIMD is always compiled and selected at runtime via CPU-feature detection, with a scalar
 fallback path — so the same binary runs on machines with or without AVX2/NEON.
+
+## Part of Remade With Rust
+
+**rusty-opus** is the Opus engine of
+**[remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)** — a ground-up,
+permissively-licensed Rust rebuild of FFmpeg: the `ffmpeg`/`ffprobe` CLI you already know,
+pure-Rust codecs end to end, and no copyleft anywhere in the tree. If you want Opus inside a
+full demux → decode → filter → encode → mux pipeline, start there.
+
+Also check out **[FFAI](https://github.com/Remade-With-Rust/FFAI)**, our sister project —
+media infrastructure for an AI-first world.
+
+More standalone codec engines from the same family:
+[`rusty_h264`](https://crates.io/crates/rusty_h264) (H.264, on crates.io) ·
+`rusty_vp9` (VP9) · `rusty_mp3` (MP3) · `rusty_aac` (AAC-LC) ·
+[rusty-av1-toolkit](https://github.com/Remade-With-Rust/rusty-av1-toolkit) (AV1).
+
+**[Remade With Rust](https://github.com/remade-with-rust)** is an initiative by
+[Mata Network](https://www.mata.network) to rebuild essential C and C++ tools in Rust — for the
+memory safety, the predictable performance, and the freedom of a permissive license.
 
 ## License
 
