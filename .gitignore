@@ -7,3 +7,9 @@ fuzz/artifacts
 fuzz/corpus
 flamegraph.svg
 opus-1.6.1/
+
+# Great Gate corpus audio: 15 MB, and `tools/gen_gate_corpus.py` regenerates it
+# byte-for-byte (fixed seed 0x0FF5). The README and the generator are tracked;
+# the WAVs are not.
+fixtures/gate_corpus/*.wav
+tools/__pycache__/
