@@ -502,7 +502,14 @@ impl OpusEncoder {
             max_bandwidth: Bandwidth::Fullband,
             tonality: analysis::TonalityAnalysisState::new(sampling_rate),
             analysis_kfft: kiss_fft::KissFftState::new(480),
-            lsb_depth: 24,
+            // Float-API default, faithful to opus_encoder.c. `RUSTY_OPUS_LSB_DEPTH`
+            // overrides it for the D1 bandwidth-detector investigation: the
+            // analysis noise floor is (5.7e-4 / 2^(lsb_depth-8))^2, so feeding
+            // s16-sourced material at depth 24 puts the floor 2^16 too low.
+            lsb_depth: std::env::var("RUSTY_OPUS_LSB_DEPTH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(24),
             voice_ratio: -1,
             detected_bandwidth: 0,
             hp_mem: vec![0; channels * 2],

@@ -1381,6 +1381,8 @@ fn compute_vbr_target(
     tot_boost: i32,
     tf_estimate: f32,
     max_depth: f32,
+    analysis: &AnalysisInfo,
+    tonal_boost: bool,
 ) -> i32 {
     let nb_ebands = mode.nb_ebands as i32;
     let e_bands = mode.e_bands;
@@ -1408,6 +1410,18 @@ fn compute_vbr_target(
     // Transient boost, compensating for the average.
     let tf_calibration = 0.044f32;
     target += (2.0 * (tf_estimate - tf_calibration) * target as f32) as i32;
+
+    // Tonality boost (celt_encoder.c compute_vbr, the `analysis->valid && !lfe`
+    // block). `tonality` is computed by the analysis module every frame and was
+    // previously plumbed into the CELT layer and dropped — this is libopus's
+    // own VBR lever, restored. The `pitch_change` term of the C is omitted: we
+    // do not track that signal, so this is a faithful SUBSET, never an
+    // invention. Off unless `tonal_boost`, so the default stays byte-identical
+    // until the ladder clears it.
+    if tonal_boost && analysis.valid {
+        let tonal = (analysis.tonality - 0.15).max(0.0) - 0.12;
+        target += ((coded_bins << BITRES) as f32 * 1.2 * tonal) as i32;
+    }
 
     // Don't allocate more than 8 bits above the "depth" of the signal.
     {
@@ -1488,6 +1502,19 @@ pub struct CeltEncoder {
     /// each frame (was never assigned — census 2026-08-07). Drives the
     /// prefilter loss ladder and coarse-energy intra bias.
     pub(crate) loss_rate: i32,
+    /// Enable libopus's tonality VBR boost in `compute_vbr_target`
+    /// (`RUSTY_OPUS_TONAL_VBR`). Opt-in until the per-class ladder clears it;
+    /// off = byte-identical.
+    pub(crate) tonal_vbr: bool,
+    /// Emit the CELT per-frame silence flag (`RUSTY_OPUS_SILENCE_FLAG`).
+    /// Opt-in until the ladder clears it; off = byte-identical. Without it we
+    /// spend ~69% of the active-frame rate coding digital silence where libopus
+    /// spends ~3% (docs/great-gate.md §5.5).
+    pub(crate) silence_flag: bool,
+    /// Peak |sample| of the previous frame's overlap tail — the `st->overlap_max`
+    /// of celt_encoder.c, needed so silence is only declared once the region the
+    /// MDCT folds is silent as well.
+    overlap_max: f32,
 }
 
 const INTEN_THRESHOLDS: [i32; 21] = [
@@ -1874,6 +1901,9 @@ impl CeltEncoder {
 
             analysis: AnalysisInfo::default(),
             loss_rate: 0,
+            tonal_vbr: std::env::var_os("RUSTY_OPUS_TONAL_VBR").is_some(),
+            silence_flag: std::env::var_os("RUSTY_OPUS_SILENCE_FLAG").is_some(),
+            overlap_max: 0.0,
         }
     }
 
@@ -1916,6 +1946,25 @@ impl CeltEncoder {
         let mode = self.mode;
         let channels = self.channels;
         let nb_ebands = mode.nb_ebands;
+
+        // ---- Digital-silence detection (celt_encoder.c) ----
+        // sample_max spans this frame's non-overlap part PLUS the previous
+        // frame's overlap tail, so a frame is only "silent" once the region the
+        // MDCT will actually fold is silent too. Gated by `silence_flag` until
+        // the per-class ladder clears it; off = byte-identical.
+        let silence = if self.silence_flag {
+            let ovl = mode.overlap.min(frame_size);
+            let head = (frame_size - ovl) * channels;
+            let maxabs = |s: &[f32]| s.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+            let n = (frame_size * channels).min(pcm.len());
+            let head_max = maxabs(&pcm[..head.min(n)]);
+            let tail_max = maxabs(&pcm[head.min(n)..n]);
+            let sample_max = self.overlap_max.max(head_max).max(tail_max);
+            self.overlap_max = tail_max;
+            sample_max <= 1.0 / (1i64 << self.lsb_depth) as f32
+        } else {
+            false
+        };
         let overlap = mode.overlap;
         // Bits already in the coder at entry (the SILK part in hybrid mode) — used
         // by the VBR min-size guard so shrinking never truncates them.
@@ -2096,14 +2145,32 @@ impl CeltEncoder {
             let _ = freq[0];
         }
 
-        let total_bits = explicit_total_bits.unwrap_or_else(|| (rc.buf.len() * 8) as i32);
+        let mut total_bits = explicit_total_bits.unwrap_or_else(|| (rc.buf.len() * 8) as i32);
         self.w_error[..nb_ebands * channels].fill(0.0);
         let error = &mut self.w_error[..nb_ebands * channels];
 
         let tell = rc.tell();
-        let silence = false;
         if tell == 1 {
             rc.encode_bit_logp(silence, 15);
+        }
+        if silence {
+            // celt_encoder.c: on a silent frame send only the minimum. Clamp the
+            // coder to the bytes already filled + 2, then tell the range coder
+            // the rest is spoken for. Every downstream budget check (allocation,
+            // prefilter, bands) then has nothing to spend and codes nothing,
+            // while the whole pipeline still runs — which is what keeps the
+            // encoder in lockstep with the decoder's mirror of this at
+            // `rc.nbits_total += total_bits - rc.tell()`.
+            //
+            // CBR frames keep their full size (the packet length is fixed), so
+            // the shrink is VBR-only, exactly as in the C.
+            if self.vbr_rate > 0 {
+                let filled = (rc.tell() + 7) >> 3;
+                let nb_compressed = (total_bits >> 3).min(filled + 2).max(2);
+                rc.shrink(nb_compressed as u32);
+                total_bits = nb_compressed * 8;
+            }
+            rc.nbits_total += total_bits - rc.tell();
         }
 
         if start_band == 0 && !silence && rc.tell() + 16 <= total_bits {
@@ -2435,6 +2502,8 @@ impl CeltEncoder {
                     total_boost,
                     tf_estimate,
                     max_depth,
+                    &self.analysis,
+                    self.tonal_vbr,
                 )
             };
             let tell = rc.tell_frac();

@@ -487,6 +487,68 @@ a valid work proxy *within* an arm, not *across* arms with different per-call
 costs. For cross-mode comparisons read `cpu_ms`; do not let the counter's
 "SILK is cheapest" reading stand unqualified.
 
+## 4.9 Round 2 (2026-08-07 evening) — release, D1 closed, three bricks
+
+**Published: rusty-opus 0.1.25** (crates.io), commits pushed. The warm-up win is
+now genuinely downstream, not merely merged: rff's `Cargo.lock` resolves 0.1.25
+and `rff -c:a opus` emits `celt/FB 100%` on speech where it previously carried
+4% startup hybrid. Note the version-parity law needed a correction in practice —
+0.1.24 was *already* published and rff pinned `^0.1.24`, which **does** accept
+0.1.25 (caret on `0.1.x` admits later patches), so a patch bump was consumable.
+The "a 0.x pin can never pick up the fix" hazard applies to `0.1`→`0.2`.
+
+### D1 CLOSED — and it *was* `lsb_depth`, reversing my own refutation
+
+`RUSTY_OPUS_BW_DEBUG=1` on lp4000, per frame:
+
+```
+bw_raw=18  bw_premask=20  bw_final=20
+hp_e=7.4e-10   thresh=1.2e-13   masked_hp=0   noise_floor=7.6e-17
+```
+
+`hp_e` sits **6000× above** the threshold, so the `hp_ener` branch forces
+`bandwidth = 20` (FB) every frame; the band loop independently saturates to its
+own ceiling of 18 for the same reason; the masking rescue never fires. Both
+paths trace to `noise_floor = (5.7e-4 / 2^(lsb_depth−8))²` with `lsb_depth = 24`.
+At 16 the threshold becomes 2.4e-8 — above the measured `hp_e` — and the
+detector starts tracking content: lp4000→NB, lp8000→WB, lp12000→SWB,
+unfiltered→SWB/FB.
+
+I had refuted `lsb_depth` earlier, and that refutation was **right about the
+question it asked and wrong as generalised**: ffmpeg never calls
+`OPUS_SET_LSB_DEPTH`, so lsb_depth cannot explain why *libopus* narrows and we
+do not — but it is squarely the operative variable on *our* side. (The
+libopus-divergence question is still open.) Shipping `lsb_depth = 16` for
+s16-sourced input is a separate brick: it also moves the dynalloc/leak_boost
+noise floors, so it needs its own ladder.
+
+### The float SILK arm is a DISPATCH, not a tie
+
+Re-scored after the LTPCorr fix on the voip classes (the only place SILK is the
+working arm), rate-matched BD-ODG: `voip_speech_noisy` **+0.082**, `voip_mixed`
+−0.010, `voip_speech` **−0.123**. It stays default-off, but the old "ties
+fixed-point" verdict is now something more useful — a per-class **sign flip**,
+i.e. a dispatch candidate keyed on noisiness. Weak evidence (3 classes, and PEAQ
+saturates on narrowband speech), so it is a lead, not a bankable gate.
+
+### A new instrument: rate-matched BD in the regression harness
+
+Both new bricks MOVE the bitrate — the silence flag spends 28% fewer bits on the
+DTX clip (32.4→23.3 kb/s), the tonality boost spends ~1.6% more on tonal music.
+Per-rung ODG would price *the bits they moved* rather than the efficiency they
+bought, so `gate_regression.py --bd` interpolates both ladders on log(actual
+kbps) and reports per-class BD-ODG at matched rate. Any future
+bit-redistribution knob must be judged this way.
+
+### Process note, recorded because it nearly cost a dataset
+
+I rebuilt the encoder while a ladder was running — the exact mistake documented
+at the top of this file. The run spanned two binaries that differed only in
+default-off code, which is an assumption rather than a proof, so the run was
+**discarded and re-run against a pinned binary copy**. The pinning lever
+(`RUSTY_OPUS_ROUNDTRIP`) exists precisely so concurrent ladders can be held to
+one provable encoder.
+
 ## 5. P0.9 hygiene batch — fix BEFORE any fitting
 
 1. ✔ APPLIED 2026-08-07 — **flp.rs** `let _ = ccmax;` dropped C's `*LTPCorr`

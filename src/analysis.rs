@@ -875,6 +875,8 @@ fn tonality_analysis(
         // Simple follower with 13 dB/Bark slope for the spreading function.
         bandwidth_mask = (0.05 * bandwidth_mask).max(e);
     }
+    let bw_raw_dbg = bandwidth;
+    let (mut hp_e_dbg, mut hp_thresh_dbg) = (0.0f32, 0.0f32);
     // The energy above 12 kHz comes from the resampler's HP branch.
     if tonal.fs == 48000 {
         let noise_ratio = if tonal.prev_bandwidth == 20 { 10.0 } else { 30.0 };
@@ -882,12 +884,15 @@ fn tonality_analysis(
         above_max_pitch += e;
         tonal.mean_e[NB_TBANDS] = ((1.0 - alpha_e2) * tonal.mean_e[NB_TBANDS]).max(e);
         let em = e.max(tonal.mean_e[NB_TBANDS]);
+        hp_e_dbg = e;
+        hp_thresh_dbg = noise_ratio * noise_floor * 160.0;
         if em > 3.0 * noise_ratio * noise_floor * 160.0 || e > noise_ratio * noise_floor * 160.0 {
             bandwidth = 20;
         }
         is_masked[NB_TBANDS] = e
             < (if tonal.prev_bandwidth == 20 { 0.01 } else { 0.05 }) * bandwidth_mask;
     }
+    let bw_before_mask_dbg = bandwidth;
     tonal.info[info_idx].max_pitch_ratio = if above_max_pitch > below_max_pitch {
         below_max_pitch / above_max_pitch
     } else {
@@ -899,8 +904,28 @@ fn tonality_analysis(
     } else if bandwidth > 0 && bandwidth <= NB_TBANDS as i32 && is_masked[bandwidth as usize - 1] {
         bandwidth -= 1;
     }
+    let bw_before_warmup = bandwidth;
     if tonal.count <= 2 {
         bandwidth = 20;
+    }
+    // Great Gate D1 probe: which branch pins `bandwidth` at 20 (=FB)? The band
+    // loop can only reach NB_TBANDS(18), so FB must come from the hp_ener test
+    // or this warm-up forcing. Enabled by RUSTY_OPUS_BW_DEBUG=1.
+    if std::env::var_os("RUSTY_OPUS_BW_DEBUG").is_some() && tonal.count < 40 {
+        eprintln!(
+            "BWDBG count={:3} bw_raw={:2} bw_premask={:2} bw_final={:2} \
+             hp_ener={:.6e} hp_e={:.6e} thresh={:.6e} masked_hp={} noise_floor={:.3e}",
+            tonal.count,
+            bw_raw_dbg,
+            bw_before_mask_dbg,
+            bandwidth,
+            hp_ener,
+            hp_e_dbg,
+            hp_thresh_dbg,
+            is_masked[NB_TBANDS] as u8,
+            noise_floor,
+        );
+        let _ = bw_before_warmup;
     }
     frame_loudness = 20.0 * (frame_loudness as f64).log10() as f32;
     tonal.etracker = (tonal.etracker - 0.003).max(frame_loudness);

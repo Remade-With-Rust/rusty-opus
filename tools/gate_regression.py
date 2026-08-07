@@ -30,11 +30,76 @@ def load(path, arm='ours'):
                 rows[(r['clip'], int(r['rate_kbps']))] = float(r['odg'])
     return rows
 
+def load_curves(path, arm='ours'):
+    """{clip: [(actual_kbps, odg), ...]} sorted by rate — for the BD comparison."""
+    c = {}
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            if r['arm'] == arm:
+                c.setdefault(r['clip'], []).append((float(r['actual_kbps']), float(r['odg'])))
+    return {k: sorted(v) for k, v in c.items()}
+
+def bd_compare(base_path, new_path):
+    """Per-class BD-ODG: mean ODG delta over the OVERLAPPING actual-bitrate range.
+
+    The per-rung view is wrong for any change that moves the bitrate — a brick
+    that spends fewer bits at the same nominal target (the CELT silence flag) or
+    more (the tonality VBR boost) would be scored on the bits it moved rather
+    than on its efficiency. Interpolating both curves on log(actual kbps) prices
+    the change at matched rate, which is the question that actually matters.
+    """
+    import math
+    base, new = load_curves(base_path), load_curves(new_path)
+    print(f'{"clip":22s} {"rate range kbps":>18s} {"BD-ODG":>9s}  verdict')
+    worst, results = None, {}
+    for clip in sorted(set(base) & set(new)):
+        rb, rn = base[clip], new[clip]
+        if len(rb) < 2 or len(rn) < 2:
+            continue
+        lo = max(rb[0][0], rn[0][0])
+        hi = min(rb[-1][0], rn[-1][0])
+        if hi <= lo:
+            print(f'{clip:22s} {"NO RATE OVERLAP":>18s}      — skipped')
+            continue
+        xs = [math.exp(math.log(lo) + (math.log(hi) - math.log(lo)) * i / 199)
+              for i in range(200)]
+        def interp(curve, x):
+            for i in range(1, len(curve)):
+                if curve[i][0] >= x:
+                    (x0, y0), (x1, y1) = curve[i - 1], curve[i]
+                    t = 0.0 if x1 == x0 else (math.log(x / x0) / math.log(x1 / x0))
+                    return y0 + t * (y1 - y0)
+            return curve[-1][1]
+        d = sum(interp(rn, x) - interp(rb, x) for x in xs) / len(xs)
+        results[clip] = d
+        if worst is None or d < worst[1]:
+            worst = (clip, d)
+        verdict = 'WIN' if d > NOISE else ('neutral' if d > -NOISE else 'REGRESSION')
+        print(f'{clip:22s} {lo:7.1f}..{hi:7.1f}  {d:>+9.3f}  {verdict}')
+    if results:
+        vals = list(results.values())
+        print(f'\nclasses {len(vals)}  mean {sum(vals)/len(vals):+.3f}  '
+              f'worst {worst[0]} {worst[1]:+.3f}')
+        if worst[1] < -NOISE:
+            print(f'FAIL: {worst[0]} regressed {worst[1]:+.3f} at matched bitrate')
+            return 1
+        print('PASS: no class regressed at matched bitrate')
+    return 0
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--diff-only', default='')
     ap.add_argument('--baseline', default=BASELINE)
+    # Use for any brick that MOVES the bitrate; per-rung ODG would price the
+    # bits it moved instead of the efficiency it gained.
+    ap.add_argument('--bd', action='store_true',
+                    help='rate-matched per-class BD-ODG instead of per-rung deltas')
     a = ap.parse_args()
+
+    if a.bd:
+        if not a.diff_only:
+            sys.exit('--bd needs --diff-only <ladder.csv>')
+        sys.exit(bd_compare(a.baseline, a.diff_only))
 
     if a.diff_only:
         new_csv = a.diff_only

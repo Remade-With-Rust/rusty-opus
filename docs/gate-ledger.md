@@ -20,7 +20,7 @@ gate is only "shipped downstream" when the version in its row is on crates.io.
 | Stereo hybrid→CELT-FB reroute | stream | bitrate only (**content-blind — candidate for refit**) | `>28 kb/s` | hybrid / CELT-FB | force_bandwidth | in-code PEAQ table (lib.rs:734 comment): hybrid wins 24k, loses 32k/48k on stereo speech | 0.1.23 |
 | CELT-only detected-bw narrowing | frame | analysis bandwidth | — | narrow / **hold FB (chosen)** | n/a | PEAQ-refuted 2×, recorded lib.rs:649-663 — do not re-flip without per-clip dispatch | 0.1.23 (held) |
 | SILK complexity ladder | stream | complexity knob (**no content term — P2 queue**) | fixed ladder | n_states 1-4, survivors 2-16, order 12-24 | complexity=9 default | benchmarks.md (+78% at ≤0.03 ODG for c5) | 0.1.23 |
-| **Analysis warm-up guard** | frame | analysis frame count vs convergence threshold | N = 10, from the analysis's own `count < 10` fast-adaptation window (not fitted to our corpus) | classifier verdict / application default | `RUSTY_OPUS_ANALYSIS_WARMUP=0` — **verified byte-identical on all 39 hash rows** | 13-class × 5-rate ladder: **14 wins / 0 losses / 1 neutral (−0.005)**, mean +0.385 on the 15 changed rungs, best +1.212 (silence_dtx@32k), **all VoIP rungs +0.000**. Suite 218/0 | **DEFAULT-ON 2026-08-07, unpublished** (repo only; not yet on crates.io) |
+| **Analysis warm-up guard** | frame | analysis frame count vs convergence threshold | N = 10, from the analysis's own `count < 10` fast-adaptation window (not fitted to our corpus) | classifier verdict / application default | `RUSTY_OPUS_ANALYSIS_WARMUP=0` — **verified byte-identical on all 39 hash rows** | 13-class × 5-rate ladder: **14 wins / 0 losses / 1 neutral (−0.005)**, mean +0.385 on the 15 changed rungs, best +1.212 (silence_dtx@32k), **all VoIP rungs +0.000**. Suite 218/0 | **rusty-opus 0.1.25** (2026-08-07, on crates.io). Downstream verified: rff Cargo.lock resolves 0.1.25 and `rff -c:a opus` now emits celt/FB 100% on speech (was 4% startup hybrid) |
 
 ## Instrumentation (not gates; byte-identical proven)
 
@@ -34,7 +34,8 @@ gate is only "shipped downstream" when the version in its row is on crates.io.
 | # | defect | instrument that found it | status |
 |---|---|---|---|
 | D0 | **CELT silence flag never set** (`celt.rs:2104 let silence = false`) — we spend **69%** of the active-frame bitrate on silent frames where libopus spends **2.9%** (3.0 B vs 102.4 B packets). ~25% of the bit budget on the silence class is spent coding nothing | P0 per-class baseline: `silence_dtx` **−1.707 BD-ODG**, the worst class by 3×; confirmed by per-frame byte stats from the tap + libopus packet-size histogram | root-caused, mechanism + C in hand (`docs/great-gate.md` §5.5); **#1 P3 build**. Decoder side already implements it |
-| D1 | **`detected_bandwidth` is pinned at FB regardless of content** — the bandwidth signal is a constant, so every consumer of it (incl. the SILK/hybrid narrowing) is a no-op. libopus is content-driven on the same clips, so this is a divergence | P1 detector truth table (`gate_bw_truthtable.ps1`): 4/6/8/12 kHz low-pass all report FB, 100% of frames; libopus TOC cross-check | **measured + localized, root cause OPEN**. Structurally must be the `hp_ener→bandwidth=20` branch or the `count<=2` warm-up (the band loop caps at 18=SWB). `lsb_depth` and a resampler port error both REFUTED |
+| D1 | ✅ **ROOT-CAUSED 2026-08-07 — it IS `lsb_depth` after all.** Probe (`RUSTY_OPUS_BW_DEBUG=1`) on lp4000: `noise_floor = 7.6e-17` (from lsb_depth 24), measured `hp_e = 7.4e-10` vs threshold `1.2e-13` — **6000× over**, so the `hp_ener` branch forces `bandwidth = 20` every frame; the band loop independently saturates to 18 for the same reason; `is_masked[NB_TBANDS] = 0` so the masking rescue never fires. At lsb_depth 16 the threshold becomes 2.4e-8, *above* `hp_e`, and the detector tracks content: lp4000→NB, lp8000→WB, lp12000→SWB, unfiltered→SWB/FB. My earlier refutation was wrong in scope: it correctly showed lsb_depth cannot explain the *divergence from libopus* (ffmpeg never sets it), but lsb_depth IS the operative variable on our side. **Ship question is open**: lsb_depth also feeds the dynalloc/leak_boost floors, so setting it from the input format needs its own ladder A/B | (superseded) | root cause closed; the fix is a separate brick |
+| D1-old | ~~`detected_bandwidth` is pinned at FB regardless of content~~ — the bandwidth signal is a constant, so every consumer of it (incl. the SILK/hybrid narrowing) is a no-op. libopus is content-driven on the same clips, so this is a divergence | P1 detector truth table (`gate_bw_truthtable.ps1`): 4/6/8/12 kHz low-pass all report FB, 100% of frames; libopus TOC cross-check | **measured + localized, root cause OPEN**. Structurally must be the `hp_ener→bandwidth=20` branch or the `count<=2` warm-up (the band loop caps at 18=SWB). `lsb_depth` and a resampler port error both REFUTED |
 | D2 | float SILK `LTPCorr` never written (`let _ = ccmax`) — harmonic shaping ran on a dead signal | census sweep 2 | ✔ fixed 2026-08-07; float arm needs re-scoring (its "tie" verdict is void) |
 | D3 | `CeltEncoder.loss_rate` never assigned — CELT prefilter loss ladder + coarse intra bias dead under packet loss | census sweep 1/3 | ✔ fixed 2026-08-07 (default loss=0 path unchanged) |
 | D4 | `lbrr_gain_increases` hardcoded 2 instead of libopus's `max(7−0.4·loss%, 2)` | census sweep 2 | ✔ fixed 2026-08-07 (FEC-off unaffected) |
@@ -70,5 +71,11 @@ gate is only "shipped downstream" when the version in its row is on crates.io.
   `end_band-1` (celt.rs:2512-2517).
 - NB/MB low-rate modes as quality play: PEAQ-refuted (our WB/fixed beats
   libopus's narrowing) — completeness-only now.
-- Float SILK analysis arm: tied fixed arm, kept default-off — **verdict suspect**
-  until flp.rs:800 LTPCorr drop is fixed and re-scored.
+- Float SILK analysis arm: **RE-SCORED 2026-08-07** after the LTPCorr fix, on
+  the voip classes (the only ones where SILK is the working arm), rate-matched
+  BD-ODG: `voip_speech_noisy` **+0.082**, `voip_mixed` −0.010, `voip_speech`
+  **−0.123**. Still default-off — but the old "ties fixed-point" verdict is
+  replaced by something more useful: a **per-class sign flip** (wins noisy
+  speech, loses clean speech), i.e. a dispatch candidate on a noisiness signal
+  rather than a knob to discard. Weak evidence though — 3 classes, and PEAQ
+  saturates on narrowband speech; needs a speech-domain metric before banking.
