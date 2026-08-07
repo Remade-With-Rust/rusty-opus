@@ -1484,7 +1484,10 @@ pub struct CeltEncoder {
     w_transient_tmp2: Vec<f32>,
 
     pub(crate) analysis: AnalysisInfo,
-    loss_rate: i32,
+    /// Expected packet loss %, plumbed from `OpusEncoder.packet_loss_perc`
+    /// each frame (was never assigned — census 2026-08-07). Drives the
+    /// prefilter loss ladder and coarse-energy intra bias.
+    pub(crate) loss_rate: i32,
 }
 
 const INTEN_THRESHOLDS: [i32; 21] = [
@@ -1587,7 +1590,12 @@ fn alloc_trim_analysis(
     // VBR rate overlap; +1 is the safe, monotonic choice). Mono is untouched, and
     // trim is transmitted so encoder/decoder stay in sync — fully conformant.
     let _ = equiv_rate;
-    if channels == 2 && std::env::var("NO_STEREO_TRIM").is_err() {
+    // Env read cached once (was a per-stereo-frame var() inside a profiled
+    // stage — Great Gate census 2026-08-07 hygiene batch).
+    static STEREO_TRIM_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if channels == 2
+        && !*STEREO_TRIM_OFF.get_or_init(|| std::env::var_os("NO_STEREO_TRIM").is_some())
+    {
         trim += 1.0;
     }
 
@@ -1968,10 +1976,12 @@ impl CeltEncoder {
         // period; fixed, sine round-trip 7.6 -> 45.7 dB.)
         let nb_available_bytes = (explicit_total_bits.unwrap_or((rc.buf.len() * 8) as i32) >> 3)
             - ((rc.tell() + 4) >> 3);
+        // Env read cached once (was per-frame — census 2026-08-07 hygiene batch).
+        static PF_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let pf_enabled = start_band == 0
             && self.complexity >= 5
             && nb_available_bytes > 12 * channels as i32
-            && std::env::var("CELT_PF_OFF").is_err();
+            && !*PF_OFF.get_or_init(|| std::env::var_os("CELT_PF_OFF").is_some());
         // Capture the tapset used for THIS frame's comb (C's `prefilter_tapset`
         // local): spreading_decision mutates self.tapset_decision later in the
         // frame, and the value applied+signalled here — not the mutated one —

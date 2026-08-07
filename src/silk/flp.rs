@@ -797,12 +797,17 @@ fn pitch_analysis_core(
             cbimax = cbimax_new;
         }
     }
-    let _ = ccmax;
-
     if lag == -1 {
         *pitch_out = [0; MAX_NB_SUBFR];
+        *ltp_corr = 0.0;
         return 1;
     }
+
+    // Output normalized correlation (pitch_analysis_core_FLP.c: *LTPCorr =
+    // CCmax / nb_subfr). Was `let _ = ccmax;` — dropping this left LTPCorr
+    // stale, so harmonic shaping / SNR adjustment in the float arm ran on a
+    // dead signal (Great Gate census 2026-08-07, silk.md §2).
+    *ltp_corr = ccmax / nb_subfr as f32;
 
     if fs_khz > 8 {
         if fs_khz == 12 {

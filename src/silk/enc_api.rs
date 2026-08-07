@@ -134,7 +134,9 @@ pub fn silk_encode_frame(
     let mut res_pitch = [0i16; LA_PITCH_MAX + MAX_FRAME_LENGTH + LTP_MEM_LENGTH_MS * MAX_FS_KHZ];
     let res_pitch_frame_idx = ltp_mem_length;
 
-    if ps_enc.use_flp || std::env::var("SILK_FLP").is_ok() {
+    // Env read cached once (was per-frame — census 2026-08-07 hygiene batch).
+    static FLP_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if ps_enc.use_flp || *FLP_ENV.get_or_init(|| std::env::var_os("SILK_FLP").is_some()) {
         crate::silk::flp::silk_encode_frame_flp_analysis(ps_enc, &mut s_enc_ctrl, cond_coding);
         let _ = (&res_pitch, res_pitch_frame_idx, la_shape, &x_buf_copy);
     } else {
@@ -430,7 +432,8 @@ pub fn silk_encode_frame(
         .copy_within(frame_length..frame_length + move_len, 0);
 
     ps_enc.s_cmn.prev_lag = s_enc_ctrl.pitch_l[ps_enc.s_cmn.nb_subfr as usize - 1];
-    if std::env::var("SILKD").is_ok() {
+    static SILKD_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *SILKD_ENV.get_or_init(|| std::env::var_os("SILKD").is_some()) {
         let ix = &ps_enc.s_cmn.indices;
         let n = ix.nlsf_indices;
         eprintln!(

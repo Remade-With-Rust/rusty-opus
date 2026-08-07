@@ -142,6 +142,46 @@ pub struct OpusEncoder {
     celt_prefill_tail: Vec<f32>,
 
     rc: RangeCoder,
+
+    // ---- Great Gate P1 instrumentation (docs/great-gate.md) ----
+    /// Observe-only harvest tap: when `RUSTY_OPUS_GATE_HARVEST=<path>` is set at
+    /// construction, every encoded frame appends one CSV row with the signals
+    /// the mode/bandwidth decision consumed plus the outcome (mode, bw, bytes).
+    /// The bitstream is byte-identical on or off — the tap only reads. Env is
+    /// read ONCE here, never per frame. Serial encoders only (the parallel path
+    /// would interleave rows).
+    gate_tap: Option<std::io::BufWriter<std::fs::File>>,
+    /// Clip label stamped into harvest rows (`RUSTY_OPUS_GATE_CLIP`).
+    gate_clip: String,
+    /// Frame counter for harvest rows.
+    gate_frame: u64,
+    /// Truth-table lever: `RUSTY_OPUS_FORCE_MODE=silk|celt|hybrid` pins the
+    /// coding mode after the auto decision (bandwidth reconciled to a valid TOC
+    /// config). Unset = None = byte-identical to shipped behavior.
+    force_mode: Option<OpusMode>,
+    /// Mode-dwell hysteresis: a proposed mode change must persist this many
+    /// consecutive frames before it is committed. **1 = OFF and
+    /// byte-identical**; set via `RUSTY_OPUS_MODE_DWELL`.
+    ///
+    /// Measured ineffective for the startup-mode defect it was built for and
+    /// left default-off — see the refutation at its use site in `encode`.
+    pub mode_dwell: u32,
+    /// Consecutive frames the current proposal has differed from the coded mode.
+    mode_dwell_run: u32,
+    /// Analysis warm-up guard: ignore the tonality classifier's verdict for
+    /// this many analysis frames and fall back to the application default.
+    /// **Default 10** (`RUSTY_OPUS_ANALYSIS_WARMUP`; 0 = OFF and restores the
+    /// pre-2026-08-07 byte-identical behaviour).
+    ///
+    /// libopus feeds its analysis a lookahead buffer, so the classifier is
+    /// already converged when the first frame is coded. We call `run_analysis`
+    /// with `analysis_frame_size == frame_size` — zero lookahead — so on our
+    /// encoder the classifier spends its first ~20 frames climbing from
+    /// "voice" to its steady-state verdict. On music-ish content that made the
+    /// first 480 ms code as hybrid before flipping to CELT for good.
+    analysis_warmup: u32,
+    /// Analysis frames seen (saturating), compared against `analysis_warmup`.
+    analysis_frames: u32,
 }
 
 // libopus opus_encoder.c bandwidth thresholds: (threshold, hysteresis) pairs for
@@ -150,6 +190,27 @@ const MONO_VOICE_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 13500, 
 const MONO_MUSIC_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 11000, 1000, 12000, 2000];
 const STEREO_VOICE_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 13500, 1000, 14000, 2000];
 const STEREO_MUSIC_BANDWIDTH_THRESHOLDS: [i32; 8] = [9000, 700, 9000, 700, 11000, 1000, 12000, 2000];
+
+/// Coerce a bandwidth to one the given mode can actually signal in the TOC:
+/// CELT has no mediumband config, SILK-only tops out at wideband, and hybrid
+/// exists only at SWB/FB. Used wherever a mode is overridden after the
+/// bandwidth has already been chosen (dwell hysteresis, forced mode).
+fn reconcile_bandwidth(mode: OpusMode, bw: Bandwidth) -> Bandwidth {
+    match mode {
+        OpusMode::CeltOnly if bw == Bandwidth::Mediumband => Bandwidth::Narrowband,
+        OpusMode::SilkOnly
+            if matches!(bw, Bandwidth::Superwideband | Bandwidth::Fullband) =>
+        {
+            Bandwidth::Wideband
+        }
+        OpusMode::Hybrid
+            if !matches!(bw, Bandwidth::Superwideband | Bandwidth::Fullband) =>
+        {
+            Bandwidth::Superwideband
+        }
+        _ => bw,
+    }
+}
 
 fn compute_equiv_rate(
     bitrate: i32,
@@ -250,6 +311,67 @@ fn compute_silk_rate_for_hybrid(
         silk_rate += 300;
     }
     silk_rate
+}
+
+#[cfg(test)]
+mod reconcile_bandwidth_tests {
+    use super::{reconcile_bandwidth, Bandwidth, OpusMode};
+
+    #[test]
+    fn celt_maps_mediumband_down_to_narrowband() {
+        // The CELT TOC has no mediumband config.
+        assert_eq!(
+            reconcile_bandwidth(OpusMode::CeltOnly, Bandwidth::Mediumband),
+            Bandwidth::Narrowband
+        );
+    }
+
+    #[test]
+    fn celt_leaves_every_other_bandwidth_alone() {
+        for bw in [
+            Bandwidth::Narrowband,
+            Bandwidth::Wideband,
+            Bandwidth::Superwideband,
+            Bandwidth::Fullband,
+        ] {
+            assert_eq!(reconcile_bandwidth(OpusMode::CeltOnly, bw), bw);
+        }
+    }
+
+    #[test]
+    fn silk_only_caps_at_wideband() {
+        assert_eq!(
+            reconcile_bandwidth(OpusMode::SilkOnly, Bandwidth::Superwideband),
+            Bandwidth::Wideband
+        );
+        assert_eq!(
+            reconcile_bandwidth(OpusMode::SilkOnly, Bandwidth::Fullband),
+            Bandwidth::Wideband
+        );
+        // At or below wideband it is already codeable.
+        for bw in [Bandwidth::Narrowband, Bandwidth::Mediumband, Bandwidth::Wideband] {
+            assert_eq!(reconcile_bandwidth(OpusMode::SilkOnly, bw), bw);
+        }
+    }
+
+    #[test]
+    fn hybrid_floors_at_superwideband() {
+        for bw in [Bandwidth::Narrowband, Bandwidth::Mediumband, Bandwidth::Wideband] {
+            assert_eq!(
+                reconcile_bandwidth(OpusMode::Hybrid, bw),
+                Bandwidth::Superwideband
+            );
+        }
+        // Hybrid exists only at SWB/FB, so those pass through.
+        assert_eq!(
+            reconcile_bandwidth(OpusMode::Hybrid, Bandwidth::Superwideband),
+            Bandwidth::Superwideband
+        );
+        assert_eq!(
+            reconcile_bandwidth(OpusMode::Hybrid, Bandwidth::Fullband),
+            Bandwidth::Fullband
+        );
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +527,46 @@ impl OpusEncoder {
             buf_right: Vec::new(),
             celt_prefill_tail: Vec::new(),
             rc: RangeCoder::new_encoder(1),
+            gate_tap: std::env::var("RUSTY_OPUS_GATE_HARVEST").ok().and_then(|p| {
+                use std::io::Write as _;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&p)
+                    .ok()?;
+                if f.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+                    let _ = writeln!(
+                        f,
+                        "clip,frame,mode,bw,ch,bitrate,complexity,equiv,voice_est,\
+                         is_silence,active,valid,tonality,tonality_slope,noisiness,\
+                         activity_prob,music_prob,music_prob_min,music_prob_max,\
+                         det_bw,max_pitch_ratio,bytes"
+                    );
+                }
+                Some(std::io::BufWriter::new(f))
+            }),
+            gate_clip: std::env::var("RUSTY_OPUS_GATE_CLIP").unwrap_or_default(),
+            gate_frame: 0,
+            force_mode: match std::env::var("RUSTY_OPUS_FORCE_MODE").ok().as_deref() {
+                Some("silk") => Some(OpusMode::SilkOnly),
+                Some("celt") => Some(OpusMode::CeltOnly),
+                Some("hybrid") => Some(OpusMode::Hybrid),
+                _ => None,
+            },
+            mode_dwell: std::env::var("RUSTY_OPUS_MODE_DWELL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
+            mode_dwell_run: 0,
+            // DEFAULT-ON at 10 since 2026-08-07: 14 wins / 0 losses / 1 neutral
+            // (-0.005) over a 65-rung, 13-class PEAQ ladder, with all VoIP
+            // classes bit-for-bit unchanged. `RUSTY_OPUS_ANALYSIS_WARMUP=0`
+            // restores the previous byte-identical behaviour.
+            analysis_warmup: std::env::var("RUSTY_OPUS_ANALYSIS_WARMUP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            analysis_frames: 0,
         })
     }
 
@@ -430,8 +592,8 @@ impl OpusEncoder {
         self.range_final
     }
 
-    /// opus_encoder.c:1296 voice_est ladder (signal_type is AUTO for us):
-    /// analysis-driven when voice_ratio is known, else application defaults.
+    /// opus_encoder.c:1296 voice_est ladder: forced by `signal_type` when set,
+    /// else analysis-driven when voice_ratio is known, else application defaults.
     fn compute_voice_est(&self) -> i32 {
         match self.signal_type {
             Some(SignalType::Voice) => return 127,
@@ -507,9 +669,22 @@ impl OpusEncoder {
         } else {
             true
         };
-        self.detected_bandwidth = 0;
+        // Analysis warm-up guard (see the `analysis_warmup` field doc): until
+        // the classifier has seen enough frames to converge, leave
+        // `voice_ratio` at -1 so `compute_voice_est` uses the APPLICATION
+        // default instead of a half-climbed verdict. That is the right answer
+        // for both applications — Audio falls back to 48 (music-leaning, which
+        // is what these clips settle on anyway) and Voip falls back to 115
+        // (speech-leaning, which is what voip content wants from frame 0).
         if analysis_info.valid {
-            // signal_type is AUTO: pick the hysteresis-correct probability.
+            self.analysis_frames = self.analysis_frames.saturating_add(1);
+        }
+        let analysis_converged = self.analysis_frames >= self.analysis_warmup;
+
+        self.detected_bandwidth = 0;
+        if analysis_info.valid && analysis_converged {
+            // Auto path (signal_type override applies later in compute_voice_est):
+            // pick the hysteresis-correct probability.
             let prob = if self.prev_enc_mode.is_none() {
                 analysis_info.music_prob
             } else if self.prev_enc_mode == Some(OpusMode::CeltOnly) {
@@ -736,6 +911,46 @@ impl OpusEncoder {
             self.bandwidth = Bandwidth::Fullband;
         }
 
+        // ---- Mode-dwell hysteresis (Great Gate P2) — MEASURED INEFFECTIVE ----
+        // Require a proposed mode change to persist for `mode_dwell` frames
+        // before committing. `mode_dwell <= 1` is OFF and byte-identical.
+        //
+        // REFUTED for the defect it was built for (2026-08-07), kept behind the
+        // env toggle so re-testing is cheap if the mode pattern ever changes.
+        // The non-CELT frames it was meant to suppress are NOT isolated flips:
+        // they are a single contiguous run at the START of the stream (frames
+        // 0-23 on every clip measured), while the analysis classifier warms up.
+        // Dwell delays transitions in BOTH directions, so on one long run it
+        // only postpones the exit — measured non-CELT frames went UP with
+        // dwell, 24 -> 25/26/28/33 for dwell 2/3/5/10, i.e. exactly +(N-1).
+        // The fix that works is `analysis_warmup` below.
+        if self.mode_dwell > 1 {
+            match self.prev_enc_mode {
+                Some(prev) if mode != prev => {
+                    self.mode_dwell_run += 1;
+                    if self.mode_dwell_run < self.mode_dwell {
+                        // Not yet persistent: hold the previous mode. Bandwidth
+                        // was chosen for the proposed mode, so reconcile it or
+                        // the TOC config would be invalid.
+                        mode = prev;
+                        self.bandwidth = reconcile_bandwidth(mode, self.bandwidth);
+                    } else {
+                        // Persisted long enough — commit and re-arm.
+                        self.mode_dwell_run = 0;
+                    }
+                }
+                _ => self.mode_dwell_run = 0,
+            }
+        }
+
+        // Great Gate truth-table lever: pin the mode after the auto decision,
+        // reconciling bandwidth to a valid TOC config for the forced mode.
+        // Unset = byte-identical to the auto path above.
+        if let Some(fm) = self.force_mode {
+            mode = fm;
+            self.bandwidth = reconcile_bandwidth(fm, self.bandwidth);
+        }
+
         if mode == OpusMode::CeltOnly {
             match frame_rate {
                 400 | 200 | 100 | 50 => {}
@@ -930,9 +1145,11 @@ impl OpusEncoder {
 
             self.silk_enc.s_cmn.lbrr_enabled = if self.use_inband_fec { 1 } else { 0 };
 
-            if self.silk_enc.s_cmn.lbrr_gain_increases == 0 {
-                self.silk_enc.s_cmn.lbrr_gain_increases = 2;
-            }
+            // libopus silk_setup_LBRR: gain bump shrinks as loss rises so LBRR
+            // frames stay decodable at high loss — was a hardcoded 2 (census
+            // 2026-08-07). max(7 − 0.4·loss%, 2); FEC-off path unaffected.
+            self.silk_enc.s_cmn.lbrr_gain_increases =
+                (7 - ((self.packet_loss_perc.clamp(0, 100) * 26214) >> 16)).max(2);
 
             let hp_freq_smth1 = if mode == OpusMode::CeltOnly {
                 silk_lin2log(60) << 8
@@ -1163,6 +1380,11 @@ impl OpusEncoder {
             };
             self.celt_enc.complexity = self.complexity;
             self.celt_enc.lsb_depth = self.lsb_depth;
+            // Census 2026-08-07 fix: loss_rate was never assigned, so CELT's
+            // prefilter loss ladder (celt.rs) and coarse-energy intra bias were
+            // dead even with OPUS_SET_PACKET_LOSS_PERC set. Default 0 = no
+            // change on the default path (libopus opus_encoder.c parity).
+            self.celt_enc.loss_rate = self.packet_loss_perc;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
             // CELT end band from the coded bandwidth (mirrors the decoder's
             // celt_endband_for_bandwidth): NB->13, MB/WB->17, SWB->19, FB->21.
@@ -1277,6 +1499,56 @@ impl OpusEncoder {
             (self.rc.storage as usize).min(n_bytes - 1)
         };
         output[1..1 + payload_len].copy_from_slice(&self.rc.buf[..payload_len]);
+        // Great Gate harvest tap (observe-only; see the field doc). Signals are
+        // recomputed read-only here — the decision code above is untouched.
+        if self.gate_tap.is_some() {
+            let equiv = compute_equiv_rate(
+                self.bitrate_bps,
+                self.channels,
+                frame_rate,
+                !self.use_cbr,
+                self.complexity,
+                self.packet_loss_perc,
+            );
+            let voice_est = self.compute_voice_est();
+            let (clip, frame) = (self.gate_clip.clone(), self.gate_frame);
+            if let Some(tap) = self.gate_tap.as_mut() {
+                use std::io::Write as _;
+                let mode_s = match mode {
+                    OpusMode::SilkOnly => "silk",
+                    OpusMode::CeltOnly => "celt",
+                    OpusMode::Hybrid => "hybrid",
+                };
+                let _ = writeln!(
+                    tap,
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4},{}",
+                    clip,
+                    frame,
+                    mode_s,
+                    self.bandwidth as i32,
+                    self.channels,
+                    self.bitrate_bps,
+                    self.complexity,
+                    equiv,
+                    voice_est,
+                    is_silence as u8,
+                    activity as u8,
+                    analysis_info.valid as u8,
+                    analysis_info.tonality,
+                    analysis_info.tonality_slope,
+                    analysis_info.noisiness,
+                    analysis_info.activity_probability,
+                    analysis_info.music_prob,
+                    analysis_info.music_prob_min,
+                    analysis_info.music_prob_max,
+                    self.detected_bandwidth,
+                    analysis_info.max_pitch_ratio,
+                    1 + payload_len,
+                );
+            }
+        }
+        self.gate_frame += 1;
+
         self.prev_enc_mode = Some(mode);
         Ok(1 + payload_len)
     }
