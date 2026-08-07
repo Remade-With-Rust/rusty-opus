@@ -33,7 +33,6 @@ use silk::init_encoder::silk_init_encoder;
 use silk::lin2log::silk_lin2log;
 use silk::log2lin::silk_log2lin;
 use silk::macros::*;
-use silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
 use silk::structs::SilkEncoderState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
