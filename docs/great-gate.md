@@ -540,6 +540,59 @@ bought, so `gate_regression.py --bd` interpolates both ladders on log(actual
 kbps) and reports per-class BD-ODG at matched rate. Any future
 bit-redistribution knob must be judged this way.
 
+### Scope limit on the silence flag — it only fires on DIGITAL silence
+
+`silence` is `sample_max <= 1/2^lsb_depth`, i.e. true zeros (or sub-LSB), which
+is what libopus tests too. Our `silence_dtx` class is synthesised with the gaps
+multiplied to exactly 0.0, so both encoders' silence paths fire on it — that is
+why the class showed a 1.7 ODG hole and why closing it is worth this much.
+
+**On real recordings with a room-noise floor, neither encoder's flag fires.**
+The gain is therefore real for streams whose silence is genuinely zeroed —
+DTX/VAD-gated telephony, edited/mastered material with digital gaps, anything
+that has passed a noise gate — and approximately nil for raw microphone audio.
+Do not present the corpus number as a general-purpose bitrate saving. (The
+broader "cheap frames during quiet passages" problem is a different lever: DTX,
+or VBR that actually collapses on low-energy frames.)
+
+### Gates still owed by the silence brick before it can go default-on
+
+It changes the bitstream, so the warm-up guard's evidence standard is not
+enough. Outstanding:
+
+1. ✅ **Independent-decoder validation — PASSED.** `examples/encode_ogg.rs`
+   writes a real Ogg-encapsulated `.opus`, so the stream can be handed to
+   libopus. On `silence_dtx` @32k, decoded by **ffmpeg/libopus**:
+
+   | | payload | PEAQ (independent decoder) | packet profile |
+   |---|---|---|---|
+   | flag off | 48600 B (32.4 kb/s) | −3.8747 | 600 × 81.0 B, none small |
+   | **flag on** | **34923 B (23.3 kb/s)** | **−3.8740** | 236 small × **5.0 B**, 364 × 92.7 B |
+   | libopus itself | — | — | 214 small × 3.0 B, 387 × 102.4 B |
+
+   Equal quality through a foreign decoder at 28% fewer bits, and our packet
+   shape now matches libopus's. A self-consistently-wrong encoder/decoder pair
+   could not produce this. (Our small packets are 5 B vs libopus's 3 B — a
+   minor difference in how the filled-byte count is taken; worth chasing, not
+   blocking.)
+2. **CBR** — see below.
+3. **The conformance suite** passes (218/0), but no official vector exercises an
+   encoder-emitted silence flag, so that is coverage, not proof.
+
+### CBR path — ✅ GATED
+
+The shrink is VBR-only (`vbr_rate > 0`), matching the C: a CBR packet must keep
+its fixed length. Exercised via `encode_ogg … cbr` on `silence_dtx` @32k:
+
+| | payload | packet length | independent decode | PEAQ |
+|---|---|---|---|---|
+| CBR, flag off | 48000 B (32.0 kb/s) | fixed | clean, 11.9935 s | −3.8784 |
+| CBR, flag on | **48000 B (32.0 kb/s)** | **fixed — unchanged** | clean, 11.9935 s | −3.8778 |
+
+The packet length is preserved exactly, libopus decodes it without error, and
+quality is unmoved. CBR gains nothing from the flag (there are no bits to give
+back) but it is not harmed, which is the property that mattered.
+
 ### Process note, recorded because it nearly cost a dataset
 
 I rebuilt the encoder while a ladder was running — the exact mistake documented

@@ -75,7 +75,14 @@ def bd_compare(base_path, new_path):
         if worst is None or d < worst[1]:
             worst = (clip, d)
         verdict = 'WIN' if d > NOISE else ('neutral' if d > -NOISE else 'REGRESSION')
-        print(f'{clip:22s} {lo:7.1f}..{hi:7.1f}  {d:>+9.3f}  {verdict}')
+        # A brick that moves the rate hard shrinks the overlap the BD is
+        # integrated over. Below ~1 octave the number is a sliver of the ladder
+        # and should not be quoted as a corpus result — re-run the moved arm at
+        # adjusted targets to restore overlap instead.
+        span = math.log(hi / lo) / math.log(2.0)
+        thin = '  <-- THIN OVERLAP (%.2f oct, %d/%d rungs)' % (span, len(rn), len(rb)) \
+            if span < 1.0 else ''
+        print(f'{clip:22s} {lo:7.1f}..{hi:7.1f}  {d:>+9.3f}  {verdict}{thin}')
     if results:
         vals = list(results.values())
         print(f'\nclasses {len(vals)}  mean {sum(vals)/len(vals):+.3f}  '
