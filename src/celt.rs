@@ -1506,10 +1506,14 @@ pub struct CeltEncoder {
     /// (`RUSTY_OPUS_TONAL_VBR`). Opt-in until the per-class ladder clears it;
     /// off = byte-identical.
     pub(crate) tonal_vbr: bool,
-    /// Emit the CELT per-frame silence flag (`RUSTY_OPUS_SILENCE_FLAG`).
-    /// Opt-in until the ladder clears it; off = byte-identical. Without it we
-    /// spend ~69% of the active-frame rate coding digital silence where libopus
-    /// spends ~3% (docs/great-gate.md §5.5).
+    /// Emit the CELT per-frame silence flag. **Default ON** since 2026-08-07;
+    /// `RUSTY_OPUS_SILENCE_FLAG=0` restores the previous byte-identical
+    /// behaviour. Without it we spend ~69% of the active-frame rate coding
+    /// digital silence where libopus spends ~3% (docs/great-gate.md §5.5).
+    ///
+    /// Gated by: 13-class rate-matched BD (mean +0.198, **worst class exactly
+    /// +0.000**, silence_dtx +1.647), an independent libopus decode at equal
+    /// quality for 28% fewer bits, and a CBR run that keeps packet length exact.
     pub(crate) silence_flag: bool,
     /// Peak |sample| of the previous frame's overlap tail — the `st->overlap_max`
     /// of celt_encoder.c, needed so silence is only declared once the region the
@@ -1902,7 +1906,9 @@ impl CeltEncoder {
             analysis: AnalysisInfo::default(),
             loss_rate: 0,
             tonal_vbr: std::env::var_os("RUSTY_OPUS_TONAL_VBR").is_some(),
-            silence_flag: std::env::var_os("RUSTY_OPUS_SILENCE_FLAG").is_some(),
+            silence_flag: std::env::var("RUSTY_OPUS_SILENCE_FLAG")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             overlap_max: 0.0,
         }
     }

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.1.26 — 2026-08-07
+
+### CELT per-frame silence flag (default-on, behaviour change)
+
+Digitally-silent frames were coded at roughly the full frame cost: measured on a
+DTX-shaped clip we spent **69%** of the active-frame bitrate on silence where
+libopus spends **~3%**, so about a quarter of the bit budget went on coding
+nothing. The flag is a bitstream element the format already carries and our
+*decoder* already implemented — the encoder simply never set it.
+
+`silence` is now detected over the frame plus the previous overlap tail (new
+`overlap_max` state, mirroring `st->overlap_max`), the flag is coded, and on VBR
+the range coder is shrunk to filled+2 bytes with the remaining budget marked
+spent — the encoder-side mirror of the decoder's existing
+`nbits_total += total_bits - tell`.
+
+Judged by rate-matched BD-ODG across 13 content classes (the flag *moves* the
+bitrate, so per-rung ODG would price the bits it saved rather than the
+efficiency it bought):
+
+- **mean +0.198, worst class exactly +0.000** — no class regresses at all.
+- silence/DTX-shaped speech **+1.647**, clean speech **+0.390**, percussive
+  +0.181, noisy speech +0.204, mixed speech+music +0.124.
+- All VoIP classes and all pure-music classes: +0.000.
+
+Independently validated rather than only self-round-tripped: **ffmpeg/libopus
+decodes our stream to equal quality (−3.8740 vs −3.8747) using 28% fewer bits**,
+and our packet profile now matches libopus's shape (236 small packets averaging
+5.0 B against libopus's 214 × 3.0 B). CBR is unaffected — packet length stays
+exact, decode is clean, quality unmoved.
+
+`RUSTY_OPUS_SILENCE_FLAG=0` restores the previous behaviour, verified
+byte-identical across the full corpus × rate hash matrix.
+
+**Scope limit worth knowing:** the test is `sample_max <= 1/2^lsb_depth`, i.e.
+true digital silence, exactly as in libopus. Streams whose quiet passages are
+genuinely zeroed — DTX/VAD-gated telephony, edited or noise-gated material —
+get the full benefit; raw microphone audio with a room-noise floor gets none.
+
+### Also
+
+- `RUSTY_OPUS_TONAL_VBR` — libopus's tonality VBR boost, implemented but left
+  **opt-in**: 13-class BD is mean +0.114 yet it loses on transient content
+  (percussive −0.045, applause −0.025, piano −0.017) while winning on speech and
+  silence. That win-speech/lose-transient split is a dispatch signal, not a
+  knob to switch on globally; it likely needs the `pitch_change` term we do not
+  track, or a transient veto.
+- `RUSTY_OPUS_LSB_DEPTH` — exposes the analysis input depth. At the float-API
+  default of 24 the analysis noise floor sits 2^16 too low for s16-sourced
+  material, which pins the bandwidth detector at Fullband for *all* content
+  (verified: 4/6/8/12 kHz low-passed input all report FB). At 16 the detector
+  tracks content again. Shipping that default is a separate change — it also
+  moves the dynalloc/leak_boost floors.
+- `examples/encode_ogg.rs` — writes real Ogg-encapsulated `.opus`, so our
+  bitstream can be handed to an independent decoder.
+
 ## 0.1.25 — 2026-08-07
 
 ### Encoder quality: analysis warm-up guard (default-on, behaviour change)

@@ -1,9 +1,9 @@
-[package]
+﻿[package]
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>", "Remade-With-Rust"]
 name = "rusty-opus"
-version = "0.1.25"
-description = "pure Rust Opus codec — performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
+version = "0.1.26"
+description = "pure Rust Opus codec â€” performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
 license = "BSD-3-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty-opus"
 homepage = "https://github.com/Remade-With-Rust/rusty-opus"
