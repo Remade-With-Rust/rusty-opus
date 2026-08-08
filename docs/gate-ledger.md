@@ -45,6 +45,18 @@ gate is only "shipped downstream" when the version in its row is on crates.io.
 
 ## Refuted hypotheses (recorded so they are not re-chased)
 
+- **"The orphaned analysis signals are worth +0.114 ODG."** REFUTED 2026-08-07.
+  That figure came from scoring the tonality arm against `ladder_baseline.csv`
+  — the pre-warm-up-guard, pre-silence-flag baseline — while the arm itself ran
+  on a binary that already had the warm-up guard. It was crediting the warm-up
+  guard's gain to the tonality boost. Re-measured against a like-for-like
+  baseline (same binary, only `RUSTY_OPUS_TONAL_VBR` toggled), the complete
+  group — tonality boost + activity reduction + tonality_slope trim — over
+  **18 classes × 5 rates** is worth **mean +0.001**, winning exactly one class
+  (bass-heavy electronic +0.058) and costing −0.045 on percussive. **Kept
+  opt-in.** Lesson: a brick's baseline must differ from its arm in *one* thing;
+  ours differed in three, and the extra two were the whole effect.
+
 - **"The speech/music classifier is broken."** `music_prob` saturates to 1.000
   on clean speech, but libopus routes the same clip to CELT too under
   `-application audio` (TOC histogram, `tools/opus_toc_stats.py`). Mode
