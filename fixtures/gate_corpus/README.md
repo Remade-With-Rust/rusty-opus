@@ -24,6 +24,33 @@ from the script rather than from a download.
 | `silence_dtx` | 1 | speech in 1.8 s bursts, 1.2 s gaps, 20 ms fades | silence/activity | DTX, hangover, the abstention path |
 | `mixed_speech_music` | 1 | 4 s speech → 4 s speech+guitar → 4 s guitar | **variable content** | the class that exposes every unfinished dispatch — mid-stream character change |
 
+## Music-coverage classes (added 2026-08-07 after a coverage audit)
+
+`tools/corpus_coverage.py` measures the signal properties that actually drive
+Opus's decisions, and it showed the original music set was **solo acoustic
+classical and nothing else**: bass energy topped out at 0.137, crest factors
+never went below 14 dB, and the fastest real material was 7.2 onsets/s. The low
+CELT bands, loudness-war masters and dense fast material were untested — which
+is precisely where an unnoticed failure would live. These close that:
+
+| clip | ch | what it covers | key measured property |
+|---|---|---|---|
+| `mus_vocal_st` | 2 | **real** PD vocal (Mozart aria) — formants + strong harmonics | crest 23.2 dB, centroid 1469 Hz |
+| `mus_bass_edm` | 1 | electronic: sub-bass line + kick with real sub content | **bass frac 0.634** (was 0.137 max) |
+| `mus_loud_master` | 1 | modern limited "loudness-war" master | **crest 8.0 dB** (was 14.4 min) |
+| `mus_fast_dense` | 1 | 40 hits/s drums + tremolo — block-switch stressor | **19.8 onsets/s** (was 7.2 real max) |
+| `mus_rock_dist_st` | 2 | clipped power chords + cymbals, decorrelated stereo | flatness 0.512, L/R −0.02, crest 11.4 dB |
+
+They run ladders of **64 / 96 / 128 / 192 / 256 kb/s**, deliberately reaching
+into the transparency region the original corpus never tested (it stopped at
+160).
+
+Four of the five are **synthetic** and labelled as such. They are correct for
+stressing a *mechanism* — sub-bass allocation, rate control under constant
+near-full-scale input, transient density, dense-harmonic spectra — and they are
+not a substitute for real commercial masters when judging final perceptual
+quality. The vocal is real.
+
 ## Rules that bind use of this corpus
 
 - **Judge per clip, at ≥4 operating points**, with an EXTERNAL oracle (PEAQ

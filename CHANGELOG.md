@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.9.0 — 2026-08-07
+
+A version-signalling release on the road to 1.0. The codec content is 0.1.26 plus
+one breaking API removal and a full published benchmark; the jump to 0.9 says the
+surface is settling, not that the codec changed under you.
+
+**Breaking:** `OpusDecoder::hybrid_skip_celt` is removed. It was a `pub` field
+that nothing ever read — setting it did nothing, and an in-tree example set it
+expecting an effect. Removing a silent no-op is exactly what a version bump like
+this is for. No other public API changed.
+
+### Measured against C libopus and FFmpeg's native encoder
+
+**18 content classes × 5 bitrates**, external PEAQ ODG, compared as BD-ODG at
+matched *actual* bitrate (libopus's VBR overshoots its target by 15–20% on this
+corpus, so a nominal-rate comparison would hand it those bits for free):
+
+| | vs C libopus | vs FFmpeg native `-c:a opus` |
+|---|---|---|
+| 13 core classes | **−0.015** (parity) | **+1.532** |
+| 5 music-stress classes | **+0.009** (parity) | **+2.002** |
+| classes won vs ffmpeg-native | — | **18 / 18** |
+
+Worth stating plainly: libopus beats FFmpeg's native encoder by an even wider
+margin than we do (+1.704), so that column is table stakes. **The libopus column
+is the real benchmark, and there we are at parity.**
+
+### Single-thread encode speed, per coding path
+
+Same-method comparison — every encoder run as a process on a 300 s and a 150 s clip, reporting
+the slope so startup and I/O cancel for all arms; pinned to one core, CPU time, ABBA-interleaved,
+41 reps, null arm for the floor. The coding path is **verified from the output's TOC bytes**
+rather than assumed:
+
+| path | rusty-opus | C libopus | FFmpeg native | vs libopus |
+|---|---|---|---|---|
+| CELT, 48 kHz speech @32k | **436× realtime** | 291× | 310× | **1.50× faster** |
+| CELT, 48 kHz stereo music @128k | **213× realtime** | 133× | 71× | **1.60× faster** |
+| SILK, 16 kHz speech @16k VoIP | 139× realtime | **145×** | n/a | 0.96× |
+
+Null-arm floor 0.0–2.2%. **This corrects our own prior documentation**, which claimed a ~2.9×
+SILK deficit against libopus; measured properly it is within 4%. FFmpeg's native encoder is
+CELT-only, so it has no SILK row — where it appears fast on speech it is doing cheaper and much
+lower-quality work.
+
+### Corpus expanded 13 → 18 classes to close measured coverage holes
+
+`tools/corpus_coverage.py` showed the music corpus was solo acoustic classical
+and nothing else: bass energy never exceeded 0.137, crest never dropped below
+14 dB, and the fastest real material was 7.2 onsets/s — leaving sub-bass, loud
+masters and dense fast content untested. Added, and scored:
+
+| new class | measured property | vs libopus |
+|---|---|---|
+| bass-heavy electronic | bass fraction **0.634** | **+0.203** |
+| fast/dense (40 hits/s) | 19.8 onsets/s | +0.014 |
+| distorted rock, decorrelated stereo | flatness 0.512, L/R −0.02 | +0.002 |
+| loud "master" | crest **8.0 dB** | −0.031 |
+| vocal (real PD Mozart aria) | crest 23.2 dB | −0.143 |
+
+These ladders run to **256 kb/s**, covering the transparency region the old
+corpus (which stopped at 160) never reached. No failure mode appeared in any of
+them, and sub-bass — the class with previously *zero* coverage — is one we win.
+
 ## 0.1.26 — 2026-08-07
 
 ### CELT per-frame silence flag (default-on, behaviour change)

@@ -7,7 +7,8 @@
 
 **A pure-Rust implementation of the [Opus audio codec](https://opus-codec.org/) (RFC 6716 / RFC 8251)** —
 no C, no FFI, no build-time toolchain. Encoder *and* decoder, SILK + CELT + Hybrid,
-conformance-verified against the reference, and fast enough to **beat `libopus` on wall-clock**.
+conformance-verified against the reference — **`libopus` quality at ~1.5× its per-core encode
+speed**, measured across 18 content classes.
 The only `unsafe` is in the SIMD kernels (AVX2 / NEON, runtime-detected, each with a scalar
 fallback that doubles as its correctness oracle).
 
@@ -27,8 +28,9 @@ fallback that doubles as its correctness oracle).
   test vectors** (float-libopus parity to 1e-6) and decodes `libopus`'s own streams to identical
   output.
 - **Fast** — hand-written **AVX2/FMA** (x86-64) and **NEON** (aarch64) kernels put single-thread
-  encode at/above `libopus` on CELT, and **frame-parallel encoding** wins wall-clock outright
-  (~3× `libopus` on speech, which is single-threaded per stream).
+  encode **1.50× ahead of `libopus` on CELT speech and 1.60× on stereo music**, and within 4% on
+  the SILK path (measured, [see below](#performance--single-thread-encode-three-coding-paths)).
+  **Frame-parallel encoding** adds wall-clock on top, since `libopus` is single-threaded per stream.
 - **Complete** — SILK, CELT, and Hybrid modes; VBR/CBR; DTX; in-band FEC; packet-loss
   concealment; comfort-noise generation; multistream / surround (5.1 / 7.1); a repacketizer.
 - **Permissive** — BSD-3-Clause, all the way down.
@@ -37,7 +39,7 @@ fallback that doubles as its correctness oracle).
 
 ```toml
 [dependencies]
-rusty-opus = "0.1"
+rusty-opus = "0.9"
 ```
 
 The crate is imported as `rusty_opus`:
@@ -78,45 +80,115 @@ validated** where it legitimately may (encoder analysis, block switching, qualit
 decoder passes all 12 official conformance vectors bit-exactly; the encoder round-trips through
 `libopus` and vice-versa with zero interop errors (including 5.1 / 7.1 multistream).
 
-## Quality vs `libopus`
+## Quality — measured, per content class
 
-Measured head-to-head on **PEAQ ODG** with a reconstruction-SNR guard. **Mono** (speech and
-music) sits at **parity** once bitrate-matched. **Stereo music** is at or near parity at higher
-rates and a modest, honest deficit at mid rates (an open item we're still closing — the decoder
-is exact, this is purely encoder bit-allocation tuning). Streaming robustness — PLC (SILK **and**
-CELT), FEC, DTX, CNG — is at parity with `libopus`, conformance untouched.
+Three encoders, one corpus, one metric. **18 content classes × 5 bitrates each**, scored with
+an external **PEAQ ODG** oracle and compared as **BD-ODG at matched *actual* bitrate** — not at
+the nominal target, because `libopus`'s VBR overshoots its target by 15–20% on this corpus and
+comparing at the nominal rate would hand it those bits for free.
 
-## Performance
+| | vs **C libopus** | vs **FFmpeg's native Opus encoder** |
+|---|---:|---:|
+| mean BD-ODG, 13 core classes | **−0.015** (parity) | **+1.532** |
+| mean BD-ODG, 5 music-stress classes | **+0.009** (parity) | **+2.002** |
+| worst class overall | −0.416 | **+0.233** |
+| classes won vs ffmpeg-native | — | **18 / 18** |
 
-Single-thread encode, Criterion (`cargo bench`), real speech input, mono, wall-clock for the
-full frame set. rusty-opus adds **byte-identical AVX2 SILK kernels** (LPC short-prediction,
-warped-autocorrelation, cross-state NSQ shaping filter) plus AVX2 decode kernels (resampler FIR,
-CELT comb filter) on top of the pure-Rust base.
+### The music-stress classes
 
-### vs C libopus 1.6.1 — x86-64 (AVX2/FMA), AMD Ryzen 7 5700X
+The original corpus was solo acoustic classical and nothing else — measured with
+`tools/corpus_coverage.py` it never exceeded 0.137 bass-energy fraction, never went below
+14 dB crest, and its fastest real material was 7.2 onsets/s. That left sub-bass, loudness-war
+masters and dense fast content untested, which is where an unnoticed failure would live. Those
+classes now exist, and they run to **256 kb/s** (the old ladder stopped at 160):
 
-| Config | rusty-opus | C libopus | Ratio |
-|--------|-----------:|----------:|-------|
-| 8 kHz / 20 ms VoIP  | **39.9 ms** | 40.6 ms | 0.98× (**2 % faster**) |
-| 16 kHz / 20 ms VoIP | **66.8 ms** | 67.1 ms | 1.00× (**0.5 % faster**) |
-| 16 kHz / 10 ms VoIP | 73.2 ms | **72.5 ms** | 1.01× (within noise) |
-| 48 kHz / 20 ms Audio | **25.1 ms** | 28.4 ms | 0.88× (**12 % faster**) |
-| 48 kHz / 10 ms Audio | **29.7 ms** | 31.2 ms | 0.95× (**5 % faster**) |
+| class | what it stresses | vs libopus | vs ffmpeg-native |
+|---|---|---:|---:|
+| bass-heavy electronic (bass frac **0.634**) | sub-bass allocation, low CELT bands | **+0.203** | +3.294 |
+| fast/dense, 40 hits/s | block switching, transient density | **+0.014** | +2.659 |
+| distorted rock, decorrelated stereo | dense harmonics to Nyquist | **+0.002** | +1.144 |
+| loud master (**8.0 dB** crest) | rate control at constant near-full-scale | −0.031 | +1.319 |
+| vocal (real PD Mozart aria) | formants + strong harmonics | −0.143 | +1.593 |
 
-### vs C libopus 1.6.1 — Apple Silicon (aarch64, NEON)
+**No failure mode appeared in any of them** — and the class we were most exposed on, sub-bass,
+is one we're ahead on. Four of the five are synthetic and labelled as such in the corpus README:
+they are correct for stressing a mechanism, not a substitute for real commercial masters.
 
-| Config | rusty-opus | C libopus | Ratio |
-|--------|-----------:|----------:|-------|
-| 8 kHz / 20 ms VoIP  | 31.47 ms | **31.20 ms** | 1.01× (C 0.9 % faster) |
-| 16 kHz / 20 ms VoIP | **51.19 ms** | 52.81 ms | 0.97× (**3.1 % faster**) |
-| 16 kHz / 10 ms VoIP | 55.69 ms | **55.49 ms** | 1.00× (within noise) |
-| 48 kHz / 20 ms Audio | **13.97 ms** | 19.39 ms | 0.72× (**28 % faster**) |
-| 48 kHz / 10 ms Audio | **16.19 ms** | 20.28 ms | 0.80× (**20 % faster**) |
+**Against `libopus` we are at parity** — a mean of −0.015 ODG is well inside the noise of the
+metric. We are genuinely *ahead* on noise-like and transient material (applause **+1.107**,
+percussive **+0.363**, noisy speech +0.079) and behind on VoIP-application low-rate speech
+(−0.416 mixed, −0.200 speech) and stereo music (−0.217 piano, −0.162 guitar).
 
-Where `libopus`'s hand-written assembly still leads single-thread (the SILK NSQ inner loop),
-**frame-parallel encoding** (`examples/roundtrip_parallel`) wins the wall-clock race outright —
-each chunk primes its inter-frame state so the seams are PEAQ-neutral, and `libopus` is
-single-threaded per stream.
+**Against FFmpeg's built-in `-c:a opus` encoder we win every single class**, by +1.53 ODG on
+average. Worth stating plainly, though: that encoder is experimental and CELT-only, and
+`libopus` beats it by an even wider margin (+1.704) — so this says more about that encoder than
+about us. **The `libopus` column is the benchmark that matters.**
+
+<details>
+<summary>Full per-class table</summary>
+
+| class | ours vs libopus | ours vs ffmpeg-native |
+|---|---:|---:|
+| applause (stereo) | **+1.107** | +1.018 |
+| percussive / transient | **+0.363** | +2.980 |
+| noisy speech | **+0.079** | +2.297 |
+| wide stereo | −0.073 | +2.690 |
+| silence / DTX-shaped | −0.104 | +2.313 |
+| clean speech | −0.127 | +1.653 |
+| guitar (stereo) | −0.162 | +0.741 |
+| guitar (mono) | −0.171 | +0.499 |
+| piano (stereo) | −0.217 | +2.478 |
+| mixed speech+music | −0.256 | +1.643 |
+| voip: noisy speech | −0.021 | +0.930 |
+| voip: speech | −0.200 | +0.438 |
+| voip: mixed | −0.416 | +0.233 |
+
+Reproduce: `python tools/gen_gate_corpus.py` then `python tools/gate_ladder.py --arms ours,lib,nat`,
+and compare with `python tools/gate_regression.py --bd`.
+
+</details>
+
+**Caveats we'd want to read in someone else's README.** PEAQ is a wideband/fullband metric and
+saturates on narrowband speech, so the three `voip_*` rows are soft in *both* directions — treat
+them as a no-regression tripwire, not a quality ranking. The music sources are short public-domain
+clips; a per-class win here is weaker evidence than the same win across a large library.
+
+Streaming robustness — PLC (SILK **and** CELT), FEC, DTX, CNG — is at parity with `libopus`,
+conformance untouched.
+
+## Performance — single-thread encode, three coding paths
+
+Measured on an i7-14650HX (Windows, x86-64 AVX2). All three encoders are driven the **same
+way**: as processes, encoding a 300 s and a 150 s clip, reporting the **slope** `t(300s) − t(150s)`
+so process startup and file I/O cancel out for everyone. Pinned to one core at High priority,
+**CPU time** (not wall), arms ABBA-interleaved, 31 reps, with a **null arm** — the same binary
+measured twice — establishing the resolution floor.
+
+The path matters more than the sample rate, so the table is organised by which coder actually
+ran, **verified from the TOC bytes of the output** rather than assumed:
+
+| path (verified) | **rusty-opus** | C libopus | FFmpeg native | vs libopus |
+|---|---:|---:|---:|---|
+| **CELT** — 48 kHz speech @32k | **436× realtime** | 291× | 310× | **1.50× faster** |
+| **CELT** — 48 kHz stereo music @128k | **213× realtime** | 133× | 71× | **1.60× faster** |
+| **SILK** — 16 kHz speech @16k, VoIP | 139× realtime | **145×** | n/a | 0.96× (**libopus 4% ahead**) |
+
+Null-arm floor: 0.0% / 2.2% / 0.0% respectively — the CELT wins are far outside the noise, and
+the SILK gap is small but real. Medians were checked at 15 / 31 / 41 reps and settle (ours on
+CELT speech read 343.8 ms at all three).
+
+**We're 1.5–1.6× faster than `libopus` on both CELT paths, and within 4% on SILK.** That last
+row corrects our own older documentation, which claimed a ~2.9× SILK deficit: with the AVX2
+SILK kernels (LPC short-prediction, warped autocorrelation, cross-state NSQ shaping filter) it
+is near-parity, and `libopus`'s hand-written NSQ assembly keeps only a few percent.
+
+Two honesty notes. FFmpeg's native encoder is **CELT-only**, so on the SILK row it isn't doing
+comparable work — it looks fast because it is coding something cheaper and much worse (see the
+quality table). And on top of the single-thread numbers, **frame-parallel encoding**
+(`examples/roundtrip_parallel`) wins wall-clock outright, because `libopus` is single-threaded
+per stream — each chunk primes its inter-frame state so the seams are PEAQ-neutral (ΔODG ≤ 0.03).
+
+Reproduce with `powershell tools/bench_encode_3way.ps1 -Reps 31`.
 
 ## Feature flags
 

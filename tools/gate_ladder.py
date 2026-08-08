@@ -53,6 +53,14 @@ LADDERS = {
     'voip_speech':        [8, 12, 16, 24, 32],
     'voip_speech_noisy':  [8, 12, 16, 24, 32],
     'voip_mixed':         [12, 16, 24, 32, 48],
+    # Music-coverage classes. These deliberately run INTO the 192-256 kb/s
+    # transparency region: that is where Opus music encoding actually lives and
+    # the original corpus stopped at 160, so the top of the range was untested.
+    'mus_vocal_st':       [64, 96, 128, 192, 256],
+    'mus_bass_edm':       [64, 96, 128, 192, 256],
+    'mus_loud_master':    [64, 96, 128, 192, 256],
+    'mus_fast_dense':     [64, 96, 128, 192, 256],
+    'mus_rock_dist_st':   [64, 96, 128, 192, 256],
 }
 
 # Opus application per clip; `voip` biases toward SILK and is the mode the
@@ -118,6 +126,20 @@ def encode_ours(inp, outp, kbps, clip='', app='audio'):
             return b * 8.0 / s / 1000.0
     return -1.0
 
+def encode_nat(inp, outp, kbps, work):
+    """FFmpeg's OWN native Opus encoder (`-c:a opus`), not libopus. It is marked
+    experimental (`-strict -2`) and has no `-application` switch."""
+    opus = os.path.join(work, '_nat.opus')
+    subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', inp,
+                    '-strict', '-2', '-c:a', 'opus', '-b:a', f'{kbps}k', opus], check=True)
+    subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', opus,
+                    '-ar', '48000', outp], check=True)
+    sz = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a',
+                         '-show_entries', 'packet=size', '-of', 'csv=p=0', opus],
+                        capture_output=True, text=True).stdout
+    b = sum(int(x.strip().rstrip(',')) for x in sz.split() if x.strip().rstrip(','))
+    return b * 8.0 / 12.0 / 1000.0
+
 def encode_lib(inp, outp, kbps, work, app='audio'):
     opus = os.path.join(work, '_lib.opus')
     subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', inp,
@@ -164,6 +186,8 @@ def main():
                     actual = encode_ours(refp, dec, kbps, clip=clip, app=app)
                 elif arm == 'lib':
                     actual = encode_lib(refp, dec, kbps, work, app=app)
+                elif arm == 'nat':
+                    actual = encode_nat(refp, dec, kbps, work)
                 else:
                     sys.exit(f'unknown arm {arm}')
                 odg = peaq(refp, dec)

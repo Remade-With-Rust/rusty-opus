@@ -139,6 +139,106 @@ x[2 * third:] = guitar[2 * third:3 * third - (3 * third - n)] if 3 * third > n e
 x[2 * third:] = guitar[2 * third:n]
 save('mixed_speech_music.wav', 0.95 * x / np.max(np.abs(x)))
 
+# --- music classes the original corpus was blind to -------------------------
+# Measured with tools/corpus_coverage.py, the first corpus topped out at 0.137
+# bass-energy fraction, 28 dB crest and ~7 real onsets/s, with both real sources
+# being solo acoustic classical. That leaves the low CELT bands, loudness-war
+# masters and dense fast material completely untested - which is where a
+# "runaway" failure would hide. These fill those holes.
+print('music coverage classes:')
+
+# Real PD vocal (Mozart aria) if it was fetched; vocals are their own class -
+# strong harmonics plus formants, and nothing else in the corpus has them.
+_vocal_src = os.path.join(RFF_CORPUS, 'mus_vocal.ogg')
+if os.path.exists(_vocal_src) and os.path.getsize(_vocal_src) > 100000:
+    ff('-i', _vocal_src, '-ar', str(SR), '-ac', '2', '-sample_fmt', 's16',
+       '-t', str(DUR), '-ss', '20', tmp2 := os.path.join(OUT, '_v.wav'))
+    save('mus_vocal_st.wav', load(tmp2))
+    os.remove(tmp2)
+else:
+    print('  (no vocal source - run tools/quality/fetch_corpus.sh)')
+
+t = np.arange(n) / SR
+
+# Bass-heavy electronic: 4-on-the-floor kick with a real sub component, a
+# sub-bass line, saw lead and hats. Targets a bass fraction an order of
+# magnitude above anything else in the corpus.
+bpm = 128.0
+beat = 60.0 / bpm
+edm = np.zeros(n)
+for k in range(int(DUR / beat)):
+    i = int(k * beat * SR)
+    d = int(0.28 * SR)
+    if i + d > n: break
+    tt = np.arange(d) / SR
+    # kick: pitch-swept sine 110 -> 45 Hz, fast decay
+    f = 45 + 65 * np.exp(-tt / 0.03)
+    edm[i:i+d] += 0.9 * np.sin(2*np.pi*np.cumsum(f)/SR) * np.exp(-tt / 0.10)
+sub_note = [41.2, 41.2, 49.0, 55.0]           # E1 E1 G1 A1
+for k in range(int(DUR / (beat*2))):
+    i = int(k * beat * 2 * SR); d = int(beat*1.9*SR)
+    if i + d > n: break
+    tt = np.arange(d) / SR
+    f0 = sub_note[k % 4]
+    env = np.minimum(1.0, tt/0.01) * np.exp(-tt/1.2)
+    edm[i:i+d] += 0.5 * (np.sin(2*np.pi*f0*tt) + 0.25*np.sin(2*np.pi*2*f0*tt)) * env
+saw = lambda f: 2*(t*f - np.floor(0.5 + t*f))
+edm += 0.12 * saw(220.0) * (0.5 + 0.5*np.sin(2*np.pi*0.5*t))
+for k in range(int(DUR / (beat/2))):
+    i = int(k * (beat/2) * SR); d = int(0.02*SR)
+    if i + d > n: break
+    edm[i:i+d] += 0.10 * rng.standard_normal(d) * np.exp(-np.arange(d)/(0.004*SR))
+save('mus_bass_edm.wav', 0.92 * edm / np.max(np.abs(edm)))
+
+# Loud, limited "modern master": full-band content squashed to ~8 dB crest.
+mix = (0.5*saw(110.0) + 0.4*saw(164.8) + 0.3*np.sin(2*np.pi*82.4*t)
+       + 0.25*saw(329.6) + 0.15*rng.standard_normal(n))
+for k in range(int(DUR / 0.5)):                # snare-ish backbeat
+    i = int((k*0.5 + 0.25) * SR); d = int(0.09*SR)
+    if i + d > n: break
+    mix[i:i+d] += 0.7 * rng.standard_normal(d) * np.exp(-np.arange(d)/(0.02*SR))
+mix /= np.max(np.abs(mix))
+# soft-knee limiter: heavy make-up then tanh, which is what crushes the crest
+loud = np.tanh(3.2 * mix)
+save('mus_loud_master.wav', 0.97 * loud / np.max(np.abs(loud)))
+
+# Fast/dense: ~28 onsets/s of drums plus tremolo strings - the transient-density
+# stressor the corpus lacked (its previous max was ~7/s of real rhythm).
+fast = 0.25 * saw(196.0) * (0.6 + 0.4*np.sin(2*np.pi*11.0*t))
+# 40 hits/s by construction. The flux detector reports fewer because it merges
+# hits closer than its hop, so aim high and let the measurement land in the
+# 20-40/s band we are trying to cover.
+step = 1.0 / 40.0
+k = 0
+while k * step < DUR:
+    i = int(k * step * SR); d = int(0.035*SR)
+    if i + d > n: break
+    tt = np.arange(d)
+    if k % 4 == 0:
+        fast[i:i+d] += 0.8*np.sin(2*np.pi*70*tt/SR)*np.exp(-tt/(0.02*SR))
+    else:
+        hp = rng.standard_normal(d)
+        fast[i:i+d] += 0.45*np.diff(np.concatenate(([0.0], hp)))*np.exp(-tt/(0.006*SR))
+    k += 1
+save('mus_fast_dense.wav', 0.95 * fast / np.max(np.abs(fast)))
+
+# Distorted full-band rock: clipped power chords (dense odd harmonics right up
+# to Nyquist) plus cymbals. Spectrally the opposite of solo acoustic classical,
+# and the hardest thing in the corpus for a transform codec to keep clean.
+chord = np.zeros(n)
+for f0 in (82.4, 123.5, 164.8):                     # E2 B2 E3 power chord
+    chord += saw(f0) + 0.6 * saw(f0 * 1.005)        # slight detune = chorusing
+chord = np.tanh(6.0 * chord / 3.0)                  # amp-style clipping
+for k in range(int(DUR / 0.5)):                     # crash/ride
+    i = int(k * 0.5 * SR); d = int(0.5 * SR)
+    if i + d > n: break
+    tt = np.arange(d)
+    cym = rng.standard_normal(d)
+    cym = np.diff(np.concatenate(([0.0], cym)))     # HF-tilt the noise
+    chord[i:i+d] += 0.35 * cym * np.exp(-tt / (0.18 * SR))
+rock = np.stack([chord, np.roll(chord, 137)], axis=1)   # small L/R decorrelation
+save('mus_rock_dist_st.wav', 0.95 * rock / np.max(np.abs(rock)))
+
 # --- VoIP / low-rate operating-point classes -------------------------------
 # These are NOT new content: they are the same speech-family material scored
 # under the `voip` application at 8-32 kb/s, i.e. exactly where SILK is the

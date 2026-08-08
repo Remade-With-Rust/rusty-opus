@@ -1579,8 +1579,6 @@ pub struct OpusDecoder {
 
     prev_internal_rate: i32,
 
-    pub hybrid_skip_celt: bool,
-
     w_pcm_i16: Vec<i16>,
     w_silk_out: Vec<f32>,
     w_pcm_resampled: Vec<i16>,
@@ -1642,7 +1640,6 @@ impl OpusDecoder {
             silk_resampler: silk::resampler::SilkResampler::default(),
             silk_resampler_r: silk::resampler::SilkResampler::default(),
             prev_internal_rate: 0,
-            hybrid_skip_celt: false,
 
             // SILK internal scratch: max frame is 60 ms at the 16 kHz WB internal
             // rate (960 samples/ch), i.e. 1920 stereo. Sized like the sibling

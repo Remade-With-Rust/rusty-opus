@@ -593,6 +593,38 @@ The packet length is preserved exactly, libopus decodes it without error, and
 quality is unmoved. CBR gains nothing from the flag (there are no bits to give
 back) but it is not harmed, which is the property that mattered.
 
+### Two benchmark traps caught while preparing public numbers (2026-08-07)
+
+Both were found only because the harness carries a null arm and a mode dump.
+Either one would have shipped a wrong number to a README.
+
+**1. The timer quantum ate the result.** Windows reports `TotalProcessorTime` in
+~15.6 ms steps. Measuring a 60 s-vs-30 s slope gave 78-470 ms, i.e. 5-30 quanta,
+and the **null arm — identical code measured twice — read 9.1% apart**. A
+"1.20x vs ffmpeg-native" was literally one quantum wide. Fix: 300 s vs 150 s,
+which puts the quantum under 1% of the slope and dropped the null-arm floor to
+0.0-4.5%. *Print the quantum count next to every timing; a slope worth
+publishing should be dozens of quanta, not a handful.*
+
+**2. The "SILK" benchmark was not running SILK.** The speech arm used
+`-application voip` and was assumed to exercise the SILK path — the one place
+our own docs say libopus's hand-written NSQ assembly beats us ~2.9x. A TOC dump
+of the actual output said otherwise:
+
+| arm | what it actually coded |
+|---|---|
+| ours, 48 kHz, `-application voip` | **celt/FB 99%** |
+| libopus, same | celt/FB 52% + celt/SWB 46% |
+| ours, 16 kHz, voip, 16 kb/s | **silk/WB 100%** |
+| libopus, same | **silk/WB 100%** |
+
+At 48 kHz *both* encoders pick CELT on this material regardless of application,
+because the classifier reads looped speech as music. So every 48 kHz config was
+a CELT-vs-CELT race, and publishing it as a speech result would have quietly
+omitted our weakest path. Only a 16 kHz / 16 kb/s VoIP config reaches SILK on
+both sides. *`tools/opus_toc_stats.py` on the benchmark's own output is one
+command; run it before believing any per-mode claim.*
+
 ### Process note, recorded because it nearly cost a dataset
 
 I rebuilt the encoder while a ladder was running — the exact mistake documented

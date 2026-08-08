@@ -208,8 +208,11 @@ fn process_mode(config: ModeConfig, src_samples: &[i16], src_rate: u32) {
     encoder.complexity = 5;
 
     // Initialize decoder
+    // NOTE: this example used to set `decoder.hybrid_skip_celt = skip_celt`,
+    // which was a pub field nothing ever read — a silent no-op. Removed in
+    // 0.5.0; the flag is accepted and ignored rather than pretending to work.
+    let _ = skip_celt;
     let mut decoder = OpusDecoder::new(target_rate as i32, 1).expect("Failed to create decoder");
-    decoder.hybrid_skip_celt = skip_celt;
 
     // Encode frame by frame
     let mut all_payload: Vec<u8> = Vec::new();

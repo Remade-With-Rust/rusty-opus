@@ -1,6 +1,10 @@
 //! Encode a WAV to a real `.opus` (Ogg-encapsulated) file, so our bitstream can
 //! be handed to an INDEPENDENT decoder (ffmpeg/libopus).
 //!
+//! NOT a size benchmark: it writes ONE PAGE PER PACKET, so a 20 ms-frame stream
+//! carries ~28 bytes of Ogg header per 20 ms (~11 kb/s of pure framing). Compare
+//! the "payload bytes" line it prints, never the file size.
+//!
 //! Round-tripping through our own decoder cannot catch an encoder/decoder pair
 //! that is self-consistently wrong, which is exactly the risk for any
 //! bitstream-changing brick (the CELT silence flag, for one). This writes the
