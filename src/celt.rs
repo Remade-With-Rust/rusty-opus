@@ -1421,6 +1421,13 @@ fn compute_vbr_target(
     if tonal_boost && analysis.valid {
         let tonal = (analysis.tonality - 0.15).max(0.0) - 0.12;
         target += ((coded_bins << BITRES) as f32 * 1.2 * tonal) as i32;
+        // Low-activity reduction (same block in the C, guarded by activity<0.4):
+        //   target -= (coded_bins<<BITRES) * (0.4 - activity)
+        // `activity` was the third analysis signal computed every frame and
+        // consumed by nothing.
+        if analysis.activity < 0.4 {
+            target -= ((coded_bins << BITRES) as f32 * (0.4 - analysis.activity)) as i32;
+        }
     }
 
     // Don't allocate more than 8 bits above the "depth" of the signal.
@@ -1561,6 +1568,8 @@ fn alloc_trim_analysis(
     intensity: i32,
     surround_trim: f32,
     equiv_rate: i32,
+    analysis: &AnalysisInfo,
+    tonal_boost: bool,
 ) -> i32 {
     let _prof = crate::prof::scope(crate::prof::Stage::CeltAlloc);
     let mut trim = 5.0f32;
@@ -1612,6 +1621,15 @@ fn alloc_trim_analysis(
     trim -= (-2.0f32).max(2.0f32.min((diff + 1.0) / 6.0));
     trim -= surround_trim;
     trim -= 2.0 * tf_estimate;
+
+    // Spectral-tilt trim from the analysis (celt_encoder.c alloc_trim_analysis):
+    //   trim -= clamp(-2, 2, 2*(tonality_slope + 0.05))
+    // `tonality_slope` was the last of the analysis signals computed every frame
+    // and read by nothing. Shares the `tonal_vbr` opt-in so the whole
+    // orphaned-signal group flips together and OFF stays byte-identical.
+    if tonal_boost && analysis.valid {
+        trim -= (-2.0f32).max(2.0f32.min(2.0 * (analysis.tonality_slope + 0.05)));
+    }
 
     // Stereo-music LF tilt (PEAQ-tuned, opt-out via env NO_STEREO_TRIM). Our
     // per-output analysis lands the trim slightly lower than is perceptually ideal
@@ -2457,6 +2475,8 @@ impl CeltEncoder {
             self.intensity,
             0.0,
             equiv_rate,
+            &self.analysis,
+            self.tonal_vbr,
         );
         // libopus celt_encoder.c: alloc_trim is 5 UNLESS there is room to code the
         // analysis value — the decoder falls back to 5 when the trim isn't coded,
