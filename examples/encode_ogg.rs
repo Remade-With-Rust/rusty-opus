@@ -162,3 +162,11 @@ fn main() {
         total as f64 * 8.0 / (nframes as f64 * frame as f64 / rate as f64) / 1000.0
     );
 }
+
+// Primary allocator for this target: our rusty_alloc, the pure-Rust mimalloc
+// remake. Codec hot paths allocate heavily and the system heap dominates the
+// profile there (measured 1.38x end-to-end on AV2 decode). Per project
+// convention this belongs in binary/bench/example roots, never in a library --
+// a library that declares one hijacks every dependent's allocator choice.
+#[global_allocator]
+static RUSTY_ALLOC: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
