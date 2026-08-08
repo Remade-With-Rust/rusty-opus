@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.1 — 2026-08-08
+
+Development-tooling release; **no library code changed**, so encoder and decoder
+output are identical to 0.9.0.
+
+- **`rusty_alloc` is now the allocator for every bench and example.**
+  `rusty_alloc-api` is added as a **dev-dependency** (never a normal one — a
+  library that declares a `#[global_allocator]` hijacks every downstream
+  binary's choice) and all 15 example/bench roots set it. This matters for
+  measurement honesty rather than speed: the binaries that ship in
+  `remade_ffmpeg_rs` run under `rusty_alloc`, so a benchmark built against the
+  system allocator was not comparable to production.
+
+  Measured effect on encode, same clips and method, with the libopus/ffmpeg
+  arms as a control proving the two runs comparable (they agreed to within
+  0–4.4%): **no measurable change.** Normalised against libopus the three paths
+  moved −4.6% / −1.4% / **+1.4%** — one apparently better, one apparently
+  worse, every move within one or two 15.6 ms timer quanta and the same size as
+  the control drift. Steady-state Opus encode allocates once and reuses its
+  buffers, so there is little for a faster allocator to win here; its
+  documented gains come from allocation-heavy paths.
+
+- **Benchmark harness gained a pre-flight idle gate.** It samples each
+  process's CPU *delta* and refuses to run above 4 busy cores, naming what is
+  in the way. Three separate runs in one day were silently ruined by load, and
+  the previous check keyed on `Win32_Processor.LoadPercentage`, which was
+  observed reporting 100% while the true burn was 3.4 of 24 cores.
+
 ## 0.9.0 — 2026-08-07
 
 A version-signalling release on the road to 1.0. The codec content is 0.1.26 plus

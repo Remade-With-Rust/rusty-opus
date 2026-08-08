@@ -1,8 +1,8 @@
-﻿[package]
+[package]
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>", "Remade-With-Rust"]
 name = "rusty-opus"
-version = "0.9.0"
+version = "0.9.1"
 description = "pure Rust Opus codec - performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
 license = "BSD-3-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty-opus"
@@ -34,7 +34,7 @@ profile = []
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1"
 # PROJECT CONVENTION: every encoder-carrying binary/bench/example runs under our
-# own rusty_alloc (pure-Rust mimalloc remake), because that is what ships — an
+# own rusty_alloc (pure-Rust mimalloc remake), because that is what ships - an
 # arm measured under the system allocator is not comparable to production.
 # A DEV-dependency on purpose: the library must never set a global allocator, or
 # it would hijack a downstream binary's choice.
@@ -43,3 +43,4 @@ rusty_alloc-api = "0.3"
 [[bench]]
 name = "opus_bench"
 harness = false
+

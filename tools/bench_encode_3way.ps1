@@ -58,6 +58,43 @@ $silk60 = EnsureRate "silk_long_$Long"   (Join-Path $ROOT "fixtures\answer_16k.w
 $silk30 = EnsureRate "silk_short_$Short" (Join-Path $ROOT "fixtures\answer_16k.wav") $Short 16000
 $span = $Long - $Short
 
+# PRE-FLIGHT IDLE GATE. Three separate runs today were silently ruined by load
+# on the box - my own corpus work once, a workspace rustc storm twice - and each
+# time the tell was only visible afterwards, in the control arms. A law the
+# harness does not enforce is a law that gets broken, so refuse to start unless
+# the machine is actually idle.
+function Assert-Idle {
+    # Measure the RATE, not a cumulative total and not Win32_Processor's
+    # LoadPercentage. Both mislead: a process that ran all night shows a huge
+    # cumulative CPU while sitting idle, and LoadPercentage was observed reading
+    # 100% on this box when the real burn was 3.4 of 24 cores. Sampling each
+    # process's CPU delta over a window is the only reading that matches reality.
+    $before = @{}
+    Get-Process | ForEach-Object { if ($_.CPU) { $before[$_.Id] = $_.CPU } }
+    Start-Sleep -Seconds 5
+    $me = $PID
+    $busy = @()
+    Get-Process | ForEach-Object {
+        if ($_.CPU -and $before.ContainsKey($_.Id) -and $_.Id -ne $me) {
+            $pct = ($_.CPU - $before[$_.Id]) / 5 * 100
+            if ($pct -gt 25) { $busy += [pscustomobject]@{ Name = $_.Name; Id = $_.Id; CoresPct = [math]::Round($pct, 1) } }
+        }
+    }
+    $cores = [math]::Round((($busy | Measure-Object CoresPct -Sum).Sum) / 100, 2)
+    # One pinned core is what we need. A couple of busy cores elsewhere on a
+    # 24-thread box is tolerable; a compile storm is not.
+    if ($cores -gt 4.0) {
+        Write-Host "REFUSING TO BENCHMARK - $cores cores busy." -ForegroundColor Red
+        $busy | Sort-Object CoresPct -Descending | Select-Object -First 8 | Format-Table -AutoSize | Out-String | Write-Host
+        Write-Host "Timing taken now would be contaminated; wait and re-run."
+        Write-Host "(Do not kill a neighbouring project's job without asking its owner.)"
+        exit 2
+    }
+    Write-Host "pre-flight: $cores cores busy (threshold 4.0) - proceeding"
+    if ($busy) { $busy | Sort-Object CoresPct -Descending | Select-Object -First 4 | Format-Table -AutoSize | Out-String | Write-Host }
+}
+Assert-Idle
+
 function Invoke-Pinned($exe, $argl) {
     $p = Start-Process -FilePath $exe -ArgumentList $argl -PassThru -WindowStyle Hidden
     $null = $p.Handle
