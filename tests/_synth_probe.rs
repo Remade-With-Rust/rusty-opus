@@ -1,41 +1,42 @@
-//! Temporary diagnostic: hash the SYNTHESISED INPUT, before any encoding.
+//! Temporary diagnostic #2: is the ENCODER platform-dependent, independently of
+//! the fixture?
 //!
-//! If this differs between platforms, the oracle's failure is in its own test
-//! fixture -- the input is generated with `f32::sin`, which resolves to the
-//! host libm -- and not in the encoder at all.
+//! Probe #1 proved the oracle's synthesised input differs across platforms
+//! (it is built with `f32::sin`, which resolves to the host libm). That alone
+//! explains the oracle failure. This asks the separate question: given a
+//! bit-identical input built with no transcendentals at all, does the encoder
+//! still produce the same bytes everywhere?
+//!
+//! It matters because it decides the fix. If the encoder is portable, making the
+//! fixture deterministic is enough. If it is not, the oracle can never be a
+//! cross-platform gate and must say so.
 
-struct Lcg(u64);
-impl Lcg {
-    fn next_f32(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((self.0 >> 40) as f32 / (1u32 << 23) as f32) - 1.0
-    }
-}
+use rusty_opus::{Application, OpusEncoder};
 
-fn synth_music(rate: u32, channels: usize, secs: f32) -> Vec<f32> {
-    let n = (rate as f32 * secs) as usize;
-    let mut rng = Lcg(0x5EED_CAFE_F00D_D00D);
+/// Deterministic input: integer LCG only, no floating-point transcendentals,
+/// so this array is bit-identical on every platform by construction.
+fn synth_deterministic(n: usize, channels: usize) -> Vec<f32> {
+    let mut s: u64 = 0x1234_5678_9abc_def0;
     let mut out = vec![0.0f32; n * channels];
-    let freqs = [220.0f32, 277.18, 329.63, 440.0, 554.37, 659.25];
-    for i in 0..n {
-        let t = i as f32 / rate as f32;
-        let vib = (2.0 * std::f32::consts::PI * 5.0 * t).sin() * 0.002;
-        let beat = if (t * 2.0).fract() < 0.05 { 1.8 } else { 1.0 };
-        let mut s = 0.0f32;
-        for (k, f) in freqs.iter().enumerate() {
-            let ph = 2.0 * std::f32::consts::PI * f * (1.0 + vib) * t;
-            s += ph.sin() * (0.22 / (k as f32 + 1.0));
-        }
-        s = (s * beat + rng.next_f32() * 0.02).clamp(-0.98, 0.98) * 0.5;
-        for c in 0..channels {
-            let sc = if c == 0 { s } else { s * 0.8 + rng.next_f32() * 0.01 };
-            out[i * channels + c] = sc;
-        }
+    for v in out.iter_mut() {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        // Map the top bits to a small exactly-representable rational.
+        let q = ((s >> 44) as i32) - 1024; // -1024..1023
+        *v = q as f32 / 4096.0; // exact in binary32
     }
     out
 }
 
-fn hash(v: &[f32]) -> u64 {
+fn hash_bytes(v: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in v {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+fn fhash(v: &[f32]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for x in v {
         for b in x.to_bits().to_le_bytes() {
@@ -47,17 +48,29 @@ fn hash(v: &[f32]) -> u64 {
 }
 
 #[test]
-fn synth_probe() {
-    let m = synth_music(48000, 2, 20.0);
-    println!("SYNTH_PROBE input_hash=0x{:016x} n={}", hash(&m), m.len());
-    println!("SYNTH_PROBE first8={:?}", &m[..8]);
-    let s: f32 = (2.0f32 * std::f32::consts::PI * 440.0 * 0.001).sin();
-    println!("SYNTH_PROBE sin_sample={:.9} bits=0x{:08x}", s, s.to_bits());
-    // Frozen on Windows/MSVC. If this differs on another host, the oracle's
-    // INPUT is platform-dependent and the encoder is not implicated at all.
+fn encoder_portability_probe() {
+    let frame = 960; // 20 ms @ 48k
+    let frames = 200;
+    let pcm = synth_deterministic(frame * frames, 2);
+    println!("ENCPROBE input_hash=0x{:016x} (must be identical everywhere)", fhash(&pcm));
+
+    let mut enc = OpusEncoder::new(48000, 2, Application::Audio).expect("encoder");
+    enc.bitrate_bps = 128_000;
+    enc.use_cbr = true;
+    let mut all = Vec::new();
+    let mut buf = vec![0u8; 4000];
+    for f in 0..frames {
+        let s = f * frame * 2;
+        let n = enc.encode(&pcm[s..s + frame * 2], frame, &mut buf).expect("encode");
+        all.extend_from_slice(&buf[..n]);
+    }
+    println!("ENCPROBE output_hash=0x{:016x} bytes={}", hash_bytes(&all), all.len());
+
+    // Frozen on Windows/MSVC. A mismatch here means the ENCODER itself is
+    // platform-dependent, not merely the oracle's fixture.
     assert_eq!(
-        hash(&m),
-        0xe324_93ae_bb64_3959u64,
-        "synthesised INPUT differs from the Windows baseline --          the fixture is platform-dependent, before any encoding happens"
+        hash_bytes(&all),
+        0x4b25_66f2_e882_f3e9u64,
+        "encoder output from a bit-identical input"
     );
 }
