@@ -38,7 +38,7 @@ proptest = "1"
 # arm measured under the system allocator is not comparable to production.
 # A DEV-dependency on purpose: the library must never set a global allocator, or
 # it would hijack a downstream binary's choice.
-rusty_alloc-api = "0.3"
+rusty_alloc-api = "=1.1.6"
 
 [[bench]]
 name = "opus_bench"
