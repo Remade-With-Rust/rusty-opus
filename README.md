@@ -4,6 +4,10 @@
 > the whole conversion runs as WebAssembly in the browser tab, with nothing
 > uploaded and nothing to install.
 
+### In The Wild with 3,642 Active Installs
+
+FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
+
 # rusty-opus
 
 [![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/remade-with-rust)
