@@ -1,9 +1,3 @@
-### In The Wild with 3.490 Active Installs
-> [RAG Converter](https://ragconverter.com) uses `rusty-opus` for decoding in wasm.
-> It makes personal and work files AI-readable without them leaving the machine:
-> the whole conversion runs as WebAssembly in the browser tab, with nothing
-> uploaded and nothing to install.
-
 ### In The Wild with 3,642 Active Installs
 
 FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
