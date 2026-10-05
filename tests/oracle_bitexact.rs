@@ -156,7 +156,19 @@ fn oracle_bitexact() {
     // byte-identical (the tilt is gated to channels==2). Prior freeze 2026-07-09 on the
     // conformance-fixed tree (haar1, alloc row 10, anti-collapse rsv, alloc_trim fallback,
     // prefilter off). Layout-stability verified by struct-padding perturbation + canaries.
-    let cases: [(&str, u64, usize, usize); 4] = [
+    // The hashes depend on the platform's libm (glibc and the MSVC CRT round
+    // sinf/expf/logf differently, and both CELT and SILK analysis call them), so
+    // each frozen rung has its own table: Windows below, Linux in `LINUX` (frozen
+    // 2026-10-04 on the same tree; the hybrid case happens to agree).
+    #[cfg(target_os = "linux")]
+    const LINUX: [(u64, usize); 4] = [
+        (0xd62a_163c_6eaa_b8e8, 320000),
+        (0xcf44_d2b4_3b32_87dd, 40833),
+        (0x244f_b20b_4043_32ed, 82009),
+        (0x117f_3961_f991_74e8, 321485),
+    ];
+    #[allow(unused_mut)]
+    let mut cases: [(&str, u64, usize, usize); 4] = [
         (
             "CELT  48k stereo music @128k",
             0x9013_d2da_ecc4_5d4d,
@@ -182,6 +194,10 @@ fn oracle_bitexact() {
             1000,
         ),
     ];
+    #[cfg(target_os = "linux")]
+    for (case, &(h, b)) in cases.iter_mut().zip(&LINUX) {
+        (case.1, case.2) = (h, b);
+    }
     let got = [
         encode_hash(
             48000,
@@ -252,11 +268,17 @@ fn frozen_rung() -> bool {
     {
         return false;
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(target_os = "windows", target_os = "linux")
+    ))]
     {
         std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        any(target_os = "windows", target_os = "linux")
+    )))]
     {
         false
     }
