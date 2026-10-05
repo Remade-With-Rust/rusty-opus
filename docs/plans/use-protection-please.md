@@ -127,7 +127,7 @@ Evidence; excluded from the totals).
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-37 | CI runs the hardening gate on every PR | Completed | `.github/workflows/ci.yml`: fmt, clippy (4 targets), test (Linux, Windows, macOS-arm64 ± scalar ISA), debug test, MSRV, deny+audit+vet, semgrep+invariants+UNSAFE.md+README checks, wasm; Miri/sanitizers/careful/fuzz/differential weekly; actions SHA-pinned; `permissions: contents: read` | |
+| H-37 | CI runs the hardening gate on every PR | Completed | `.github/workflows/ci.yml`: fmt, clippy (4 targets), test (Linux, Windows, macOS-arm64 ± scalar ISA), debug test, MSRV, deny+audit+vet, semgrep+invariants+UNSAFE.md+README checks, wasm; Miri/sanitizers/careful/fuzz/differential weekly; actions SHA-pinned; `permissions: contents: read`; the org-managed `portfolio-check.yml` (Remade-With-Rust shared harness, maintained by remade-updater) is the one workflow not SHA-pinned in this repo | |
 | H-38 | Releases signed, attested, and changelogged for security | Incomplete | `release.yml` attaches SBOM + build provenance attestation; CHANGELOG has a Security section; tag signing (SSH key configured) verified at release time | |
 | H-39 | ★ `SECURITY.md` with a coordinated disclosure process | Completed | `SECURITY.md`: private reporting via GitHub advisories, 3-day ack / 10-day assessment / 30-day fix windows, coordinated disclosure + RustSec advisory, scope | |
 | H-40 | Advisory monitoring and scheduled re-audit | Completed | Weekly `cargo audit` + `cargo deny check advisories` in `scheduled.yml`; Dependabot; full re-audit scheduled quarterly (next 2027-01-04) | |

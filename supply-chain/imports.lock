@@ -77,23 +77,16 @@ user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
-[[publisher.rusty-opus]]
-version = "0.9.1"
-when = "2026-08-08"
-user-id = 427321
-user-login = "Ttimmahlax"
-user-name = "farmer_timmm"
-
 [[publisher.rusty_alloc]]
-version = "0.4.0"
-when = "2026-08-08"
+version = "1.1.6"
+when = "2026-08-28"
 user-id = 427321
 user-login = "Ttimmahlax"
 user-name = "farmer_timmm"
 
 [[publisher.rusty_alloc-api]]
-version = "0.4.0"
-when = "2026-08-08"
+version = "1.1.6"
+when = "2026-08-28"
 user-id = 427321
 user-login = "Ttimmahlax"
 user-name = "farmer_timmm"

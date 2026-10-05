@@ -1,5 +1,10 @@
+### In The Wild with 35,223 Active Installs
+
+FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
+
 # rusty-opus
 
+[![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/remade-with-rust)
 [![crates.io](https://img.shields.io/crates/v/rusty-opus.svg)](https://crates.io/crates/rusty-opus)
 [![docs.rs](https://img.shields.io/docsrs/rusty-opus)](https://docs.rs/rusty-opus)
 [![CI](https://github.com/Remade-With-Rust/rusty-opus/actions/workflows/ci.yml/badge.svg)](https://github.com/Remade-With-Rust/rusty-opus/actions/workflows/ci.yml)
