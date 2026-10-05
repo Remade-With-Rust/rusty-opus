@@ -16,14 +16,34 @@
 
 use crate::{Application, OpusEncoder};
 
+/// Worker count for `requested` (0 = all cores). wasm without the `atomics`
+/// feature has no threads (`std::thread::spawn` panics there), so it is always
+/// 1 and every entry point below runs serially on the calling thread.
+fn worker_count(requested: usize) -> usize {
+    if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
+        return 1;
+    }
+    if requested == 0 {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    } else {
+        requested
+    }
+}
+
 /// Configuration for a parallel encode; mirrors the knobs on [`OpusEncoder`].
 #[derive(Clone, Copy)]
 pub struct ParallelConfig {
+    /// Input sampling rate in Hz (8000, 12000, 16000, 24000 or 48000).
     pub sample_rate: i32,
+    /// Channel count (1 or 2).
     pub channels: usize,
+    /// Encoder application mode.
     pub application: Application,
+    /// Target bitrate in bits per second.
     pub bitrate_bps: i32,
+    /// Encoder complexity, 0-10.
     pub complexity: i32,
+    /// Constant bitrate when `true`.
     pub use_cbr: bool,
     /// Frames of look-back each worker re-encodes to prime its state (discarded).
     /// Must exceed the deepest inter-frame memory (SILK LTP lag + NSQ delay +
@@ -35,8 +55,9 @@ pub struct ParallelConfig {
 }
 
 impl ParallelConfig {
+    /// Defaults: 64 kb/s VBR, complexity 9, 8 warm-up frames, one worker per core.
     pub fn new(sample_rate: i32, channels: usize, application: Application) -> Self {
-        ParallelConfig {
+        Self {
             sample_rate,
             channels,
             application,
@@ -56,6 +77,14 @@ impl ParallelConfig {
 ///
 /// The serial equivalent is `encode_serial`; this returns the same *count* of
 /// packets and (with adequate `warmup`) a perceptually-identical bitstream.
+///
+/// # Panics
+///
+/// Panics if `cfg` is not a valid encoder configuration (see
+/// [`crate::OpusEncoder::new`]) or if encoding a frame fails, which can only
+/// happen for an invalid configuration. Validate the configuration with
+/// `OpusEncoder::new` first when it comes from untrusted input.
+/// Also panics if a worker thread panics.
 pub fn encode_parallel(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> Vec<Vec<u8>> {
     let step = frame_size * cfg.channels;
     if step == 0 {
@@ -66,11 +95,7 @@ pub fn encode_parallel(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> 
         return Vec::new();
     }
 
-    let threads = if cfg.threads == 0 {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-    } else {
-        cfg.threads
-    };
+    let threads = worker_count(cfg.threads);
 
     // Each chunk must be ≫ warmup to keep the redundant-compute overhead small;
     // require chunk ≥ 4·warmup (and ≥ 1). Cap the worker count accordingly.
@@ -86,7 +111,7 @@ pub fn encode_parallel(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> 
     let mut ranges = Vec::with_capacity(n_workers);
     let mut start = 0usize;
     for w in 0..n_workers {
-        let len = base + if w < rem { 1 } else { 0 };
+        let len = base + usize::from(w < rem);
         ranges.push((start, start + len));
         start += len;
     }
@@ -96,7 +121,6 @@ pub fn encode_parallel(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> 
         let handles: Vec<_> = ranges
             .iter()
             .map(|&(cstart, cend)| {
-                let cfg = cfg;
                 scope.spawn(move || encode_chunk(cfg, pcm, frame_size, cstart, cend))
             })
             .collect();
@@ -129,7 +153,9 @@ fn encode_chunk(
     let mut packets = Vec::with_capacity(cend - cstart);
     for f in warm_start..cend {
         let frame = &pcm[f * step..(f + 1) * step];
-        let n = enc.encode(frame, frame_size, &mut buf).expect("opus encode");
+        let n = enc
+            .encode(frame, frame_size, &mut buf)
+            .expect("opus encode");
         if f >= cstart {
             packets.push(buf[..n].to_vec());
         }
@@ -139,6 +165,13 @@ fn encode_chunk(
 
 /// Single-threaded reference: encode every frame with one continuous encoder.
 /// The correctness/quality anchor for [`encode_parallel`].
+///
+/// # Panics
+///
+/// Panics if `cfg` is not a valid encoder configuration (see
+/// [`crate::OpusEncoder::new`]) or if encoding a frame fails, which can only
+/// happen for an invalid configuration. Validate the configuration with
+/// `OpusEncoder::new` first when it comes from untrusted input.
 pub fn encode_serial(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> Vec<Vec<u8>> {
     let step = frame_size * cfg.channels;
     if step == 0 {
@@ -150,7 +183,9 @@ pub fn encode_serial(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> Ve
     let mut packets = Vec::with_capacity(total_frames);
     for f in 0..total_frames {
         let frame = &pcm[f * step..(f + 1) * step];
-        let n = enc.encode(frame, frame_size, &mut buf).expect("opus encode");
+        let n = enc
+            .encode(frame, frame_size, &mut buf)
+            .expect("opus encode");
         packets.push(buf[..n].to_vec());
     }
     packets
@@ -165,6 +200,14 @@ pub fn encode_serial(cfg: &ParallelConfig, pcm: &[f32], frame_size: usize) -> Ve
 /// `streams[i]` is `(config, pcm, frame_size)`; returns `out[i]` = that stream's
 /// packets. Order preserved. Uses a bounded pool (`threads`, or all cores) so a
 /// thousand tiny streams don't spawn a thousand threads.
+///
+/// # Panics
+///
+/// Panics if `cfg` is not a valid encoder configuration (see
+/// [`crate::OpusEncoder::new`]) or if encoding a frame fails, which can only
+/// happen for an invalid configuration. Validate the configuration with
+/// `OpusEncoder::new` first when it comes from untrusted input.
+/// Also panics if a worker thread panics.
 pub fn encode_streams(
     streams: &[(ParallelConfig, &[f32], usize)],
     threads: usize,
@@ -174,13 +217,14 @@ pub fn encode_streams(
     if n == 0 {
         return out;
     }
-    let workers = if threads == 0 {
-        std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
-    } else {
-        threads
+    let workers = worker_count(threads).max(1).min(n);
+    if workers == 1 {
+        // No pool for one worker (and no threads at all on plain wasm).
+        for ((cfg, pcm, frame_size), dst) in streams.iter().zip(out.iter_mut()) {
+            *dst = encode_serial(cfg, pcm, *frame_size);
+        }
+        return out;
     }
-    .max(1)
-    .min(n);
 
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out_slots: Vec<std::sync::Mutex<Option<Vec<Vec<u8>>>>> =
@@ -189,14 +233,16 @@ pub fn encode_streams(
         for _ in 0..workers {
             let next = &next;
             let out_slots = &out_slots;
-            scope.spawn(move || loop {
-                let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if idx >= n {
-                    break;
+            scope.spawn(move || {
+                loop {
+                    let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= n {
+                        break;
+                    }
+                    let (cfg, pcm, frame_size) = &streams[idx];
+                    let pkts = encode_serial(cfg, pcm, *frame_size);
+                    *out_slots[idx].lock().unwrap() = Some(pkts);
                 }
-                let (cfg, pcm, frame_size) = &streams[idx];
-                let pkts = encode_serial(cfg, pcm, *frame_size);
-                *out_slots[idx].lock().unwrap() = Some(pkts);
             });
         }
     });

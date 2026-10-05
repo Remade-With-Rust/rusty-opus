@@ -10,7 +10,10 @@ use rusty_opus::{Application, OpusEncoder};
 
 fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
     let mut buf = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+    std::fs::File::open(path)
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
     let rate = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
     let channels = u16::from_le_bytes([buf[22], buf[23]]);
     let mut i = 12;
@@ -35,8 +38,8 @@ fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (rate, channels, pcm) = read_wav(&args[1]);
-    let bitrate: i32 = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(64_000);
-    let passes: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(7);
+    let bitrate: i32 = args.get(2).map_or(64_000, |s| s.parse().unwrap());
+    let passes: usize = args.get(3).map_or(7, |s| s.parse().unwrap());
     let ch = channels as usize;
     let frame = rate as usize / 50;
     let step = frame * ch;
@@ -65,10 +68,14 @@ fn main() {
     times.sort_by(f64::total_cmp);
     println!(
         "encode_speed {} ch={} br={}  best {:.1}x RT  median {:.1}x RT  ({} pkts, {} bytes, {:.1}s)",
-        args[1], ch, bitrate,
+        args[1],
+        ch,
+        bitrate,
         secs / times[0],
         secs / times[times.len() / 2],
-        packets, bytes, secs
+        packets,
+        bytes,
+        secs
     );
 }
 

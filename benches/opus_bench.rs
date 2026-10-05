@@ -90,7 +90,7 @@ fn get_real_audio_frames(sample_rate: u32, frame_ms: usize) -> Vec<Vec<f32>> {
     // Split into frames
     resampled
         .chunks_exact(frame_size)
-        .map(|c| c.to_vec())
+        .map(<[f32]>::to_vec)
         .collect()
 }
 
@@ -152,7 +152,7 @@ fn bench_burg_modified(c: &mut Criterion) {
                         black_box(sflen),
                         black_box(nb),
                         black_box(d),
-                    )
+                    );
                 });
             },
         );
@@ -180,7 +180,7 @@ fn bench_autocorr(c: &mut Criterion) {
                         black_box(&x),
                         black_box(ns),
                         black_box(lgs),
-                    )
+                    );
                 });
             },
         );
@@ -226,7 +226,7 @@ fn bench_lpc_analysis_filter(c: &mut Criterion) {
                         black_box(l),
                         black_box(ord),
                         0,
-                    )
+                    );
                 });
             },
         );
@@ -382,7 +382,7 @@ fn bench_silk_nsq(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(frame_size as u64));
         group.bench_with_input(
-            BenchmarkId::new(format!("{}kHz/{}ms", fs_khz, frame_ms), sig_type),
+            BenchmarkId::new(format!("{fs_khz}kHz/{frame_ms}ms"), sig_type),
             &(fs_khz, frame_size, nb_subfr, subfr_length, signal_type_val),
             |b, &(fs_khz, frame_size, nb_subfr, subfr_length, signal_type_val)| {
                 b.iter(|| {
@@ -492,7 +492,7 @@ fn bench_silk_pitch_analysis_core(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(frame_samples as u64));
         group.bench_with_input(
-            BenchmarkId::new(format!("{}kHz/{}subfr", fs_khz, nb_subfr), sig_type),
+            BenchmarkId::new(format!("{fs_khz}kHz/{nb_subfr}subfr"), sig_type),
             &(
                 fs_khz,
                 nb_subfr,
@@ -543,10 +543,7 @@ fn bench_opus_real(c: &mut Criterion) {
         let frames = get_real_audio_frames(sample_rate, frame_ms);
         let num_frames = frames.len();
 
-        println!(
-            "Loaded {} frames of real audio for {}Hz/{}ms",
-            num_frames, sample_rate, frame_ms
-        );
+        println!("Loaded {num_frames} frames of real audio for {sample_rate}Hz/{frame_ms}ms");
 
         group.throughput(Throughput::Bytes((frame_size * num_frames * 2) as u64));
 

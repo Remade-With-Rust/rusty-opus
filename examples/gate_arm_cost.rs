@@ -19,8 +19,8 @@
 //! `cpu_ms` — and joins the two. Arm selection reuses the shipped truth-table
 //! lever `RUSTY_OPUS_FORCE_MODE` (unset = the shipped auto decision).
 //!
-//!   cargo run --release --example gate_arm_cost -- in.wav <bitrate> [passes]
-//!   cargo run --release --features profile --example gate_arm_cost -- …
+//!   cargo run --release --features research --example gate_arm_cost -- in.wav <bitrate> [passes]
+//!   cargo run --release --features profile,research --example gate_arm_cost -- …
 //!
 //! Output is one machine-readable line:
 //!   ARMCOST clip=<stem> rate=<kbps> arm=<mode> work=<calls> cpu_ms=<best> bytes=<n>
@@ -31,7 +31,10 @@ use rusty_opus::{Application, OpusEncoder};
 
 fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
     let mut buf = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+    std::fs::File::open(path)
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
     let rate = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
     let channels = u16::from_le_bytes([buf[22], buf[23]]);
     let mut i = 12;
@@ -55,8 +58,8 @@ fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = &args[1];
-    let bitrate: i32 = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(64_000);
-    let passes: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(7);
+    let bitrate: i32 = args.get(2).map_or(64_000, |s| s.parse().unwrap());
+    let passes: usize = args.get(3).map_or(7, |s| s.parse().unwrap());
     let arm = std::env::var("RUSTY_OPUS_FORCE_MODE").unwrap_or_else(|_| "auto".into());
     let stem = std::path::Path::new(path)
         .file_stem()
@@ -85,7 +88,10 @@ fn main() {
     let snap = rusty_opus::prof::snapshot();
     // Sum calls over the real stages only: skip the info-tier diagnostics and
     // the Total wrapper, which would double-count.
-    let work: u64 = snap[..rusty_opus::prof::INFO_FIRST].iter().map(|(_, c)| *c).sum();
+    let work: u64 = snap[..rusty_opus::prof::INFO_FIRST]
+        .iter()
+        .map(|(_, c)| *c)
+        .sum();
 
     // --- cpu_ms: best-of-N, and a determinism anchor on every pass ---
     let mut best = f64::INFINITY;

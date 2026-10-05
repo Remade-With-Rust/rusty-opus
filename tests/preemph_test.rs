@@ -38,14 +38,13 @@ fn test_preemphasis_roundtrip() {
         max_error = max_error.max(err);
     }
 
-    println!("Pre-emphasis roundtrip max error: {:.6e}", max_error);
+    println!("Pre-emphasis roundtrip max error: {max_error:.6e}");
     println!("Input[0..5]: {:?}", &input[0..5]);
     println!("Preemph[0..5]: {:?}", &preemphasized[0..5]);
     println!("Deemph[0..5]: {:?}", &deemphasized[0..5]);
 
     assert!(
         max_error < 1e-5,
-        "Pre-emphasis roundtrip error too large: {}",
-        max_error
+        "Pre-emphasis roundtrip error too large: {max_error}"
     );
 }

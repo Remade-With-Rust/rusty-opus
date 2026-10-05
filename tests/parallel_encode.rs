@@ -4,7 +4,7 @@
 //!
 //!   cargo test --release --test parallel_encode -- --ignored --nocapture
 
-use rusty_opus::parallel::{encode_parallel, encode_serial, encode_streams, ParallelConfig};
+use rusty_opus::parallel::{ParallelConfig, encode_parallel, encode_serial, encode_streams};
 use rusty_opus::{Application, OpusDecoder};
 
 struct Lcg(u64);
@@ -37,7 +37,10 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
         } else {
             rng.next_f32() * 0.4
         };
-        let (r, c1) = (0.95f32, (2.0 * std::f32::consts::PI * 700.0 / rate as f32).cos());
+        let (r, c1) = (
+            0.95f32,
+            (2.0 * std::f32::consts::PI * 700.0 / rate as f32).cos(),
+        );
         let ya = exc + 2.0 * r * c1 * y1a - r * r * y2a;
         y2a = y1a;
         y1a = ya;
@@ -51,7 +54,7 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
 }
 
 fn total_bytes(pkts: &[Vec<u8>]) -> usize {
-    pkts.iter().map(|p| p.len()).sum()
+    pkts.iter().map(std::vec::Vec::len).sum()
 }
 
 /// Decode a packet stream; returns total decoded samples (per channel).
@@ -77,7 +80,7 @@ fn per_stream_byte_identical() {
     let clips: Vec<Vec<f32>> = (0..7)
         .map(|k| {
             let mut v = synth_speech(rate, 3.0);
-            for x in v.iter_mut() {
+            for x in &mut v {
                 *x = (*x + 0.01 * k as f32).clamp(-0.98, 0.98);
             }
             v
@@ -92,7 +95,7 @@ fn per_stream_byte_identical() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "timing-sensitive; run explicitly"]
 fn parallel_correct_and_fast() {
     let secs = 30.0f32;
     let (rate, channels) = (16000u32, 1usize);
@@ -111,7 +114,10 @@ fn parallel_correct_and_fast() {
     let sdec = decode_all(rate as i32, channels, &serial, frame);
     let pdec = decode_all(rate as i32, channels, &par, frame);
     assert_eq!(sdec, pdec, "decoded sample counts differ");
-    assert!(pdec >= total_frames * frame - frame, "too few decoded samples");
+    assert!(
+        pdec >= total_frames * frame - frame,
+        "too few decoded samples"
+    );
 
     // Determinism: two parallel runs are identical.
     let par2 = encode_parallel(&cfg, &pcm, frame);
@@ -133,14 +139,24 @@ fn parallel_correct_and_fast() {
     };
     let st = bench(&|| encode_serial(&cfg, &pcm, frame));
     let pt = bench(&|| encode_parallel(&cfg, &pcm, frame));
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     println!("\n--- R1 parallel encode ({secs}s speech @24k, {threads} cores) ---");
-    println!("  serial   : {:>7.1} ms  ({:>6.0}x RT)", st * 1e3, secs as f64 / st);
-    println!("  parallel : {:>7.1} ms  ({:>6.0}x RT)  = {:.1}x speedup", pt * 1e3, secs as f64 / pt, st / pt);
+    println!(
+        "  serial   : {:>7.1} ms  ({:>6.0}x RT)",
+        st * 1e3,
+        secs as f64 / st
+    );
+    println!(
+        "  parallel : {:>7.1} ms  ({:>6.0}x RT)  = {:.1}x speedup",
+        pt * 1e3,
+        secs as f64 / pt,
+        st / pt
+    );
     println!(
         "  bytes: serial {} vs parallel {} ({:+.2}% VBR drift from chunk seams)",
         total_bytes(&serial),
         total_bytes(&par),
-        100.0 * (total_bytes(&par) as f64 - total_bytes(&serial) as f64) / total_bytes(&serial) as f64,
+        100.0 * (total_bytes(&par) as f64 - total_bytes(&serial) as f64)
+            / total_bytes(&serial) as f64,
     );
 }

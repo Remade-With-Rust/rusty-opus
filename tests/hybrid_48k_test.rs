@@ -52,8 +52,7 @@ fn test_48k_hybrid_quality() {
             (d, corr)
         })
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        .map(|(d, _)| d)
-        .unwrap_or(0);
+        .map_or(0, |(d, _)| d);
 
     let n = total_samples - skip - best_delay;
     let input_energy: f64 = input[skip..skip + n]
@@ -67,15 +66,11 @@ fn test_48k_hybrid_quality() {
         .sum();
 
     let snr = 10.0 * (input_energy / error_energy).log10();
-    println!(
-        "48kHz Hybrid mode SNR (delay-corrected, delay={} samples): {:.2} dB",
-        best_delay, snr
-    );
+    println!("48kHz Hybrid mode SNR (delay-corrected, delay={best_delay} samples): {snr:.2} dB");
 
     assert!(
         snr > 10.0,
-        "Hybrid mode SNR {:.2} dB is too low (expected >10 dB). \
-         SILK+CELT decode is producing distorted output.",
-        snr
+        "Hybrid mode SNR {snr:.2} dB is too low (expected >10 dB). \
+         SILK+CELT decode is producing distorted output."
     );
 }

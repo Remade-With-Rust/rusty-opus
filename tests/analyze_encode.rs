@@ -28,11 +28,12 @@ fn synth_stereo_music(rate: usize, secs: usize) -> Vec<f32> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs ANALYZE_PCM input; run explicitly"]
 fn analyze_encode() {
     let (rate, ch, br) = (48_000usize, 2usize, 128_000i32);
     // Load real content from ANALYZE_PCM (raw f32le interleaved stereo 48k) if set,
     // else fall back to synthetic music.
+    #[allow(clippy::option_if_let_else)] // reads clearer as a match
     let pcm: Vec<f32> = match std::env::var("ANALYZE_PCM") {
         Ok(p) => {
             let bytes = std::fs::read(&p).expect("read ANALYZE_PCM");

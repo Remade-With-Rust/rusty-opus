@@ -1,4 +1,4 @@
-use crate::range_coder::RangeCoder;
+use crate::range_coder::{RangeCoder, RcState};
 use crate::silk::control_fixed::*;
 use crate::silk::control_snr::silk_control_snr;
 use crate::silk::define::*;
@@ -136,7 +136,7 @@ pub fn silk_encode_frame(
 
     // Env read cached once (was per-frame — census 2026-08-07 hygiene batch).
     static FLP_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if ps_enc.use_flp || *FLP_ENV.get_or_init(|| std::env::var_os("SILK_FLP").is_some()) {
+    if ps_enc.use_flp || *FLP_ENV.get_or_init(|| crate::research_env("SILK_FLP").is_some()) {
         crate::silk::flp::silk_encode_frame_flp_analysis(ps_enc, &mut s_enc_ctrl, cond_coding);
         let _ = (&res_pitch, res_pitch_frame_idx, la_shape, &x_buf_copy);
     } else {
@@ -165,6 +165,8 @@ pub fn silk_encode_frame(
         silk_process_gains_fix(ps_enc, &mut s_enc_ctrl, cond_coding);
     }
 
+    silk_lbrr_encode(ps_enc, &mut s_enc_ctrl, x_frame_idx, cond_coding);
+
     let max_iter = 6;
     let mut gain_mult_q8: i32 = 256;
     let mut found_lower = false;
@@ -182,12 +184,14 @@ pub fn silk_encode_frame(
 
     let bits_margin = if use_cbr != 0 { 5 } else { max_bits / 4 };
 
-    let rc_copy = rc.clone();
+    // libopus silk_encode_frame copies `ec_enc` BY VALUE plus only the written
+    // bytes (ec_buf_copy); cloning the coder allocated + copied 1275 bytes.
+    let rc_copy = rc.save_state();
     let nsq_copy = ps_enc.s_nsq;
     let seed_copy = ps_enc.s_cmn.indices.seed;
     let ec_prev_lag_index_copy = ps_enc.s_cmn.ec_prev_lag_index;
     let ec_prev_signal_type_copy = ps_enc.s_cmn.ec_prev_signal_type;
-    let mut rc_copy2: Option<RangeCoder> = None;
+    let mut rc_copy2: Option<RcState> = None;
     let mut nsq_copy2: Option<SilkNSQState> = None;
     let mut ec_buf_copy = [0u8; 1275];
     let mut last_gain_index_copy2: i8 = 0;
@@ -203,7 +207,7 @@ pub fn silk_encode_frame(
             n_bits = n_bits_upper;
         } else {
             if iter > 0 {
-                *rc = rc_copy.clone();
+                rc.restore_state(rc_copy);
                 ps_enc.s_nsq = nsq_copy;
                 ps_enc.s_cmn.indices.seed = seed_copy;
                 ps_enc.s_cmn.ec_prev_lag_index = ec_prev_lag_index_copy;
@@ -255,7 +259,7 @@ pub fn silk_encode_frame(
             }
 
             if iter == max_iter && !found_lower {
-                rc_copy2 = Some(rc.clone());
+                rc_copy2 = Some(rc.save_state());
             }
 
             silk_encode_indices(
@@ -277,8 +281,8 @@ pub fn silk_encode_frame(
             n_bits = rc.tell();
 
             if iter == max_iter && !found_lower && n_bits > max_bits {
-                if let Some(rc_c2) = &rc_copy2 {
-                    *rc = rc_c2.clone();
+                if let Some(rc_c2) = rc_copy2 {
+                    rc.restore_state(rc_c2);
                 }
 
                 ps_enc.s_shape.last_gain_index = s_enc_ctrl.last_gain_index_prev;
@@ -318,8 +322,8 @@ pub fn silk_encode_frame(
 
         if iter == max_iter {
             if found_lower && (gains_id == gains_id_lower || n_bits > max_bits) {
-                if let Some(rc_c2) = &rc_copy2 {
-                    *rc = rc_c2.clone();
+                if let Some(rc_c2) = rc_copy2 {
+                    rc.restore_state(rc_c2);
                     let offs = rc.offs as usize;
                     rc.buf[..offs].copy_from_slice(&ec_buf_copy[..offs]);
                 }
@@ -350,7 +354,7 @@ pub fn silk_encode_frame(
             if gains_id != gains_id_lower {
                 gains_id_lower = gains_id;
 
-                rc_copy2 = Some(rc.clone());
+                rc_copy2 = Some(rc.save_state());
                 let offs = rc.offs as usize;
                 ec_buf_copy[..offs].copy_from_slice(&rc.buf[..offs]);
                 nsq_copy2 = Some(ps_enc.s_nsq);
@@ -414,15 +418,45 @@ pub fn silk_encode_frame(
             &mut ps_enc.s_cmn.indices.gains_indices,
             &mut s_enc_ctrl.gains_q16,
             &mut ps_enc.s_shape.last_gain_index,
-            if cond_coding == CODE_CONDITIONALLY {
-                1
-            } else {
-                0
-            },
+            i32::from(cond_coding == CODE_CONDITIONALLY),
             ps_enc.s_cmn.nb_subfr as usize,
         );
 
         gains_id = silk_gains_id(&ps_enc.s_cmn.indices.gains_indices, ps_enc.s_cmn.nb_subfr);
+    }
+
+    // The loop can exit still over budget (its last iteration may reuse a cached
+    // "upper" result, which skips the in-loop damage control). A frame that does
+    // not fit would overflow the range coder and corrupt the packet, so apply
+    // the same damage control from the frame's starting state: no pulses, gains
+    // held at the previous frame's. That always fits a SILK frame budget.
+    if rc.tell() > max_bits || rc.error != 0 {
+        rc.restore_state(rc_copy);
+        ps_enc.s_cmn.indices.seed = seed_copy;
+        ps_enc.s_shape.last_gain_index = s_enc_ctrl.last_gain_index_prev;
+        for i in 0..ps_enc.s_cmn.nb_subfr as usize {
+            ps_enc.s_cmn.indices.gains_indices[i] = 4;
+        }
+        if cond_coding != CODE_CONDITIONALLY {
+            ps_enc.s_cmn.indices.gains_indices[0] = s_enc_ctrl.last_gain_index_prev;
+        }
+        ps_enc.s_cmn.ec_prev_lag_index = ec_prev_lag_index_copy;
+        ps_enc.s_cmn.ec_prev_signal_type = ec_prev_signal_type_copy;
+        ps_enc.pulses.fill(0);
+        silk_encode_indices(
+            ps_enc,
+            rc,
+            ps_enc.s_cmn.n_frames_encoded as usize,
+            false,
+            cond_coding,
+        );
+        silk_encode_pulses(
+            rc,
+            ps_enc.s_cmn.indices.signal_type as i32,
+            ps_enc.s_cmn.indices.quant_offset_type as i32,
+            &ps_enc.pulses,
+            ps_enc.s_cmn.frame_length as usize,
+        );
     }
 
     let move_len = ltp_mem_length + 5 * ps_enc.s_cmn.fs_khz as usize;
@@ -433,16 +467,44 @@ pub fn silk_encode_frame(
 
     ps_enc.s_cmn.prev_lag = s_enc_ctrl.pitch_l[ps_enc.s_cmn.nb_subfr as usize - 1];
     static SILKD_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *SILKD_ENV.get_or_init(|| std::env::var_os("SILKD").is_some()) {
+    if *SILKD_ENV.get_or_init(|| crate::research_env("SILKD").is_some()) {
         let ix = &ps_enc.s_cmn.indices;
         let n = ix.nlsf_indices;
         eprintln!(
             "SILKD - st={} qo={} lag={} cont={} per={} ltps={} interp={} seed={} g={},{},{},{} ltp={},{},{},{} nlsf={},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{} lastgain={}",
-            ix.signal_type, ix.quant_offset_type, ix.lag_index, ix.contour_index,
-            ix.per_index, ix.ltp_scale_index, ix.nlsf_interp_coef_q2, ix.seed,
-            ix.gains_indices[0], ix.gains_indices[1], ix.gains_indices[2], ix.gains_indices[3],
-            ix.ltp_index[0], ix.ltp_index[1], ix.ltp_index[2], ix.ltp_index[3],
-            n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7], n[8], n[9], n[10], n[11], n[12], n[13], n[14], n[15], n[16],
+            ix.signal_type,
+            ix.quant_offset_type,
+            ix.lag_index,
+            ix.contour_index,
+            ix.per_index,
+            ix.ltp_scale_index,
+            ix.nlsf_interp_coef_q2,
+            ix.seed,
+            ix.gains_indices[0],
+            ix.gains_indices[1],
+            ix.gains_indices[2],
+            ix.gains_indices[3],
+            ix.ltp_index[0],
+            ix.ltp_index[1],
+            ix.ltp_index[2],
+            ix.ltp_index[3],
+            n[0],
+            n[1],
+            n[2],
+            n[3],
+            n[4],
+            n[5],
+            n[6],
+            n[7],
+            n[8],
+            n[9],
+            n[10],
+            n[11],
+            n[12],
+            n[13],
+            n[14],
+            n[15],
+            n[16],
             ps_enc.s_shape.last_gain_index
         );
     }
@@ -452,6 +514,98 @@ pub fn silk_encode_frame(
     *pn_bytes_out = (rc.tell() + 7) >> 3;
 
     0
+}
+
+/// libopus `silk_LBRR_encode`: the low-bitrate redundant (in-band FEC) copy of
+/// this frame, carried by the next packet. The frame is re-quantized by the same
+/// noise-shaping quantizer at a coarser gain (only the first gain index is
+/// raised, and only when it is coded independently), from a copy of the NSQ
+/// state, so the main encode is unaffected.
+fn silk_lbrr_encode(
+    ps_enc: &mut SilkEncoderState,
+    ctrl: &mut SilkEncoderControl,
+    x_frame_idx: usize,
+    cond_coding: i32,
+) {
+    // LBRR_SPEECH_ACTIVITY_THRES = 0.3, in Q8.
+    const SPEECH_ACTIVITY_THRES_Q8: i32 = 77;
+    let fi = ps_enc.s_cmn.n_frames_encoded as usize;
+    let enabled = ps_enc.s_cmn.use_in_band_fec != 0
+        && ps_enc.s_cmn.packet_loss_perc > 0
+        && ps_enc.s_cmn.lbrr_enabled != 0;
+    if !enabled
+        || fi >= MAX_FRAMES_PER_PACKET
+        || ps_enc.s_cmn.speech_activity_q8 <= SPEECH_ACTIVITY_THRES_Q8
+    {
+        return;
+    }
+    ps_enc.s_cmn.lbrr_flags[fi] = 1;
+
+    let mut nsq_lbrr = ps_enc.s_nsq;
+    let mut indices = ps_enc.s_cmn.indices;
+    let saved_gains = ctrl.gains_q16;
+
+    if fi == 0 || ps_enc.s_cmn.lbrr_flags[fi - 1] == 0 {
+        // First frame in the packet, or the previous frame has no LBRR copy.
+        ps_enc.s_cmn.lbrr_prev_last_gain_index = ps_enc.s_shape.last_gain_index;
+        indices.gains_indices[0] = (i32::from(indices.gains_indices[0])
+            + ps_enc.s_cmn.lbrr_gain_increases)
+            .min(N_LEVELS_QGAIN - 1) as i8;
+    }
+    // Quantized gains, in sync with what the decoder will reconstruct.
+    crate::silk::gain_quant::silk_gains_dequant(
+        &mut ctrl.gains_q16,
+        &indices.gains_indices,
+        &mut ps_enc.s_cmn.lbrr_prev_last_gain_index,
+        i32::from(cond_coding == CODE_CONDITIONALLY),
+        ps_enc.s_cmn.nb_subfr as usize,
+    );
+
+    let mut pred_coef_q12_flat = [0i16; 2 * MAX_LPC_ORDER];
+    pred_coef_q12_flat[..MAX_LPC_ORDER].copy_from_slice(&ctrl.pred_coef_q12[0]);
+    pred_coef_q12_flat[MAX_LPC_ORDER..].copy_from_slice(&ctrl.pred_coef_q12[1]);
+    let mut pulses = [0i8; MAX_FRAME_LENGTH];
+    if ps_enc.s_cmn.n_states_delayed_decision > 1 {
+        let winner_seed = silk_nsq_del_dec(
+            &ps_enc.s_cmn,
+            &mut nsq_lbrr,
+            &indices,
+            &ps_enc.s_cmn.x_buf[x_frame_idx..],
+            &mut pulses,
+            &pred_coef_q12_flat,
+            &ctrl.ltp_coef_q14,
+            &ctrl.ar_q13,
+            &ctrl.harm_shape_gain_q14,
+            &ctrl.tilt_q14,
+            &ctrl.lf_shp_q14,
+            &ctrl.gains_q16,
+            &ctrl.pitch_l,
+            ctrl.lambda_q10,
+            ctrl.ltp_scale_q14,
+        );
+        indices.seed = winner_seed as i8;
+    } else {
+        silk_nsq(
+            &ps_enc.s_cmn,
+            &mut nsq_lbrr,
+            &indices,
+            &ps_enc.s_cmn.x_buf[x_frame_idx..],
+            &mut pulses,
+            &pred_coef_q12_flat,
+            &ctrl.ltp_coef_q14,
+            &ctrl.ar_q13,
+            &ctrl.harm_shape_gain_q14,
+            &ctrl.tilt_q14,
+            &ctrl.lf_shp_q14,
+            &ctrl.gains_q16,
+            &ctrl.pitch_l,
+            ctrl.lambda_q10,
+            ctrl.ltp_scale_q14,
+        );
+    }
+    ps_enc.s_cmn.indices_lbrr[fi] = indices;
+    ps_enc.s_cmn.pulses_lbrr[fi] = pulses;
+    ctrl.gains_q16 = saved_gains;
 }
 
 pub fn silk_encode(
@@ -472,39 +626,47 @@ pub fn silk_encode(
     ps_enc.s_cmn.n_frames_encoded = 0;
 
     let n_blocks_of_10ms = (100 * n_samples_in as i32) / (ps_enc.s_cmn.fs_khz * 1000);
-    let _tot_blocks = if n_blocks_of_10ms > 1 {
+    let tot_blocks = if n_blocks_of_10ms > 1 {
         n_blocks_of_10ms >> 1
     } else {
         1
     };
-
-    let n_bits_total = target_rate_bps * packet_size_ms / 1000;
-    let n_bits_per_frame = n_bits_total / n_frames_per_packet;
-    let frame_rate_bps = if packet_size_ms == 10 {
-        n_bits_per_frame * 100
-    } else {
-        n_bits_per_frame * 50
+    // silk_Encode: a multi-frame packet's earlier frames may only use a share of
+    // the packet budget (bits are counted from the packet start).
+    let frame_max_bits_for = |frame_idx: i32| match (tot_blocks, frame_idx) {
+        (2, 0) => max_bits * 3 / 5,
+        (3, 0) => max_bits * 2 / 5,
+        (3, 1) => max_bits * 3 / 4,
+        _ => max_bits,
     };
 
-    let lbrr_possible = ps_enc.s_cmn.use_in_band_fec != 0
-        && ps_enc.s_cmn.packet_loss_perc > 0
-        && ps_enc.s_cmn.lbrr_enabled != 0;
+    let n_bits_total = target_rate_bps * packet_size_ms / 1000;
+    // Per-frame target rate, after the LBRR section's share (set once it is written).
+    let frame_rate_for = |lbrr_bits: i32| {
+        let n_bits_per_frame = (n_bits_total - lbrr_bits) / n_frames_per_packet;
+        let rate = if packet_size_ms == 10 {
+            n_bits_per_frame * 100
+        } else {
+            n_bits_per_frame * 50
+        };
+        // silk_Encode: never exceed the input bitrate.
+        rate.clamp(5000.min(target_rate_bps), target_rate_bps.max(5000))
+    };
+    let mut frame_rate_bps = frame_rate_for(ps_enc.n_bits_used_lbrr);
 
+    // silk_Encode: the LBRR data written at the start of this packet is the
+    // previous packet's, flagged per frame by `silk_lbrr_encode`. The flags are
+    // then reset so this packet's frames record their own.
+    let prev_lbrr_flags = ps_enc.s_cmn.lbrr_flags;
+    ps_enc.s_cmn.lbrr_flags = [0; MAX_FRAMES_PER_PACKET];
     let mut lbrr_symbol: i32 = 0;
-    if lbrr_possible {
-        for i in 0..n_frames_per_packet as usize {
-            if ps_enc.s_cmn.indices_lbrr[i].signal_type >= TYPE_UNVOICED as i8 {
-                lbrr_symbol |= 1 << i;
-            }
-        }
+    for (i, &f) in prev_lbrr_flags[..n_frames_per_packet as usize]
+        .iter()
+        .enumerate()
+    {
+        lbrr_symbol |= f << i;
     }
-    let use_lbrr = lbrr_symbol > 0;
-
-    ps_enc.s_cmn.lbrr_flag = if lbrr_symbol > 0 { 1 } else { 0 };
-
-    for i in 0..n_frames_per_packet as usize {
-        ps_enc.s_cmn.lbrr_flags[i] = (lbrr_symbol >> i) & 1;
-    }
+    ps_enc.s_cmn.lbrr_flag = i8::from(lbrr_symbol > 0);
 
     let mut sample_offset = 0usize;
 
@@ -573,6 +735,12 @@ pub fn silk_encode(
             let icdf_val = (256i32 - (256i32 >> n_flag_bits)) as u8;
             let icdf = [icdf_val, 0u8];
             rc.encode_icdf(0, &icdf, 8);
+            let lbrr_start = rc.tell();
+            let pre_lbrr = (
+                rc.save_state(),
+                ps_enc.s_cmn.ec_prev_lag_index,
+                ps_enc.s_cmn.ec_prev_signal_type,
+            );
 
             if lbrr_symbol > 0 {
                 let lbrr_icdf = match n_frames_per_packet {
@@ -585,11 +753,21 @@ pub fn silk_encode(
                 }
 
                 for i in 0..n_frames_per_packet as usize {
-                    if ps_enc.s_cmn.lbrr_flags[i] != 0 {
-                        let lbrr_cond = if i > 0 && ps_enc.s_cmn.lbrr_flags[i - 1] != 0 {
+                    if prev_lbrr_flags[i] != 0 {
+                        // Stereo: the mid channel's LBRR frame is preceded by the
+                        // stereo prediction and, as the side channel carries no
+                        // LBRR here, the mid-only flag (silk_Encode); the decoder
+                        // reads both.
+                        if ps_enc.s_cmn.n_channels == 2 {
+                            silk_encode_stereo(rc, 0, 0, 1);
+                        }
+                        // CODE_INDEPENDENTLY, as libopus codes and decodes it: a
+                        // voiced frame carries its LTP scaling index. (Omitting it
+                        // desynced every decoder from the first voiced LBRR frame.)
+                        let lbrr_cond = if i > 0 && prev_lbrr_flags[i - 1] != 0 {
                             CODE_CONDITIONALLY
                         } else {
-                            CODE_INDEPENDENTLY_NO_LTP_SCALING
+                            CODE_INDEPENDENTLY
                         };
                         silk_encode_indices(ps_enc, rc, i, true, lbrr_cond);
                         silk_encode_pulses(
@@ -603,9 +781,43 @@ pub fn silk_encode(
                 }
             }
 
-            if ps_enc.s_cmn.n_channels == 2 {
-                silk_encode_stereo(rc, 0, 0, 1);
+            // A fixed-size packet must still hold its frames after the LBRR
+            // section: reserve the cost of a zero-pulse frame (the rate loop's
+            // fallback, at most ~105 bits measured) and, if the redundancy does
+            // not leave that much of frame 0's budget, send this packet without
+            // it rather than overflow the range coder.
+            let reserve = if ps_enc.s_cmn.frame_length / ps_enc.s_cmn.fs_khz == 10 {
+                120
+            } else {
+                170
+            } * ps_enc.s_cmn.n_channels;
+            if lbrr_symbol > 0 && rc.tell() > frame_max_bits_for(0) - reserve {
+                rc.restore_state(pre_lbrr.0);
+                ps_enc.s_cmn.ec_prev_lag_index = pre_lbrr.1;
+                ps_enc.s_cmn.ec_prev_signal_type = pre_lbrr.2;
+                ps_enc.s_cmn.lbrr_flag = 0;
             }
+
+            // silk_Encode: nBitsUsedLBRR is a moving average of the LBRR usage,
+            // except that the first LBRR packet takes it as is and the first
+            // packet without LBRR drops it to zero at once.
+            let curr = rc.tell() - lbrr_start;
+            ps_enc.n_bits_used_lbrr = if curr < 10 {
+                0
+            } else if ps_enc.n_bits_used_lbrr < 10 {
+                curr
+            } else {
+                (ps_enc.n_bits_used_lbrr + curr) / 2
+            };
+            frame_rate_bps = frame_rate_for(ps_enc.n_bits_used_lbrr);
+        }
+
+        // Stereo prediction + mid-only flag precede EVERY internal frame
+        // (silk_Encode: per frame, before the mid channel's indices), and the
+        // decoder reads them per frame. Coding them only before frame 0
+        // desynced every 40/60 ms stereo packet from its second 20 ms frame.
+        if ps_enc.s_cmn.n_channels == 2 {
+            silk_encode_stereo(rc, 0, 0, 1);
         }
 
         silk_control_snr(&mut ps_enc.s_cmn, frame_rate_bps);
@@ -623,11 +835,7 @@ pub fn silk_encode(
             CODE_CONDITIONALLY
         };
 
-        let frame_max_bits = if _tot_blocks == 2 && frame_idx == 0 {
-            max_bits * 3 / 5
-        } else {
-            max_bits
-        };
+        let frame_max_bits = frame_max_bits_for(frame_idx);
 
         let mut frame_bytes = 0i32;
         let ret = silk_encode_frame(
@@ -637,31 +845,10 @@ pub fn silk_encode(
             &mut frame_bytes,
             cond_coding,
             frame_max_bits,
-            if use_cbr != 0 && frame_idx == n_frames_per_packet - 1 {
-                1
-            } else {
-                0
-            },
+            i32::from(use_cbr != 0 && frame_idx == n_frames_per_packet - 1),
         );
         if ret != 0 {
             return ret;
-        }
-
-        if use_lbrr || ps_enc.s_cmn.use_in_band_fec != 0 {
-            let fi = frame_idx as usize;
-            if fi < MAX_FRAMES_PER_PACKET {
-                ps_enc.s_cmn.indices_lbrr[fi] = ps_enc.s_cmn.indices;
-
-                let gain_inc = ps_enc.s_cmn.lbrr_gain_increases.clamp(0, 16) as i8;
-                for g in 0..ps_enc.s_cmn.nb_subfr as usize {
-                    let new_gain = (ps_enc.s_cmn.indices_lbrr[fi].gains_indices[g] as i32
-                        + gain_inc as i32)
-                        .min(63) as i8;
-                    ps_enc.s_cmn.indices_lbrr[fi].gains_indices[g] = new_gain;
-                }
-
-                ps_enc.s_cmn.pulses_lbrr[fi] = ps_enc.pulses;
-            }
         }
 
         ps_enc.s_cmn.n_frames_encoded += 1;

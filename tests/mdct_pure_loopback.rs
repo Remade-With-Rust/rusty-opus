@@ -94,15 +94,10 @@ fn test_mdct_pure_loopback() {
         }
     }
 
-    println!(
-        "Pure MDCT Loopback Best SNR: {:.2} dB at delay {}",
-        best_snr, best_delay
-    );
+    println!("Pure MDCT Loopback Best SNR: {best_snr:.2} dB at delay {best_delay}");
     // TODO: Current implementation has quality issues
     assert!(
         best_snr > 0.0,
-        "SNR too low: {:.2} dB at delay {}",
-        best_snr,
-        best_delay
+        "SNR too low: {best_snr:.2} dB at delay {best_delay}"
     );
 }

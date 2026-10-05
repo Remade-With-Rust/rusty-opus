@@ -75,5 +75,5 @@ fn test_mdct_roundtrip() {
             best_offset = offset;
         }
     }
-    println!("Best Offset: {}, SNR: {:.2} dB", best_offset, best_snr);
+    println!("Best Offset: {best_offset}, SNR: {best_snr:.2} dB");
 }

@@ -9,7 +9,7 @@ mod hex {
     pub fn encode(data: &[u8]) -> String {
         let mut s = String::with_capacity(data.len() * 2);
         for &b in data {
-            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{:02x}", b));
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
         }
         s
     }
@@ -65,9 +65,9 @@ fn test_decode_c_encoded_silk_8khz() {
     let toc = C_ENCODED_8KHZ_20MS[0];
     let (sample_rate_hz, _config, frame_count_code) = parse_toc(toc);
 
-    println!("TOC: 0x{:02x}", toc);
-    println!("Sample rate: {} Hz", sample_rate_hz);
-    println!("Frame count code: {}", frame_count_code);
+    println!("TOC: 0x{toc:02x}");
+    println!("Sample rate: {sample_rate_hz} Hz");
+    println!("Frame count code: {frame_count_code}");
 
     assert_eq!(sample_rate_hz, 8000, "Expected 8kHz sample rate");
 
@@ -78,7 +78,7 @@ fn test_decode_c_encoded_silk_8khz() {
 
     // Get frame length
     let frame_length = decoder.frame_length();
-    println!("Decoder frame length: {}", frame_length);
+    println!("Decoder frame length: {frame_length}");
     assert_eq!(frame_length, 160, "Expected 160 samples frame length");
 
     // The SILK payload starts after TOC byte
@@ -100,7 +100,7 @@ fn test_decode_c_encoded_silk_8khz() {
         8000,
     );
 
-    println!("Decoded {} samples", n_samples);
+    println!("Decoded {n_samples} samples");
     println!();
 
     // Print comparison
@@ -122,8 +122,8 @@ fn test_decode_c_encoded_silk_8khz() {
         .sum();
     let c_rms = ((c_sum_sq as f64) / (C_DECODED_OUTPUT.len() as f64)).sqrt();
 
-    println!("Rust RMS energy: {:.2}", rust_rms);
-    println!("C reference RMS: {:.2}", c_rms);
+    println!("Rust RMS energy: {rust_rms:.2}");
+    println!("C reference RMS: {c_rms:.2}");
     println!("RMS ratio: {:.4}", rust_rms / c_rms);
     println!();
 
@@ -141,14 +141,14 @@ fn test_decode_c_encoded_silk_8khz() {
     } else {
         0.0
     };
-    println!("Correlation: {:.4}", correlation);
+    println!("Correlation: {correlation:.4}");
 
     // Check for non-zero output
     let non_zero_count = output[..n_samples as usize]
         .iter()
         .filter(|&&x| x != 0)
         .count();
-    println!("Non-zero samples: {} / {}", non_zero_count, n_samples);
+    println!("Non-zero samples: {non_zero_count} / {n_samples}");
 
     // Basic sanity check
     assert!(non_zero_count > 0, "Output is all zeros");
@@ -171,7 +171,7 @@ fn test_decode_synth_16khz() {
     // Actually, for 20ms frames: config maps to frame durations
     // config 0 = 10ms, 1 = 20ms, 2 = 40ms, 3 = 60ms (for SILK)
     let toc: u8 = 0b1000_1000; // WB, 20ms frame, mono, 1 frame
-    println!("TOC for 16kHz 20ms: 0x{:02x}", toc);
+    println!("TOC for 16kHz 20ms: 0x{toc:02x}");
 
     // We need actual encoded data to decode, which we don't have
     // So this test just verifies decoder initialization works
@@ -244,10 +244,10 @@ fn test_resampler_8khz_to_48khz() {
     let ratio = out_energy as f64 / in_energy as f64;
 
     println!("8kHz→48kHz resampler:");
-    println!("  Input energy: {}", in_energy);
-    println!("  Output energy: {}", out_energy);
-    println!("  Energy ratio (should be ~6): {:.2}", ratio);
-    println!("  Non-zero samples: {}/480", nonzero);
+    println!("  Input energy: {in_energy}");
+    println!("  Output energy: {out_energy}");
+    println!("  Energy ratio (should be ~6): {ratio:.2}");
+    println!("  Non-zero samples: {nonzero}/480");
 
     // Energy should be in reasonable range (not zero, not wildly wrong)
     assert!(out_energy > 0, "Output energy must be non-zero");
@@ -282,9 +282,9 @@ fn test_resampler_12khz_to_24khz() {
     let out_energy: i64 = output.iter().map(|&x| (x as i64) * (x as i64)).sum();
 
     println!("12kHz→24kHz resampler (Up2HQ):");
-    println!("  Input energy: {}", in_energy);
-    println!("  Output energy: {}", out_energy);
-    println!("  Non-zero samples: {}/240", nonzero);
+    println!("  Input energy: {in_energy}");
+    println!("  Output energy: {out_energy}");
+    println!("  Non-zero samples: {nonzero}/240");
 
     assert!(out_energy > 0, "Output energy must be non-zero");
 }
@@ -316,8 +316,8 @@ fn test_resampler_16khz_to_48khz() {
 
     let out_energy: i64 = output.iter().map(|&x| (x as i64) * (x as i64)).sum();
     println!("16kHz→48kHz resampler:");
-    println!("  Output energy: {}", out_energy);
-    println!("  Non-zero samples: {}/480", nonzero);
+    println!("  Output energy: {out_energy}");
+    println!("  Non-zero samples: {nonzero}/480");
 
     assert!(out_energy > 0, "Output energy must be non-zero");
 }
@@ -366,7 +366,7 @@ fn test_resampler_delay_buffer_continuity() {
 
         let mut output = vec![0i16; frame_size_out];
         let ret = resampler.process(&mut output, &input, frame_size_in as i32);
-        assert_eq!(ret, 0, "Frame {} process should succeed", frame_idx);
+        assert_eq!(ret, 0, "Frame {frame_idx} process should succeed");
 
         let energy: i64 = output.iter().map(|&x| (x as i64) * (x as i64)).sum();
         energies.push(energy);
@@ -374,22 +374,19 @@ fn test_resampler_delay_buffer_continuity() {
         // Check for discontinuities between frames (last sample of prev vs first of current)
         if frame_idx > 0 {
             let jump = (output[0] as i32 - prev_output_end as i32).abs();
-            println!(
-                "Frame {}: energy={}, jump from previous frame={}",
-                frame_idx, energy, jump
-            );
+            println!("Frame {frame_idx}: energy={energy}, jump from previous frame={jump}");
         } else {
-            println!("Frame {}: energy={}", frame_idx, energy);
+            println!("Frame {frame_idx}: energy={energy}");
         }
         prev_output_end = output[frame_size_out - 1];
     }
 
     // All frames (after the first warm-up) should have non-zero energy
     for (i, &e) in energies.iter().enumerate().skip(1) {
-        assert!(e > 0, "Frame {} should have non-zero energy, got {}", i, e);
+        assert!(e > 0, "Frame {i} should have non-zero energy, got {e}");
     }
 
-    println!("✅ Delay buffer continuity test passed: {:?}", energies);
+    println!("✅ Delay buffer continuity test passed: {energies:?}");
 }
 
 /// Test SilkResampler: 8kHz → 16kHz (IirFir mode)
@@ -413,8 +410,8 @@ fn test_resampler_8khz_to_16khz() {
     let out_energy: i64 = output.iter().map(|&x| (x as i64) * (x as i64)).sum();
 
     println!("8kHz→16kHz resampler:");
-    println!("  Output energy: {}", out_energy);
-    println!("  Non-zero samples: {}/160", nonzero);
+    println!("  Output energy: {out_energy}");
+    println!("  Non-zero samples: {nonzero}/160");
 
     assert!(
         nonzero > 0,

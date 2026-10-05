@@ -162,39 +162,38 @@ pub fn silk_pitch_analysis_core(
     silk_sum_sqr_shift(&mut energy, &mut shift, frame_unscaled, frame_length);
     shift += 3 - silk_clz32(energy);
 
-    let frame: &[i16];
-    if shift > 0 {
+    let frame: &[i16] = if shift > 0 {
         let s = (shift + 1) >> 1;
         for i in 0..frame_length {
             frame_scaled_buf[i] = frame_unscaled[i] >> s;
         }
-        frame = &frame_scaled_buf[..frame_length];
+        &frame_scaled_buf[..frame_length]
     } else {
-        frame = &frame_unscaled[..frame_length];
-    }
+        &frame_unscaled[..frame_length]
+    };
 
-    let frame_8khz: &[i16];
-    if fs_khz == 16 {
+    let frame_8khz: &[i16] = if fs_khz == 16 {
         filt_state[0..2].fill(0);
-        let output = unsafe {
-            std::slice::from_raw_parts_mut(frame_8khz_buf.as_mut_ptr(), frame_length_8khz)
-        };
+        // Checked slice (was from_raw_parts_mut: same memory, but the length
+        // bound nb_subfr <= PE_MAX_NB_SUBFR was unchecked).
+        let output = &mut frame_8khz_buf[..frame_length_8khz];
         silk_resampler_down2(&mut filt_state[..2], output, frame, frame_length as i32);
-        frame_8khz = output;
+        output
     } else if fs_khz == 12 {
         filt_state[0..6].fill(0);
-        let output = unsafe {
-            std::slice::from_raw_parts_mut(frame_8khz_buf.as_mut_ptr(), frame_length_8khz)
-        };
+        // Checked slice (was from_raw_parts_mut: same memory, but the length
+        // bound nb_subfr <= PE_MAX_NB_SUBFR was unchecked).
+        let output = &mut frame_8khz_buf[..frame_length_8khz];
         silk_resampler_down2_3(&mut filt_state[..6], output, frame, frame_length as i32);
-        frame_8khz = output;
+        output
     } else {
-        frame_8khz = frame;
-    }
+        frame
+    };
 
     filt_state[0..2].fill(0);
-    let frame_4khz_sub =
-        unsafe { std::slice::from_raw_parts_mut(frame_4khz.as_mut_ptr(), frame_length_4khz) };
+    // Checked slice (was from_raw_parts_mut: same memory, but the length
+    // bound nb_subfr <= PE_MAX_NB_SUBFR was unchecked).
+    let frame_4khz_sub = &mut frame_4khz[..frame_length_4khz];
     silk_resampler_down2(
         &mut filt_state[..2],
         frame_4khz_sub,

@@ -23,13 +23,13 @@ $C = Join-Path $ROOT "fixtures\gate_corpus"
 $OUT = Join-Path $ROOT "target\p2_speedpair.csv"
 
 Write-Host "building both arms of the instrument..."
-& cargo build --release --example gate_arm_cost --manifest-path (Join-Path $ROOT "Cargo.toml") 2>&1 | Select-String -Pattern 'error|Finished'
+& cargo build --release --features research --example gate_arm_cost --manifest-path (Join-Path $ROOT "Cargo.toml") 2>&1 | Select-String -Pattern 'error|Finished'
 $PLAIN = Join-Path $ROOT "target\release\examples\gate_arm_cost.exe"
 $plainStamp = (Get-Item $PLAIN).LastWriteTimeUtc
 # The profiled build goes to its own target dir so it cannot clobber the plain
 # exe (and so neither rebuild invalidates the other every invocation).
 $PROFDIR = Join-Path $ROOT "target\profbuild"
-& cargo build --release --features profile --example gate_arm_cost `
+& cargo build --release --features profile,research --example gate_arm_cost `
     --manifest-path (Join-Path $ROOT "Cargo.toml") --target-dir $PROFDIR 2>&1 |
     Select-String -Pattern 'error|Finished'
 $PROF = Join-Path $PROFDIR "release\examples\gate_arm_cost.exe"

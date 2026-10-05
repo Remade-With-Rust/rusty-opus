@@ -31,8 +31,8 @@ fn test_celt_silence() {
     decoder.decode(&silence_packet, frame_size, &mut output);
 
     let energy: f32 = output.iter().map(|&x| x * x).sum();
-    println!("Decoded silence energy: {}", energy);
+    println!("Decoded silence energy: {energy}");
 
     // Should be very close to zero
-    assert!(energy < 1.0, "Silence energy too high: {}", energy);
+    assert!(energy < 1.0, "Silence energy too high: {energy}");
 }

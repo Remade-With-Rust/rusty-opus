@@ -1,0 +1,285 @@
+
+# cargo-vet audits file
+
+[[audits.bitflags]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "2.13.0"
+notes = "safe-to-run side-effect review, 2026-10-04: macro + flag types only; no fs/net/process/env-mutation, no build.rs. Dev-only (proptest)."
+
+[[audits.cc]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "1.2.66"
+notes = "safe-to-run side-effect review, 2026-10-04: build-time C compiler driver; spawns the configured C compiler and writes objects into OUT_DIR, which is its documented purpose; no network. Dev-only (rusty_alloc -> alloca)."
+
+[[audits.criterion]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "0.8.2"
+notes = "safe-to-run side-effect review, 2026-10-04: TcpStream only to localhost on a cargo-criterion-provided port; fs writes confined to the target/criterion output dir; one process spawn = `cargo metadata` to locate the target dir; no env mutation, no build.rs. Dev-only (benches)."
+
+[[audits.find-msvc-tools]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "0.1.9"
+notes = "safe-to-run side-effect review, 2026-10-04: locates MSVC tools (registry/vswhere lookups, spawns vswhere); no network, no fs writes. Dev-only (cc)."
+
+[[audits.half]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "2.7.1"
+notes = "safe-to-run side-effect review, 2026-10-04: pure f16/bf16 numeric types; no fs/net/process/env-mutation, no build.rs. Dev-only (criterion -> ciborium)."
+
+[[audits.proptest]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "1.11.0"
+notes = "safe-to-run side-effect review, 2026-10-04: std::net only in Arbitrary value generators (no I/O); fs writes are failure-persistence/replay files next to the test sources; no process spawn, no build.rs. Built with default-features off (no fork/timeout). Dev-only (property tests)."
+
+[[audits.r-efi]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "5.3.0"
+notes = "safe-to-run side-effect review, 2026-10-04: UEFI type/ABI definitions only; no fs/net/process/env-mutation, no build.rs. Only compiled for UEFI targets (getrandom)."
+
+[[audits.winapi-i686-pc-windows-gnu]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "0.4.0"
+notes = "safe-to-run side-effect review, 2026-10-04: build.rs (18 lines) only emits a rustc-link-search path to bundled import libraries; empty lib. Dev-only."
+
+[[audits.winapi-x86_64-pc-windows-gnu]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "0.4.0"
+notes = "safe-to-run side-effect review, 2026-10-04: build.rs (18 lines) only emits a rustc-link-search path to bundled import libraries; empty lib. Dev-only."
+
+[[audits.zerocopy]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "0.8.53"
+notes = "safe-to-run side-effect review, 2026-10-04: build.rs reads its own Cargo.toml and runs `rustc --version` for version detection; no network, no fs writes outside the build; no env mutation. Dev-only (half, ppv-lite86)."
+
+[[audits.zerocopy-derive]]
+who = "Tim Almond (AI-assisted review by Claude)"
+criteria = "safe-to-run"
+version = "0.8.53"
+notes = "safe-to-run side-effect review, 2026-10-04: proc-macro; the only fs write is in its own cfg(test) output_tests module; no network, no process spawn. Dev-only (zerocopy)."
+
+[[trusted.anstyle]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-05-18"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.autocfg]]
+criteria = "safe-to-deploy"
+user-id = 539 # Josh Stone (cuviper)
+start = "2019-05-22"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.cc]]
+criteria = "safe-to-deploy"
+user-id = 55123 # rust-lang-owner
+start = "2022-10-29"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.clap]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2021-12-08"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.clap_builder]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2023-03-28"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.clap_lex]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-04-15"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.itoa]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-05-02"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.libc]]
+criteria = "safe-to-deploy"
+user-id = 55123 # rust-lang-owner
+start = "2024-08-15"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.linux-raw-sys]]
+criteria = "safe-to-deploy"
+user-id = 6825
+start = "2021-06-12"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.memchr]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-07-07"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.quote]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-04-09"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.regex]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-02-27"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.regex-syntax]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-03-30"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.rustix]]
+criteria = "safe-to-deploy"
+user-id = 6825
+start = "2021-10-29"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.rusty-opus]]
+criteria = "safe-to-deploy"
+user-id = 427321 # farmer_timmm (Ttimmahlax)
+start = "2026-07-29"
+end = "2027-10-04"
+notes = "First-party: the rusty-opus maintainer (Remade-With-Rust) publishes these crates."
+
+[[trusted.rusty_alloc]]
+criteria = "safe-to-deploy"
+user-id = 427321 # farmer_timmm (Ttimmahlax)
+start = "2026-08-06"
+end = "2027-10-04"
+notes = "First-party: the rusty-opus maintainer (Remade-With-Rust) publishes these crates."
+
+[[trusted.rusty_alloc-api]]
+criteria = "safe-to-deploy"
+user-id = 427321 # farmer_timmm (Ttimmahlax)
+start = "2026-08-06"
+end = "2027-10-04"
+notes = "First-party: the rusty-opus maintainer (Remade-With-Rust) publishes these crates."
+
+[[trusted.serde_json]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-02-28"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.syn]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-03-01"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.unicode-ident]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2021-10-02"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.walkdir]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-06-09"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows-sys]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows-targets]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-09"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_aarch64_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-01"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_aarch64_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-05"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_i686_gnu]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-28"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_i686_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-04-02"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_i686_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-27"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_x86_64_gnu]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-28"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_x86_64_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-01"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."
+
+[[trusted.windows_x86_64_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-27"
+end = "2027-10-04"
+notes = "Publisher trusted by mozilla, isrg and bytecode-alliance imported audit sets."

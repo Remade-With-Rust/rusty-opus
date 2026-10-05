@@ -45,7 +45,7 @@ fn test_pvq_match() {
         buffer.extend_from_slice(&rc.buf[start_idx..]);
     }
 
-    println!("Final buffer: {:?}", buffer);
+    println!("Final buffer: {buffer:?}");
     // ...
 
     // Expected quantized X from C:
@@ -54,13 +54,12 @@ fn test_pvq_match() {
         0.000000, 0.235702, 0.471405, 0.471405, 0.471405, 0.471405, 0.000000, -0.235702,
     ];
 
-    println!("Quantized X: {:?}", x_quant);
+    println!("Quantized X: {x_quant:?}");
 
     for i in 0..n {
         assert!(
             (x_quant[i] - expected_x[i]).abs() < 1e-4,
-            "Quantized value mismatch at index {}",
-            i
+            "Quantized value mismatch at index {i}"
         );
     }
 
@@ -69,13 +68,12 @@ fn test_pvq_match() {
     let mut x_unquant = vec![0.0f32; n];
     alg_unquant(&mut x_unquant, n, k, spread, 1, &mut rc_dec, 1.0);
 
-    println!("Unquantized X: {:?}", x_unquant);
+    println!("Unquantized X: {x_unquant:?}");
 
     for i in 0..n {
         assert!(
             (x_unquant[i] - expected_x[i]).abs() < 1e-4,
-            "Unquantized value mismatch at index {}",
-            i
+            "Unquantized value mismatch at index {i}"
         );
     }
 }
@@ -130,13 +128,12 @@ fn test_pvq_complex_match() {
     let mut x_unquant = vec![0.0f32; n];
     alg_unquant(&mut x_unquant, n, k, spread, 1, &mut rc_dec, 1.0);
 
-    println!("Unquantized X: {:?}", x_unquant);
+    println!("Unquantized X: {x_unquant:?}");
     // x_quant was normalized at the end of alg_quant.
     for i in 0..n {
         assert!(
             (x_unquant[i] - x_quant[i]).abs() < 1e-5,
-            "Unquant mismatch at index {}",
-            i
+            "Unquant mismatch at index {i}"
         );
     }
 }

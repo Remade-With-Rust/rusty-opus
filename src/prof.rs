@@ -76,9 +76,9 @@ pub const INFO_FIRST: usize = Stage::SilkNsqLpc as usize;
 
 #[cfg(feature = "profile")]
 mod imp {
-    use super::{Stage, N};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use super::{N, Stage};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
     /// Index of the first non-`Total` stage — the residue sum runs `0..SUB`.
@@ -178,11 +178,7 @@ mod imp {
             .map(|(t0, c0)| {
                 let wall = t0.elapsed().as_nanos() as f64;
                 let cyc = ticks().wrapping_sub(c0) as f64;
-                if cyc > 0.0 {
-                    wall / cyc
-                } else {
-                    1.0
-                }
+                if cyc > 0.0 { wall / cyc } else { 1.0 }
             })
             .unwrap_or(1.0);
         let mut out = [(0.0f64, 0u64); N];
@@ -228,7 +224,7 @@ mod imp {
 
 #[cfg(not(feature = "profile"))]
 mod imp {
-    use super::{Stage, N};
+    use super::{N, Stage};
 
     /// No-op guard (ZST) — elided in release.
     pub struct Guard;
@@ -251,4 +247,4 @@ mod imp {
     }
 }
 
-pub use imp::{dump, name, reset, scope, snapshot, Guard};
+pub use imp::{Guard, dump, name, reset, scope, snapshot};

@@ -34,7 +34,9 @@ fn main() {
             let off = (pos + i) * 2;
             *v = i16::from_le_bytes([data[off], data[off + 1]]) as f32 / 32768.0;
         }
-        let info = run_analysis(&mut st, &kfft, &pcm, frame_size, frame_size, channels, rate, 16);
+        let info = run_analysis(
+            &mut st, &kfft, &pcm, frame_size, frame_size, channels, rate, 16,
+        );
         println!(
             "DANA {} v={} ton={:.6} slope={:.6} noise={:.6} act={:.6} mp={:.6} mpmin={:.6} mpmax={:.6} bw={} actp={:.6} mpr={:.6} lb0={} lb5={} lb10={}",
             n,

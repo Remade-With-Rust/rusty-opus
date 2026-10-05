@@ -33,15 +33,14 @@ fn test_mdct_pulse_180() {
         }
     }
 
-    println!("Max reconstructed value: {} at index {}", max_val, max_idx);
+    println!("Max reconstructed value: {max_val} at index {max_idx}");
     // With overlap=N/2, the entire output is in the overlap region.
     // Single-frame MDCT forward+backward gives a windowed (attenuated) version.
     // Perfect reconstruction requires 2 frames for TDAC cancellation.
     // Check that amplitude is reasonable (position may shift due to overlap handling)
     assert!(
         max_val > 0.1,
-        "Pulse should be reasonably strong, got {}",
-        max_val
+        "Pulse should be reasonably strong, got {max_val}"
     );
 }
 
@@ -77,5 +76,5 @@ fn test_mdct_pulse_300() {
         }
     }
 
-    println!("Max reconstructed value: {} at index {}", max_val, max_idx);
+    println!("Max reconstructed value: {max_val} at index {max_idx}");
 }

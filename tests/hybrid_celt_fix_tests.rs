@@ -27,10 +27,7 @@ fn test_range_coder_payload_extraction() {
     let back_len = rc.end_offs as usize;
     let combined_len = front_len + back_len;
 
-    println!(
-        "RangeCoder: front={}, back={}, combined={}",
-        front_len, back_len, combined_len
-    );
+    println!("RangeCoder: front={front_len}, back={back_len}, combined={combined_len}");
     assert!(combined_len > 0, "Payload should not be empty");
     assert!(front_len > 0, "Front part should have data");
     // Note: back_len might be 0 for very small payloads
@@ -69,7 +66,7 @@ fn test_celt_decode_from_range_coder() {
 
     // Check that output is not all zeros
     let max_val = output.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-    println!("CELT decode_from_range_coder max output: {:.6}", max_val);
+    println!("CELT decode_from_range_coder max output: {max_val:.6}");
     // Note: Due to MDCT overlap, first frame output is small
 }
 
@@ -100,17 +97,12 @@ fn test_celt_only_bit_budget() {
     // 32000 bps * 0.020 s = 640 bits = 80 bytes + 1 TOC byte
     let expected_bytes =
         ((bitrate as i64 * frame_size as i64 / sample_rate as i64 + 7) / 8 + 1) as usize;
-    println!(
-        "Encoded {} bytes, expected ~{} bytes (CBR {} bps)",
-        n, expected_bytes, bitrate
-    );
+    println!("Encoded {n} bytes, expected ~{expected_bytes} bytes (CBR {bitrate} bps)");
 
     // The encoded size should be close to the expected size for CBR
     assert!(
         n >= expected_bytes - 5 && n <= expected_bytes + 5,
-        "CBR packet size {} should be close to expected {}",
-        n,
-        expected_bytes
+        "CBR packet size {n} should be close to expected {expected_bytes}"
     );
 }
 
@@ -138,13 +130,12 @@ fn test_hybrid_mode_toc() {
     // Check TOC byte - Hybrid mode at 48kHz 20ms should be config 15 (0x78)
     let toc = output[0];
     let config = toc >> 3;
-    println!("TOC: 0x{:02x}, config: {}", toc, config);
+    println!("TOC: 0x{toc:02x}, config: {config}");
 
     // Hybrid mode configs are 12-15 (RFC 6716)
     assert!(
         (12..=15).contains(&config),
-        "Hybrid mode TOC config should be 12-15, got {}",
-        config
+        "Hybrid mode TOC config should be 12-15, got {config}"
     );
     assert!(n > 1, "Hybrid packet should have more than just TOC byte");
 }
@@ -182,6 +173,6 @@ fn test_silk_only_16khz() {
 
     // Check that decoded signal has energy
     let energy: f64 = decoded.iter().map(|x| (*x as f64).powi(2)).sum();
-    println!("Decoded energy: {:.6}", energy);
+    println!("Decoded energy: {energy:.6}");
     assert!(energy > 0.001, "Decoded signal should have energy");
 }

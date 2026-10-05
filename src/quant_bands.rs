@@ -178,6 +178,10 @@ fn quant_coarse_energy_impl(
     if lfe { 0 } else { badness }
 }
 
+/// Opus' largest band count (48 kHz mode); band-energy arrays are at most
+/// `channels * MAX_NB_EBANDS` long.
+const MAX_NB_EBANDS: usize = 21;
+
 #[allow(clippy::too_many_arguments)]
 pub fn quant_coarse_energy_advanced(
     m: &CeltMode,
@@ -224,9 +228,18 @@ pub fn quant_coarse_energy_advanced(
         max_decay = 3.0;
     }
 
-    let enc_start_state = enc.clone();
-    let mut old_e_bands_intra = old_e_bands.to_vec();
-    let mut error_intra = error.to_vec();
+    // libopus quant_coarse_energy: snapshot the coder BY VALUE (no buffer) and,
+    // after the intra pass, save only the bytes it wrote. Was three full
+    // RangeCoder clones (alloc + 1275-byte copy each) and two Vec copies per frame.
+    let enc_start_state = enc.save_state();
+    let nstart_bytes = enc_start_state.offs as usize;
+    let nb = old_e_bands.len();
+    let mut old_e_bands_intra_buf = [0.0f32; 2 * MAX_NB_EBANDS];
+    let old_e_bands_intra = &mut old_e_bands_intra_buf[..nb];
+    old_e_bands_intra.copy_from_slice(old_e_bands);
+    let mut error_intra_buf = [0.0f32; 2 * MAX_NB_EBANDS];
+    let error_intra = &mut error_intra_buf[..error.len()];
+    error_intra.copy_from_slice(error);
     let mut badness1 = 0i32;
     let mut tell_intra = 0i32;
     let intra_prob = &E_PROB_MODEL[lm][1];
@@ -237,11 +250,11 @@ pub fn quant_coarse_energy_advanced(
             start,
             end,
             e_bands,
-            &mut old_e_bands_intra,
+            old_e_bands_intra,
             budget,
             tell,
             intra_prob,
-            &mut error_intra,
+            error_intra,
             enc,
             channels,
             lm,
@@ -253,9 +266,12 @@ pub fn quant_coarse_energy_advanced(
     }
 
     if !intra {
-        let enc_intra_state = enc.clone();
+        let enc_intra_state = enc.save_state();
+        let save_bytes = enc_intra_state.offs as usize - nstart_bytes;
+        let mut intra_bits = [0u8; 1275];
+        intra_bits[..save_bytes].copy_from_slice(&enc.buf[nstart_bytes..nstart_bytes + save_bytes]);
 
-        *enc = enc_start_state.clone();
+        enc.restore_state(enc_start_state);
         let inter_prob = &E_PROB_MODEL[lm][0];
         let badness2 = quant_coarse_energy_impl(
             m,
@@ -280,14 +296,16 @@ pub fn quant_coarse_energy_advanced(
                 || (badness1 == badness2
                     && crate::tell_frac_inline!(enc) + intra_bias > tell_intra))
         {
-            *enc = enc_intra_state;
-            old_e_bands.copy_from_slice(&old_e_bands_intra);
-            error.copy_from_slice(&error_intra);
+            enc.buf[nstart_bytes..nstart_bytes + save_bytes]
+                .copy_from_slice(&intra_bits[..save_bytes]);
+            enc.restore_state(enc_intra_state);
+            old_e_bands.copy_from_slice(old_e_bands_intra);
+            error.copy_from_slice(error_intra);
             intra = true;
         }
     } else {
-        old_e_bands.copy_from_slice(&old_e_bands_intra);
-        error.copy_from_slice(&error_intra);
+        old_e_bands.copy_from_slice(old_e_bands_intra);
+        error.copy_from_slice(error_intra);
     }
 
     if intra {
@@ -346,7 +364,7 @@ pub fn unquant_coarse_energy(
     channels: usize,
     lm: usize,
 ) {
-    let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
+    let prob_model = &E_PROB_MODEL[lm][usize::from(intra)];
     let coef = if intra { 0.0 } else { PRED_COEF[lm] };
     let beta = if intra { BETA_INTRA } else { BETA_COEF[lm] };
     debug_assert!(channels <= 2);
@@ -355,21 +373,20 @@ pub fn unquant_coarse_energy(
 
     for i in start..end {
         for c in 0..channels {
-            let qi;
             let tell = dec.tell();
-            if budget - tell >= 15 {
+            let qi = if budget - tell >= 15 {
                 let prob_idx = 2 * i.min(20);
                 let fs = (prob_model[prob_idx] as u32) << 7;
                 let decay = (prob_model[prob_idx + 1] as i32) << 6;
-                qi = dec.laplace_decode(fs, decay);
+                dec.laplace_decode(fs, decay)
             } else if budget - tell >= 2 {
                 let s = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2);
-                qi = (s >> 1) ^ -(s & 1);
+                (s >> 1) ^ -(s & 1)
             } else if budget - tell >= 1 {
-                qi = if dec.decode_bit_logp(1) { -1 } else { 0 };
+                if dec.decode_bit_logp(1) { -1 } else { 0 }
             } else {
-                qi = -1;
-            }
+                -1
+            };
 
             // Clamp in-place, matching C: oldEBands[i] = MAXG(-GCONST(9.f), oldEBands[i])
             old_e_bands[c * m.nb_ebands + i] = old_e_bands[c * m.nb_ebands + i].max(-9.0);
@@ -456,11 +473,7 @@ pub fn quant_energy_finalise(
             }
             let mut c = 0;
             while c < channels {
-                let q2 = if error[i + c * m.nb_ebands] < 0.0 {
-                    0
-                } else {
-                    1
-                };
+                let q2 = i32::from(error[i + c * m.nb_ebands] >= 0.0);
                 enc.enc_bits(q2 as u32, 1);
                 let offset =
                     (q2 as f32 - 0.5) * (1i32 << (14 - fine_quant[i] - 1)) as f32 * (1.0 / 16384.0);
@@ -575,7 +588,6 @@ mod tests {
         );
 
         enc.done();
-        let _compressed = &enc.buf;
 
         let mut dec = RangeCoder::new_decoder(&enc.buf);
 

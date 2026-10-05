@@ -23,7 +23,7 @@ fn test_48k_audio_roundtrip() {
 
     for frame in 0..20 {
         let len = enc.encode(&input, frame_size, &mut output_buf).unwrap();
-        eprintln!("Frame {}: {} bytes", frame, len);
+        eprintln!("Frame {frame}: {len} bytes");
         dec.decode(&output_buf[..len], frame_size, &mut pcm_out)
             .unwrap();
     }

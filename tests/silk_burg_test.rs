@@ -35,7 +35,7 @@ mod tests {
         // C reference: res_nrg=19888 res_nrg_Q=-6
         // A_Q16=[129017,-65424,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
         println!("TEST_SINE:");
-        println!("  res_nrg={} res_nrg_q={}", res_nrg, res_nrg_q);
+        println!("  res_nrg={res_nrg} res_nrg_q={res_nrg_q}");
         print!("  A_Q16=[");
         for i in 0..16 {
             print!("{}", a_q16[i]);
@@ -87,7 +87,7 @@ mod tests {
         // C reference: res_nrg=703764586 res_nrg_Q=-7
         // A_Q16=[-3693,-638,-1336,-4866,4762,628,1119,7631,655,-6117,-2269,1005,1253,-8786,-8233,-4818]
         println!("TEST_NOISE:");
-        println!("  res_nrg={} res_nrg_q={}", res_nrg, res_nrg_q);
+        println!("  res_nrg={res_nrg} res_nrg_q={res_nrg_q}");
         print!("  A_Q16=[");
         for i in 0..16 {
             print!("{}", a_q16[i]);
@@ -139,7 +139,7 @@ mod tests {
         // C reference: res_nrg=15780 res_nrg_Q=7
         // A_Q16=[71536,26422,-10006,-24432,0,0,0,0,0,0,0,0,0,0,0,0]
         println!("TEST_LOW_AMP:");
-        println!("  res_nrg={} res_nrg_q={}", res_nrg, res_nrg_q);
+        println!("  res_nrg={res_nrg} res_nrg_q={res_nrg_q}");
         print!("  A_Q16=[");
         for i in 0..16 {
             print!("{}", a_q16[i]);
@@ -195,7 +195,7 @@ mod tests {
         // C reference: res_nrg=7420 res_nrg_Q=-5
         // A_Q16=[161532,-75986,-66409,3552,41769,31578,-1546,-25322,-22967,-2039,16266,16982,1983,-13006,-9989,8971]
         println!("TEST_SPEECH_LIKE:");
-        println!("  res_nrg={} res_nrg_q={}", res_nrg, res_nrg_q);
+        println!("  res_nrg={res_nrg} res_nrg_q={res_nrg_q}");
         print!("  A_Q16=[");
         for i in 0..16 {
             print!("{}", a_q16[i]);
@@ -247,7 +247,7 @@ mod tests {
         // C reference: res_nrg=21672 res_nrg_Q=-6
         // A_Q16=[129017,-65424,0,0,0,0,0,0,0,0]
         println!("TEST_ORDER10:");
-        println!("  res_nrg={} res_nrg_q={}", res_nrg, res_nrg_q);
+        println!("  res_nrg={res_nrg} res_nrg_q={res_nrg_q}");
         print!("  A_Q16=[");
         for i in 0..10 {
             print!("{}", a_q16[i]);

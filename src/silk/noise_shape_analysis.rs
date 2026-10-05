@@ -45,7 +45,7 @@ pub fn limit_warped_coefs(
     if den_q24 != 0 {
         gain_q16 = silk_div32_varq(nom_q16, den_q24, 24);
     }
-    for v in coefs_q24[..order].iter_mut() {
+    for v in &mut coefs_q24[..order] {
         *v = silk_smulww(gain_q16, *v);
     }
 
@@ -71,7 +71,7 @@ pub fn limit_warped_coefs(
         if gain_q16 != 0 {
             gain_q16 = silk_inverse32_varq(gain_q16, 32);
         }
-        for v in coefs_q24[..order].iter_mut() {
+        for v in &mut coefs_q24[..order] {
             *v = silk_smulww(gain_q16, *v);
         }
 
@@ -92,7 +92,7 @@ pub fn limit_warped_coefs(
         if den_q24 != 0 {
             gain_q16 = silk_div32_varq(nom_q16, den_q24, 24);
         }
-        for v in coefs_q24[..order].iter_mut() {
+        for v in &mut coefs_q24[..order] {
             *v = silk_smulww(gain_q16, *v);
         }
     }
@@ -112,7 +112,7 @@ pub fn silk_noise_shape_analysis_fix(
     let mut scale: i32 = 0;
     let mut snr_adj_db_q7: i32;
     let mut harm_shape_gain_q16: i32;
-    let tilt_q16: i32;
+
     let mut tmp32: i32;
     let mut nrg: i32 = 0;
     let mut log_energy_q7: i32;
@@ -347,18 +347,18 @@ pub fn silk_noise_shape_analysis_fix(
     );
     strength_q16 = silk_rshift(silk_mul(strength_q16, ps_enc.s_cmn.speech_activity_q8), 8);
 
-    if ps_enc.s_cmn.indices.signal_type == TYPE_VOICED as i8 {
+    let tilt_q16: i32 = if ps_enc.s_cmn.indices.signal_type == TYPE_VOICED as i8 {
         let fs_khz_inv = silk_div32_16(3277, ps_enc.s_cmn.fs_khz);
         for k in 0..ps_enc.s_cmn.nb_subfr as usize {
             let b_q14 = fs_khz_inv + silk_div32_16(49152, ps_enc_ctrl.pitch_l[k]);
             ps_enc_ctrl.lf_shp_q14[k] = (16384 - b_q14 - silk_smulwb(strength_q16, b_q14)) << 16;
             ps_enc_ctrl.lf_shp_q14[k] |= (b_q14 - 16384) & 0xFFFF;
         }
-        tilt_q16 = -16384
+        -16384
             - silk_smulwb(
                 65536 - 16384,
                 silk_smulwb(5872026, ps_enc.s_cmn.speech_activity_q8),
-            );
+            )
     } else {
         let b_q14 = silk_div32_16(21299, ps_enc.s_cmn.fs_khz);
         let lf_high = 16384 - b_q14 - silk_smulwb(strength_q16, silk_smulwb(39322, b_q14));
@@ -370,8 +370,8 @@ pub fn silk_noise_shape_analysis_fix(
         for k in 1..ps_enc.s_cmn.nb_subfr as usize {
             ps_enc_ctrl.lf_shp_q14[k] = ps_enc_ctrl.lf_shp_q14[0];
         }
-        tilt_q16 = -16384;
-    }
+        -16384
+    };
 
     if ps_enc.s_cmn.indices.signal_type == TYPE_VOICED as i8 {
         harm_shape_gain_q16 = silk_smlawb(

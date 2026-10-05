@@ -106,3 +106,17 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "fuzz_repacketizer"
+path = "fuzz_targets/fuzz_repacketizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_multistream_decoder"
+path = "fuzz_targets/fuzz_multistream_decoder.rs"
+test = false
+doc = false
+bench = false

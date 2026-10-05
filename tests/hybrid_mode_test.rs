@@ -31,19 +31,18 @@ fn test_hybrid_mode_encode_basic() {
         .encode(&input, frame_size, &mut output)
         .expect("Hybrid encode failed");
 
-    assert!(n >= 3, "Hybrid packet too short: {}", n);
-    println!("Hybrid packet: {} bytes", n);
+    assert!(n >= 3, "Hybrid packet too short: {n}");
+    println!("Hybrid packet: {n} bytes");
 
     // TOC byte should indicate Hybrid mode (config 12-15)
     let toc = output[0];
     let config = toc >> 3;
-    println!("TOC byte: 0x{:02x}, config: {}", toc, config);
+    println!("TOC byte: 0x{toc:02x}, config: {config}");
 
     // Config 12-13 = Hybrid SWB, 14-15 = Hybrid FB (per RFC 6716)
     assert!(
         (12..=15).contains(&config),
-        "Expected Hybrid TOC config 12-15, got {}",
-        config
+        "Expected Hybrid TOC config 12-15, got {config}"
     );
 
     println!("✅ Hybrid mode basic encode test passed");
@@ -74,8 +73,8 @@ fn test_hybrid_mode_24khz_swb() {
         .encode(&input, frame_size, &mut output)
         .expect("Hybrid encode at 24kHz failed");
 
-    assert!(n >= 3, "24kHz Hybrid packet too short: {}", n);
-    println!("24kHz Hybrid packet: {} bytes", n);
+    assert!(n >= 3, "24kHz Hybrid packet too short: {n}");
+    println!("24kHz Hybrid packet: {n} bytes");
 
     println!("✅ Hybrid mode 24kHz SWB test passed");
 }
@@ -103,10 +102,10 @@ fn test_hybrid_mode_bitrate_range() {
         let mut output = vec![0u8; 1500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .unwrap_or_else(|_| panic!("Hybrid encode at {}bps failed", bitrate));
+            .unwrap_or_else(|_| panic!("Hybrid encode at {bitrate}bps failed"));
 
-        assert!(n >= 3, "Hybrid packet at {}bps too short: {}", bitrate, n);
-        println!("Hybrid at {}bps: {} bytes", bitrate, n);
+        assert!(n >= 3, "Hybrid packet at {bitrate}bps too short: {n}");
+        println!("Hybrid at {bitrate}bps: {n} bytes");
     }
 
     println!("✅ Hybrid mode bitrate range test passed");
@@ -137,14 +136,14 @@ fn test_hybrid_mode_consecutive_frames() {
         let mut output = vec![0u8; 1500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .unwrap_or_else(|_| panic!("Hybrid encode frame {} failed", frame_idx));
+            .unwrap_or_else(|_| panic!("Hybrid encode frame {frame_idx} failed"));
 
-        assert!(n >= 3, "Frame {}: packet too short: {}", frame_idx, n);
+        assert!(n >= 3, "Frame {frame_idx}: packet too short: {n}");
         frame_sizes.push(n);
-        println!("Hybrid frame {}: {} bytes", frame_idx, n);
+        println!("Hybrid frame {frame_idx}: {n} bytes");
     }
 
-    println!("Frame sizes: {:?}", frame_sizes);
+    println!("Frame sizes: {frame_sizes:?}");
     println!("✅ Hybrid mode consecutive frames test passed");
 }
 
@@ -206,8 +205,8 @@ fn test_celt_encode_with_start_band() {
     rc_partial.done();
     let partial_bits = rc_partial.tell();
 
-    println!("Full spectrum: {} bits used", full_bits);
-    println!("Partial (start_band=17): {} bits used", partial_bits);
+    println!("Full spectrum: {full_bits} bits used");
+    println!("Partial (start_band=17): {partial_bits} bits used");
 
     // Both should use some bits (not zero)
     // In practice partial may use fewer bits since less spectrum is coded
@@ -349,18 +348,14 @@ fn test_downsample_48_to_16_antialiasing() {
     let naive_rms = 16000.0f64 / 2.0f64.sqrt();
     let threshold = naive_rms / 2.0; // require at least −6 dB attenuation
     println!(
-        "10 kHz tone after 48→16 kHz downsample: RMS = {:.2} \
-         (naive would be {:.2}, threshold {:.2})",
-        out_rms, naive_rms, threshold
+        "10 kHz tone after 48→16 kHz downsample: RMS = {out_rms:.2} \
+         (naive would be {naive_rms:.2}, threshold {threshold:.2})"
     );
 
     assert!(
         out_rms < threshold,
         "Anti-aliasing filter does not attenuate 10 kHz by at least −6 dB. \
-         RMS was {:.2}, expected < {:.2}. A naive decimator would give {:.2}.",
-        out_rms,
-        threshold,
-        naive_rms
+         RMS was {out_rms:.2}, expected < {threshold:.2}. A naive decimator would give {naive_rms:.2}."
     );
     println!("✅ 48→16 kHz anti-aliasing test passed");
 }
@@ -396,16 +391,12 @@ fn test_downsample_48_to_16_passband_preserved() {
     let skip = 16;
     let settled = &out[skip..];
     let out_rms = rms_i16(settled);
-    println!(
-        "1 kHz tone after 48→16 kHz downsample: RMS = {:.2} (input amplitude ~16000)",
-        out_rms
-    );
+    println!("1 kHz tone after 48→16 kHz downsample: RMS = {out_rms:.2} (input amplitude ~16000)");
 
     assert!(
         out_rms >= 5000.0,
         "1 kHz tone was too strongly attenuated after 48→16 kHz downsample. \
-         RMS was {:.2}, expected ≥ 5000",
-        out_rms
+         RMS was {out_rms:.2}, expected ≥ 5000"
     );
     println!("✅ 48→16 kHz passband preservation test passed");
 }
@@ -437,7 +428,7 @@ fn test_hybrid_downsampler_state_continuity() {
             .encode(&input, frame_size, &mut output)
             .expect("Hybrid CBR encode failed");
 
-        assert!(n >= 3, "Frame {}: packet too short: {}", frame_idx, n);
+        assert!(n >= 3, "Frame {frame_idx}: packet too short: {n}");
         sizes.push(n);
     }
 
@@ -445,12 +436,11 @@ fn test_hybrid_downsampler_state_continuity() {
     for (i, &sz) in sizes.iter().enumerate().skip(1) {
         assert_eq!(
             sz, expected,
-            "Frame {}: CBR packet size {} differs from expected {} – \
-             IIR state discontinuity may be causing encoder instability",
-            i, sz, expected
+            "Frame {i}: CBR packet size {sz} differs from expected {expected} – \
+             IIR state discontinuity may be causing encoder instability"
         );
     }
 
-    println!("CBR Hybrid frame sizes: {:?}", sizes);
+    println!("CBR Hybrid frame sizes: {sizes:?}");
     println!("✅ Hybrid downsampler state continuity test passed");
 }
