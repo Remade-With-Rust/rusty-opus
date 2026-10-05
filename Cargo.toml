@@ -61,7 +61,7 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # arm measured under the system allocator is not comparable to production.
 # A DEV-dependency on purpose: the library must never set a global allocator, or
 # it would hijack a downstream binary's choice.
-rusty_alloc-api = "=1.1.6"
+rusty_alloc-api = "=2.2.2"
 
 # Lint policy (hardening gate H-15): clippy all + pedantic + nursery, with the
 # exceptions below. Every allow states why the lint does not fit a bit-exact
