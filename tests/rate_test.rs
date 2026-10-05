@@ -47,14 +47,14 @@ fn test_rate_allocation_constraints() {
     );
 
     // Verify constraints
-    println!("Used allocation bits: {} / {}", used_bits, total_bits);
+    println!("Used allocation bits: {used_bits} / {total_bits}");
     assert!(used_bits <= total_bits, "Over-allocation!");
 
     // Verify pulse validity
     for i in 0..nb_ebands {
         // pulses[i] from clt_compute_allocation is the raw bit allocation per band (Q3 units),
         // not an actual pulse count. Verify it is non-negative and within the cap.
-        assert!(pulses[i] >= 0, "Negative pulses in band {}", i);
+        assert!(pulses[i] >= 0, "Negative pulses in band {i}");
         // Convert bits -> pulse count, then verify round-trip bits are consistent.
         let pulse_count = rusty_opus::rate::bits2pulses(mode, i, 3, pulses[i]);
         let _bits_calc = pulses2bits(mode, i, 3, pulse_count);

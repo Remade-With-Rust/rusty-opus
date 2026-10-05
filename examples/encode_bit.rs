@@ -39,7 +39,10 @@ fn main() {
     let frame_size = (rate as f64 * frame_ms / 1000.0) as usize;
 
     let mut data = Vec::new();
-    File::open(&args[6]).unwrap().read_to_end(&mut data).unwrap();
+    File::open(&args[6])
+        .unwrap()
+        .read_to_end(&mut data)
+        .unwrap();
     let mut out = std::io::BufWriter::new(File::create(&args[7]).unwrap());
 
     let mut enc = OpusEncoder::new(rate, channels, app).unwrap();
@@ -68,6 +71,7 @@ fn main() {
     if let Ok(bw) = std::env::var("FORCE_BW") {
         enc.force_bandwidth = Some(match bw.as_str() {
             "nb" => rusty_opus::Bandwidth::Narrowband,
+            "mb" => rusty_opus::Bandwidth::Mediumband,
             "wb" => rusty_opus::Bandwidth::Wideband,
             "swb" => rusty_opus::Bandwidth::Superwideband,
             _ => rusty_opus::Bandwidth::Fullband,

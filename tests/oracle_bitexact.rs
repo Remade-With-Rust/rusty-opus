@@ -45,7 +45,11 @@ fn synth_music(rate: u32, channels: usize, secs: f32) -> Vec<f32> {
         }
         s = (s * beat + rng.next_f32() * 0.02).clamp(-0.98, 0.98) * 0.5;
         for c in 0..channels {
-            let sc = if c == 0 { s } else { s * 0.8 + rng.next_f32() * 0.01 };
+            let sc = if c == 0 {
+                s
+            } else {
+                s * 0.8 + rng.next_f32() * 0.01
+            };
             out[i * channels + c] = sc;
         }
     }
@@ -78,7 +82,10 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
         } else {
             rng.next_f32() * 0.4
         };
-        let (r, c1) = (0.95f32, (2.0 * std::f32::consts::PI * 700.0 / rate as f32).cos());
+        let (r, c1) = (
+            0.95f32,
+            (2.0 * std::f32::consts::PI * 700.0 / rate as f32).cos(),
+        );
         let ya = exc + 2.0 * r * c1 * y1a - r * r * y2a;
         y2a = y1a;
         y1a = ya;
@@ -92,11 +99,24 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
 }
 
 /// FNV-1a over the full packet stream + a running byte/packet tally.
-fn encode_hash(rate: u32, channels: usize, app: Application, bitrate: i32, pcm: &[f32]) -> (u64, usize, usize) {
+fn encode_hash(
+    rate: u32,
+    channels: usize,
+    app: Application,
+    bitrate: i32,
+    pcm: &[f32],
+) -> (u64, usize, usize) {
     encode_hash_mode(rate, channels, app, bitrate, pcm, true)
 }
 
-fn encode_hash_mode(rate: u32, channels: usize, app: Application, bitrate: i32, pcm: &[f32], cbr: bool) -> (u64, usize, usize) {
+fn encode_hash_mode(
+    rate: u32,
+    channels: usize,
+    app: Application,
+    bitrate: i32,
+    pcm: &[f32],
+    cbr: bool,
+) -> (u64, usize, usize) {
     let mut enc = OpusEncoder::new(rate as i32, channels, app).unwrap();
     enc.bitrate_bps = bitrate;
     enc.use_cbr = cbr;
@@ -121,22 +141,95 @@ fn encode_hash_mode(rate: u32, channels: usize, app: Application, bitrate: i32, 
 fn oracle_bitexact() {
     let secs = 20.0f32;
     // (name, expected_hash, expected_bytes, expected_packets)
+    // Re-frozen 2026-10-04 (2nd): CELT/hybrid moved again -- every PVQ search
+    // path now returns libopus op_pvq_search_c's exact codeword (AVX2/SSE ranked
+    // by an approximate rsqrt; n==4, small-k and n>=32 skipped or batched the
+    // greedy). PEAQ vs the previous build: 14 points, mean +0.0005 ODG (neutral).
+    // Re-frozen 2026-10-04: the CELT/hybrid cases moved (libopus-faithful
+    // pitch_downsample whitening in the prefilter pitch search -- restored on
+    // x86, which had diverged from ARM and libopus since 7a12f04; pitch-index
+    // clamp; CELT silence flag only coded at tell==1). PEAQ A/B vs the previous
+    // build: +0.27 mean ODG over 30 points, whitening alone +0.06 over 23. The
+    // SILK case is byte-identical.
     // Re-frozen 2026-07-11: the two STEREO cases moved (intentional quality change —
     // stereo-music alloc_trim +1 LF tilt, PEAQ-validated); the mono/speech cases are
     // byte-identical (the tilt is gated to channels==2). Prior freeze 2026-07-09 on the
     // conformance-fixed tree (haar1, alloc row 10, anti-collapse rsv, alloc_trim fallback,
     // prefilter off). Layout-stability verified by struct-padding perturbation + canaries.
-    let cases: [(&str, u64, usize, usize); 4] = [
-        ("CELT  48k stereo music @128k", 0xc849_2c75_cafb_6306, 320000, 1000),
-        ("SILK-VBR 16k mono speech @24k", 0x9fac_0844_1850_ce7f, 40815, 1000),
-        ("HYB-VBR 48k mono speech @32k ", 0xa8fc_0662_8928_96a5, 82039, 1000),
-        ("VBR CELT 48k st music @128k ", 0x2ea0_563c_25ba_712f, 321412, 1000),
+    // The hashes depend on the platform's libm (glibc and the MSVC CRT round
+    // sinf/expf/logf differently, and both CELT and SILK analysis call them), so
+    // each frozen rung has its own table: Windows below, Linux in `LINUX` (frozen
+    // 2026-10-04 on the same tree; the hybrid case happens to agree).
+    #[cfg(target_os = "linux")]
+    const LINUX: [(u64, usize); 4] = [
+        (0xd62a_163c_6eaa_b8e8, 320000),
+        (0xcf44_d2b4_3b32_87dd, 40833),
+        (0x244f_b20b_4043_32ed, 82009),
+        (0x117f_3961_f991_74e8, 321485),
     ];
+    #[allow(unused_mut)]
+    let mut cases: [(&str, u64, usize, usize); 4] = [
+        (
+            "CELT  48k stereo music @128k",
+            0x9013_d2da_ecc4_5d4d,
+            320000,
+            1000,
+        ),
+        (
+            "SILK-VBR 16k mono speech @24k",
+            0x9fac_0844_1850_ce7f,
+            40815,
+            1000,
+        ),
+        (
+            "HYB-VBR 48k mono speech @32k ",
+            0x244f_b20b_4043_32ed,
+            82009,
+            1000,
+        ),
+        (
+            "VBR CELT 48k st music @128k ",
+            0xfdc2_33fe_2a2e_2f43,
+            321485,
+            1000,
+        ),
+    ];
+    #[cfg(target_os = "linux")]
+    for (case, &(h, b)) in cases.iter_mut().zip(&LINUX) {
+        (case.1, case.2) = (h, b);
+    }
     let got = [
-        encode_hash(48000, 2, Application::Audio, 128_000, &synth_music(48000, 2, secs)),
-        encode_hash_mode(16000, 1, Application::Voip, 24_000, &synth_speech(16000, secs), false),
-        encode_hash_mode(48000, 1, Application::Voip, 32_000, &synth_speech(48000, secs), false),
-        encode_hash_mode(48000, 2, Application::Audio, 128_000, &synth_music(48000, 2, secs), false),
+        encode_hash(
+            48000,
+            2,
+            Application::Audio,
+            128_000,
+            &synth_music(48000, 2, secs),
+        ),
+        encode_hash_mode(
+            16000,
+            1,
+            Application::Voip,
+            24_000,
+            &synth_speech(16000, secs),
+            false,
+        ),
+        encode_hash_mode(
+            48000,
+            1,
+            Application::Voip,
+            32_000,
+            &synth_speech(48000, secs),
+            false,
+        ),
+        encode_hash_mode(
+            48000,
+            2,
+            Application::Audio,
+            128_000,
+            &synth_music(48000, 2, secs),
+            false,
+        ),
     ];
     println!("\n--- byte-identity oracle (freeze these) ---");
     for (i, (name, _, _, _)) in cases.iter().enumerate() {
@@ -151,12 +244,42 @@ fn oracle_bitexact() {
     }
 
     // Once frozen (set FROZEN=true and paste hashes above), this asserts identity.
+    // The hashes belong to ONE float-kernel rung: x86_64 with AVX2+FMA and no
+    // RUSTY_OPUS_ISA cap. Float SIMD reassociates, so other rungs (scalar, SSE2,
+    // AVX, i686, NEON) legitimately produce different -- equally valid -- bytes;
+    // there the invariants above still run and the hashes are printed, not asserted.
     const FROZEN: bool = true;
-    if FROZEN {
+    if FROZEN && frozen_rung() {
         for (i, (name, exp_h, exp_b, _)) in cases.iter().enumerate() {
             let (h, bytes, _) = got[i];
-            assert_eq!(h, *exp_h, "{name}: BITSTREAM MOVED (hash) — not byte-identical");
+            assert_eq!(
+                h, *exp_h,
+                "{name}: BITSTREAM MOVED (hash) — not byte-identical"
+            );
             assert_eq!(bytes, *exp_b, "{name}: BITSTREAM MOVED (bytes)");
         }
+    }
+}
+
+/// True on the host configuration the hashes were frozen on.
+fn frozen_rung() -> bool {
+    if std::env::var_os("RUSTY_OPUS_ISA").is_some()
+        || std::env::var_os("RUSTY_OPUS_NO_AVX2").is_some()
+    {
+        return false;
+    }
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(target_os = "windows", target_os = "linux")
+    ))]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        any(target_os = "windows", target_os = "linux")
+    )))]
+    {
+        false
     }
 }

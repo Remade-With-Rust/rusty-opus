@@ -1,0 +1,112 @@
+# Per-PR hardening gate (use-protection-please H-37). Every job must pass to merge.
+# Actions are pinned to full commit SHAs; the default token is read-only.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, args: --all-targets --all-features }
+          - { target: i686-unknown-linux-gnu, args: --lib --all-features }
+          - { target: aarch64-unknown-linux-gnu, args: --lib --all-features }
+          - { target: wasm32-unknown-unknown, args: --lib --all-features }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo clippy --locked --target ${{ matrix.target }} ${{ matrix.args }} -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }}${{ matrix.isa && format(', ISA={0}', matrix.isa) || '' }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest }
+          - { os: ubuntu-latest, isa: scalar }   # every scalar twin, end to end
+          - { os: windows-latest }
+          - { os: macos-latest }                 # aarch64: real NEON hardware
+          - { os: macos-latest, isa: scalar }
+    env:
+      RUSTY_OPUS_ISA: ${{ matrix.isa }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo test --locked --release
+
+  test-debug:
+    # Debug build: integer overflow checks + debug assertions on every test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo test --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.85 --profile minimal
+      - run: cargo +1.85 check --locked --lib
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-vet@0.10.2
+      - name: cargo deny (advisories, licenses, bans, sources)
+        run: cargo deny --locked check
+      - name: cargo audit
+        run: cargo audit --deny warnings
+      - name: cargo vet
+        run: cargo vet --locked
+
+  static-analysis:
+    # Project-specific security invariants beyond clippy (H-22).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: semgrep (.semgrep/rusty-opus.yml)
+        run: |
+          python3 -m pip install --quiet semgrep==1.173.0
+          semgrep scan --config .semgrep/rusty-opus.yml --metrics=off --error src
+      - name: invariant checks (tools/check_invariants.py)
+        run: python3 tools/check_invariants.py
+      - name: UNSAFE.md inventory is current
+        run: python3 tools/gen_unsafe_inventory.py --check
+      - name: README hardening table is current
+        run: python3 tools/render_hardening_table.py --plan docs/plans/use-protection-please.md --readme README.md --link https://github.com/Remade-With-Rust/rusty-opus/blob/v1.0.0/docs/plans/use-protection-please.md --check
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup target add wasm32-unknown-unknown wasm32-wasip1
+      - run: cargo build --locked --release --lib --target wasm32-unknown-unknown
+      - run: cargo build --locked --release --lib --target wasm32-wasip1

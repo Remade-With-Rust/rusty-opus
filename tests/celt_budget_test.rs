@@ -82,12 +82,11 @@ fn celt_loopback_160bytes() {
         let start = f * frame_size;
         let end = start + frame_size;
         let snr_0 = snr_with_delay(&all_in[start..end], &all_out[start..end], 0);
-        eprintln!("  Frame {} SNR(delay=0): {:.2} dB", f, snr_0);
+        eprintln!("  Frame {f} SNR(delay=0): {snr_0:.2} dB");
     }
 
     assert!(
         best_snr > 1.0,
-        "CELT at 160 bytes should achieve positive SNR: got {:.2} dB",
-        best_snr
+        "CELT at 160 bytes should achieve positive SNR: got {best_snr:.2} dB"
     );
 }

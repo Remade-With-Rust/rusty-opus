@@ -56,7 +56,7 @@ fn test_lpc_sinusoid() {
     );
 
     println!("Sinusoid Test:");
-    println!("  Residual energy: {} (Q{})", res_nrg, res_nrg_q);
+    println!("  Residual energy: {res_nrg} (Q{res_nrg_q})");
     println!("  LPC coefficients (Q16): {:?}", &a_q16[..10]);
 
     // Residual energy should be computed (can be negative in fixed-point)
@@ -107,7 +107,7 @@ fn test_lpc_voiced_speech_like() {
     );
 
     println!("\nVoiced Speech-like Test:");
-    println!("  Residual energy: {} (Q{})", res_nrg, res_nrg_q);
+    println!("  Residual energy: {res_nrg} (Q{res_nrg_q})");
     println!("  First 5 LPC coefficients: {:?}", &a_q16[..5]);
 
     // Verify basic properties
@@ -117,10 +117,9 @@ fn test_lpc_voiced_speech_like() {
     let non_zero_count = a_q16[..16].iter().filter(|&&x| x != 0).count();
     assert!(
         non_zero_count >= 1,
-        "Complex signal should have at least one LPC coefficient, got {}",
-        non_zero_count
+        "Complex signal should have at least one LPC coefficient, got {non_zero_count}"
     );
-    println!("  Non-zero coefficients: {}/16", non_zero_count);
+    println!("  Non-zero coefficients: {non_zero_count}/16");
 
     println!("✅ Voiced speech-like LPC test passed");
 }
@@ -154,7 +153,7 @@ fn test_lpc_white_noise() {
     );
 
     println!("\nWhite Noise Test:");
-    println!("  Residual energy: {} (Q{})", res_nrg, res_nrg_q);
+    println!("  Residual energy: {res_nrg} (Q{res_nrg_q})");
     println!(
         "  LPC coefficients magnitude sum: {}",
         a_q16[..10].iter().map(|&x| x.abs()).sum::<i32>()
@@ -167,7 +166,7 @@ fn test_lpc_white_noise() {
 
     // For white noise, LPC coefficients should be relatively small
     let coef_sum: i64 = a_q16[..10].iter().map(|&x| x.abs() as i64).sum();
-    println!("  Coefficient sum: {}", coef_sum);
+    println!("  Coefficient sum: {coef_sum}");
 
     println!("✅ White noise LPC test passed");
 }
@@ -186,7 +185,6 @@ fn test_find_lpc_fix_integration() {
     let fs = 16000.0;
     for i in 0..required_samples {
         let t = i as f32 / fs;
-        let _f = 500.0 + 1500.0 * t; // Sweep from 500 to 2000 Hz
         let phase = 2.0 * PI * (500.0 * t + 750.0 * t * t);
         x[i] = (phase.sin() * 15000.0) as i16;
     }
@@ -270,7 +268,7 @@ fn test_lpc_stability() {
     );
 
     println!("\nStability Test (Square Wave):");
-    println!("  Residual energy: {} (Q{})", res_nrg, res_nrg_q);
+    println!("  Residual energy: {res_nrg} (Q{res_nrg_q})");
     println!("  Algorithm completed without panic ✅");
 
     // Just verify it didn't crash and produced valid output

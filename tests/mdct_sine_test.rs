@@ -160,7 +160,7 @@ mod tests {
             max_val = max_val.max(freq[i].abs());
         }
         eprintln!("MDCT output[0..10]: {:?}", &freq[0..10]);
-        eprintln!("MDCT output max in first 100: {:.6}", max_val);
+        eprintln!("MDCT output max in first 100: {max_val:.6}");
         eprintln!("MDCT output[0]: {:.6}, [1]: {:.6}", freq[0], freq[1]);
 
         // The magnitude should be reasonable (not 0.001)

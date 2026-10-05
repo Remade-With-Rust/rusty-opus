@@ -143,9 +143,9 @@ pub fn spreading_decision(
                 hf_sum += 32 * (tcount[1] + tcount[0]) / (n as i32);
             }
 
-            let tmp = (if 2 * tcount[2] >= (n as i32) { 1 } else { 0 })
-                + (if 2 * tcount[1] >= (n as i32) { 1 } else { 0 })
-                + (if 2 * tcount[0] >= (n as i32) { 1 } else { 0 });
+            let tmp = i32::from(2 * tcount[2] >= (n as i32))
+                + i32::from(2 * tcount[1] >= (n as i32))
+                + i32::from(2 * tcount[0] >= (n as i32));
             sum += tmp * sw;
             nb_bands += sw;
         }
@@ -204,52 +204,6 @@ pub fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     haar1_scalar(x, n0, stride);
 }
 
-// Disabled: has a deinterleave bug (see haar1). Kept for reference / future fix.
-#[allow(dead_code)]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[target_feature(enable = "avx")]
-unsafe fn haar1_avx(x: &mut [f32], n0: usize) {
-    use std::arch::x86_64::*;
-    let n = n0 >> 1;
-    let scale = _mm256_set1_ps(std::f32::consts::FRAC_1_SQRT_2);
-    let mut j = 0;
-    while j + 8 <= n {
-        let ptr = x.as_mut_ptr().add(2 * j);
-        let a = _mm256_loadu_ps(ptr);
-        let b = _mm256_loadu_ps(ptr.add(4));
-
-        let t0 = _mm256_unpacklo_ps(a, b);
-        let t1 = _mm256_unpackhi_ps(a, b);
-
-        let even = _mm256_unpacklo_ps(t0, t1);
-        let odd = _mm256_unpackhi_ps(t0, t1);
-
-        let sum = _mm256_mul_ps(_mm256_add_ps(even, odd), scale);
-        let diff = _mm256_mul_ps(_mm256_sub_ps(even, odd), scale);
-
-        let r0 = _mm256_unpacklo_ps(sum, diff);
-        let r1 = _mm256_unpackhi_ps(sum, diff);
-
-        let out0 = _mm256_permute2f128_ps(r0, r1, 0x20);
-        let out1 = _mm256_permute2f128_ps(r0, r1, 0x31);
-
-        _mm256_storeu_ps(ptr, out0);
-        _mm256_storeu_ps(ptr.add(8), out1);
-        j += 8;
-    }
-
-    let scale = std::f32::consts::FRAC_1_SQRT_2;
-    while j < n {
-        let idx1 = 2 * j;
-        let idx2 = 2 * j + 1;
-        let tmp1 = scale * x[idx1];
-        let tmp2 = scale * x[idx2];
-        x[idx1] = tmp1 + tmp2;
-        x[idx2] = tmp1 - tmp2;
-        j += 1;
-    }
-}
-
 #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 #[inline]
 fn haar1_scalar(x: &mut [f32], n0: usize, stride: usize) {
@@ -263,45 +217,6 @@ fn haar1_scalar(x: &mut [f32], n0: usize, stride: usize) {
             let tmp2 = scale * x[idx2];
             x[idx1] = tmp1 + tmp2;
             x[idx2] = tmp1 - tmp2;
-        }
-    }
-}
-
-// Disabled: same deinterleave bug class as haar1_avx (see haar1).
-#[allow(dead_code)]
-#[cfg(target_arch = "aarch64")]
-fn haar1_neon(x: &mut [f32], n0: usize) {
-    use std::arch::aarch64::*;
-
-    let n = n0 >> 1;
-    let scale = std::f32::consts::FRAC_1_SQRT_2;
-
-    unsafe {
-        let vscale = vdupq_n_f32(scale);
-
-        let mut j = 0usize;
-        while j + 4 <= n {
-            let idx = 2 * j;
-            let pairs = vld2q_f32(x.as_ptr().add(idx));
-            let even = vmulq_f32(pairs.0, vscale);
-            let odd = vmulq_f32(pairs.1, vscale);
-
-            let out = float32x4x2_t {
-                0: vaddq_f32(even, odd),
-                1: vsubq_f32(even, odd),
-            };
-            vst2q_f32(x.as_mut_ptr().add(idx), out);
-            j += 4;
-        }
-
-        while j < n {
-            let idx1 = 2 * j;
-            let idx2 = idx1 + 1;
-            let tmp1 = scale * x[idx1];
-            let tmp2 = scale * x[idx2];
-            x[idx1] = tmp1 + tmp2;
-            x[idx2] = tmp1 - tmp2;
-            j += 1;
         }
     }
 }
@@ -331,6 +246,15 @@ pub fn compute_qn(n: usize, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -
     }
 }
 
+/// NEON twin of the scalar body of `stereo_itheta`.
+///
+/// # Safety
+///
+/// - NEON must be available (baseline on aarch64; callers gate on
+///   `crate::isa::neon()`).
+/// - `x.len() >= n` and `y.len() >= n`: the vector loops load `x[0..i]` and
+///   `y[0..i]` (for the largest multiple-of-4 `i <= n`) via raw-pointer
+///   `vld1q_f32` without bounds checks; only the scalar tail is checked.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -479,19 +403,18 @@ unsafe fn stereo_itheta_neon(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i3
 }
 
 #[inline(always)]
-#[cfg(target_arch = "aarch64")]
 pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
-    unsafe { stereo_itheta_neon(x, y, stereo, n) }
-}
-
-#[inline(always)]
-#[cfg(not(target_arch = "aarch64"))]
-pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
+    assert!(
+        n <= x.len() && n <= y.len(),
+        "stereo_itheta: n = {n} out of range"
+    );
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return stereo_itheta_neon(x, y, stereo, n);
+    if crate::isa::neon() {
+        // SAFETY: the `isa::neon()` check above guarantees NEON. The kernel
+        // needs `x.len() >= n && y.len() >= n`, which the `assert!` at the top
+        // of this function enforces.
+        return unsafe { stereo_itheta_neon(x, y, stereo, n) };
     }
-    #[cfg(not(target_arch = "aarch64"))]
     {
         let mut emid = 1e-15f32;
         let mut eside = 1e-15f32;
@@ -558,8 +481,8 @@ pub struct SplitCtx {
 pub fn compute_theta(
     ctx: &mut BandCtx,
     sctx: &mut SplitCtx,
-    x: &[f32],
-    y: &[f32],
+    x: &mut [f32],
+    y: &mut [f32],
     n: usize,
     b: &mut i32,
     b_blocks: i32,
@@ -687,13 +610,9 @@ pub fn compute_theta(
         }
         itheta = (itheta as u32 * 16384 / qn as u32) as i32;
         if ctx.encode && stereo {
-            let (bx, by) = (x.as_ptr() as *mut f32, y.as_ptr() as *mut f32);
-            let (sx, sy) = unsafe {
-                (
-                    std::slice::from_raw_parts_mut(bx, n),
-                    std::slice::from_raw_parts_mut(by, n),
-                )
-            };
+            // Was: &mut views built from `&[f32]` raw pointers (UB under the aliasing
+            // model); `x`/`y` are now taken `&mut`, so plain safe re-slices.
+            let (sx, sy) = (&mut x[..n], &mut y[..n]);
             if itheta == 0 {
                 intensity_stereo(ctx.m, sx, sy, ctx.band_e, ctx.i, n);
             } else {
@@ -703,13 +622,9 @@ pub fn compute_theta(
     } else if stereo {
         if ctx.encode {
             let inv = itheta > 8192 && !ctx.disable_inv;
-            let (bx, by) = (x.as_ptr() as *mut f32, y.as_ptr() as *mut f32);
-            let (sx, sy) = unsafe {
-                (
-                    std::slice::from_raw_parts_mut(bx, n),
-                    std::slice::from_raw_parts_mut(by, n),
-                )
-            };
+            // Was: &mut views built from `&[f32]` raw pointers (UB under the aliasing
+            // model); `x`/`y` are now taken `&mut`, so plain safe re-slices.
+            let (sx, sy) = (&mut x[..n], &mut y[..n]);
             if inv {
                 for yv in sy.iter_mut() {
                     *yv = -*yv;
@@ -765,7 +680,7 @@ fn quant_partition_n2_encode(
     x: &mut [f32],
     b: i32,
     b_blocks: i32,
-    lowband: Option<&mut [f32]>,
+    lowband: Option<&[f32]>,
     lm: i32,
     gain: f32,
     fill: u32,
@@ -800,7 +715,7 @@ fn quant_partition_n4_encode(
     x: &mut [f32],
     b: i32,
     b_blocks: i32,
-    lowband: Option<&mut [f32]>,
+    lowband: Option<&[f32]>,
     lm: i32,
     gain: f32,
     fill: u32,
@@ -835,7 +750,7 @@ fn quant_partition_n8_encode(
     x: &mut [f32],
     b: i32,
     b_blocks: i32,
-    lowband: Option<&mut [f32]>,
+    lowband: Option<&[f32]>,
     lm: i32,
     gain: f32,
     fill: u32,
@@ -872,7 +787,7 @@ fn quant_partition_direct_encode(
     n: usize,
     b: i32,
     b_blocks: i32,
-    lowband: Option<&mut [f32]>,
+    lowband: Option<&[f32]>,
     lm: i32,
     gain: f32,
     fill: u32,
@@ -916,18 +831,19 @@ fn quant_partition_encode(
 ) -> u32 {
     // N==2 can never split (should_split requires n>2), dispatch immediately
     if n == 2 {
-        return quant_partition_n2_encode(ctx, x, b, b_blocks, lowband, lm, gain, fill);
+        return quant_partition_n2_encode(ctx, x, b, b_blocks, lowband.as_deref(), lm, gain, fill);
     }
 
     // Check split condition FIRST (matching C's quant_partition which checks this before dispatch)
     let should_split = if lm >= 0 && n > 2 {
         let cache_idx = (lm + 1) as usize * ctx.m.nb_ebands + ctx.i;
-        let cache_base = unsafe { *ctx.m.cache.index.get_unchecked(cache_idx) };
+        // Checked indexing (was get_unchecked + raw-pointer reads relying on
+        // unchecked caller invariants and table well-formedness).
+        let cache_base = ctx.m.cache.index[cache_idx];
         if cache_base >= 0 {
-            let cache_base = cache_base as usize;
-            let cache_ptr = ctx.m.cache.bits.as_ptr().wrapping_add(cache_base);
-            let max_q = unsafe { *cache_ptr } as usize;
-            b > (unsafe { *cache_ptr.add(max_q) } as i32) + 12
+            let cache = &ctx.m.cache.bits[cache_base as usize..];
+            let max_q = cache[0] as usize;
+            b > cache[max_q] as i32 + 12
         } else {
             false
         }
@@ -1089,13 +1005,41 @@ fn quant_partition_encode(
     } else {
         // No split — dispatch to small-N specialized encoders or direct path
         if n == 4 {
-            return quant_partition_n4_encode(ctx, x, b, b_blocks, lowband, lm, gain, fill);
+            return quant_partition_n4_encode(
+                ctx,
+                x,
+                b,
+                b_blocks,
+                lowband.as_deref(),
+                lm,
+                gain,
+                fill,
+            );
         }
         if n == 8 {
-            return quant_partition_n8_encode(ctx, x, b, b_blocks, lowband, lm, gain, fill);
+            return quant_partition_n8_encode(
+                ctx,
+                x,
+                b,
+                b_blocks,
+                lowband.as_deref(),
+                lm,
+                gain,
+                fill,
+            );
         }
         if n == 16 {
-            return quant_partition_direct_encode(ctx, x, n, b, b_blocks, lowband, lm, gain, fill);
+            return quant_partition_direct_encode(
+                ctx,
+                x,
+                n,
+                b,
+                b_blocks,
+                lowband.as_deref(),
+                lm,
+                gain,
+                fill,
+            );
         }
         let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
         let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
@@ -1136,12 +1080,13 @@ pub fn quant_partition(
     This matches the C code which checks this at the top of quant_partition. */
     let should_split = if lm >= 0 && n > 2 {
         let cache_idx = (lm + 1) as usize * ctx.m.nb_ebands + ctx.i;
-        let cache_base = unsafe { *ctx.m.cache.index.get_unchecked(cache_idx) };
+        // Checked indexing (was get_unchecked + raw-pointer reads relying on
+        // unchecked caller invariants and table well-formedness).
+        let cache_base = ctx.m.cache.index[cache_idx];
         if cache_base >= 0 {
-            let cache_base = cache_base as usize;
-            let cache_ptr = ctx.m.cache.bits.as_ptr().wrapping_add(cache_base);
-            let max_q = unsafe { *cache_ptr } as usize;
-            b > (unsafe { *cache_ptr.add(max_q) } as i32) + 12
+            let cache = &ctx.m.cache.bits[cache_base as usize..];
+            let max_q = cache[0] as usize;
+            b > cache[max_q] as i32 + 12
         } else {
             false
         }
@@ -1351,42 +1296,55 @@ pub fn quant_partition(
                     x[..n].fill(0.0);
                 } else if let Some(lb) = lowband {
                     #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use std::arch::aarch64::*;
-                        let n8 = n & !7;
-                        let mut i = 0;
-                        while i < n8 {
-                            let mut vals = [0.0f32; 8];
-                            for j in 0..8 {
-                                ctx.seed = celt_lcg_rand(ctx.seed);
-                                vals[j] = if ctx.seed & 0x8000 != 0 {
-                                    1.0 / 256.0
-                                } else {
-                                    -1.0 / 256.0
-                                };
+                    let neon = crate::isa::neon();
+                    #[cfg(not(target_arch = "aarch64"))]
+                    let neon = false;
+                    #[cfg(target_arch = "aarch64")]
+                    if neon {
+                        // SAFETY: `neon` is `isa::neon()`, so NEON is available.
+                        // The loop touches indices `< n8 = n & !7 <= n`:
+                        // `vals` is a local `[f32; 8]` (offsets 0 and 4);
+                        // `lb.len() == n` (from `prepare_lowband_views`, which
+                        // returns exactly `n` elements, or a `split_at_mut(mid)`
+                        // half with `n = mid`); `x.len() >= n` because `x` is the
+                        // `n`-long band slice or a `split_at_mut(mid)` half of it
+                        // (`x[..n]` is also indexed in the sibling branch).
+                        unsafe {
+                            use std::arch::aarch64::*;
+                            let n8 = n & !7;
+                            let mut i = 0;
+                            while i < n8 {
+                                let mut vals = [0.0f32; 8];
+                                for j in 0..8 {
+                                    ctx.seed = celt_lcg_rand(ctx.seed);
+                                    vals[j] = if ctx.seed & 0x8000 != 0 {
+                                        1.0 / 256.0
+                                    } else {
+                                        -1.0 / 256.0
+                                    };
+                                }
+                                let vnoise = vld1q_f32(vals.as_ptr());
+                                let vnoise1 = vld1q_f32(vals.as_ptr().add(4));
+                                let vlb = vld1q_f32(lb.as_ptr().add(i));
+                                let vlb1 = vld1q_f32(lb.as_ptr().add(i + 4));
+                                let vres = vaddq_f32(vlb, vnoise);
+                                let vres1 = vaddq_f32(vlb1, vnoise1);
+                                vst1q_f32(x.as_mut_ptr().add(i), vres);
+                                vst1q_f32(x.as_mut_ptr().add(i + 4), vres1);
+                                i += 8;
                             }
-                            let vnoise = vld1q_f32(vals.as_ptr());
-                            let vnoise1 = vld1q_f32(vals.as_ptr().add(4));
-                            let vlb = vld1q_f32(lb.as_ptr().add(i));
-                            let vlb1 = vld1q_f32(lb.as_ptr().add(i + 4));
-                            let vres = vaddq_f32(vlb, vnoise);
-                            let vres1 = vaddq_f32(vlb1, vnoise1);
-                            vst1q_f32(x.as_mut_ptr().add(i), vres);
-                            vst1q_f32(x.as_mut_ptr().add(i + 4), vres1);
-                            i += 8;
-                        }
-                        for j in i..n {
-                            ctx.seed = celt_lcg_rand(ctx.seed);
-                            x[j] = lb[j]
-                                + if ctx.seed & 0x8000 != 0 {
-                                    1.0 / 256.0
-                                } else {
-                                    -1.0 / 256.0
-                                };
+                            for j in i..n {
+                                ctx.seed = celt_lcg_rand(ctx.seed);
+                                x[j] = lb[j]
+                                    + if ctx.seed & 0x8000 != 0 {
+                                        1.0 / 256.0
+                                    } else {
+                                        -1.0 / 256.0
+                                    };
+                            }
                         }
                     }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    {
+                    if !neon {
                         for j in 0..n {
                             ctx.seed = celt_lcg_rand(ctx.seed);
                             x[j] = lb[j]
@@ -1400,7 +1358,7 @@ pub fn quant_partition(
                     renormalise_vector(x, n, gain);
                     cm = fill_masked;
                 } else {
-                    for xv in x[..n].iter_mut() {
+                    for xv in &mut x[..n] {
                         ctx.seed = celt_lcg_rand(ctx.seed);
                         *xv = ((ctx.seed as i32 >> 20) as f32) / 16384.0;
                     }
@@ -1413,12 +1371,19 @@ pub fn quant_partition(
     }
 }
 
+/// Non-Hadamard deinterleave used on aarch64 (scalar body despite the name).
+///
+/// # Safety
+///
+/// No safety precondition remains: the body is entirely safe code. `tmp` is
+/// the caller's zero-initialised scratch of length `n0 * stride`, and every
+/// `tmp` and `x` access is bounds-checked (panic, not UB, if either is too
+/// short). The `unsafe` qualifier is a leftover from the former raw-pointer
+/// scratch.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn deinterleave_hadamard_neon(x: &mut [f32], n0: usize, stride: usize) {
+unsafe fn deinterleave_hadamard_neon(x: &mut [f32], tmp: &mut [f32], n0: usize, stride: usize) {
     let n = n0 * stride;
-    let mut tmp_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
-    let tmp = std::slice::from_raw_parts_mut(tmp_buf.as_mut_ptr() as *mut f32, n);
 
     for i in 0..stride {
         let src_offset = i;
@@ -1432,48 +1397,60 @@ unsafe fn deinterleave_hadamard_neon(x: &mut [f32], n0: usize, stride: usize) {
 }
 
 pub fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool) {
+    assert!(
+        n0 * stride <= x.len(),
+        "deinterleave_hadamard: n0 * stride > x.len()"
+    );
     let n = n0 * stride;
-
-    let mut tmp_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
-
-    let tmp = unsafe { std::slice::from_raw_parts_mut(tmp_buf.as_mut_ptr() as *mut f32, n) };
-    if hadamard {
-        let offset = match stride {
-            2 => 0,
-            4 => 2,
-            8 => 6,
-            16 => 14,
-            _ => 0,
-        };
-        let ordery = &ORDERY_TABLE[offset..offset + stride];
-        for i in 0..stride {
-            for j in 0..n0 {
-                tmp[ordery[i] as usize * n0 + j] = x[j * stride + i];
+    // Zero-initialised, size-tiered scratch; the checked slice enforces
+    // n0 * stride <= MAX_PVQ_N (was MaybeUninit + from_raw_parts_mut with the
+    // bound only documented).
+    with_zeroed_scratch(n, |tmp: &mut [f32]| {
+        if hadamard {
+            let offset = match stride {
+                2 => 0,
+                4 => 2,
+                8 => 6,
+                16 => 14,
+                _ => 0,
+            };
+            let ordery = &ORDERY_TABLE[offset..offset + stride];
+            for i in 0..stride {
+                for j in 0..n0 {
+                    tmp[ordery[i] as usize * n0 + j] = x[j * stride + i];
+                }
             }
-        }
-    } else {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            if n0 >= 4 {
-                deinterleave_hadamard_neon(x, n0, stride);
+        } else {
+            #[cfg(target_arch = "aarch64")]
+            if n0 >= 4 && crate::isa::neon() {
+                // SAFETY: the kernel has no remaining precondition: `tmp` and `x`
+                // accesses are bounds-checked.
+                unsafe { deinterleave_hadamard_neon(x, tmp, n0, stride) };
                 return;
             }
-        }
-        for i in 0..stride {
-            for j in 0..n0 {
-                tmp[i * n0 + j] = x[j * stride + i];
+            for i in 0..stride {
+                for j in 0..n0 {
+                    tmp[i * n0 + j] = x[j * stride + i];
+                }
             }
         }
-    }
-    x[..n].copy_from_slice(tmp);
+        x[..n].copy_from_slice(tmp);
+    });
 }
 
+/// Non-Hadamard interleave used on aarch64 (scalar body despite the name).
+///
+/// # Safety
+///
+/// No safety precondition remains: the body is entirely safe code. `tmp` is
+/// the caller's zero-initialised scratch of length `n0 * stride`, and every
+/// `tmp` and `x` access is bounds-checked (panic, not UB, if either is too
+/// short). The `unsafe` qualifier is a leftover from the former raw-pointer
+/// scratch.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn interleave_hadamard_neon(x: &mut [f32], n0: usize, stride: usize) {
+unsafe fn interleave_hadamard_neon(x: &mut [f32], tmp: &mut [f32], n0: usize, stride: usize) {
     let n = n0 * stride;
-    let mut tmp_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
-    let tmp = std::slice::from_raw_parts_mut(tmp_buf.as_mut_ptr() as *mut f32, n);
 
     for i in 0..stride {
         let src_offset = i * n0;
@@ -1487,38 +1464,45 @@ unsafe fn interleave_hadamard_neon(x: &mut [f32], n0: usize, stride: usize) {
 }
 
 pub fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool) {
+    assert!(
+        n0 * stride <= x.len(),
+        "interleave_hadamard: n0 * stride > x.len()"
+    );
     let n = n0 * stride;
-    let mut tmp_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
-    let tmp = unsafe { std::slice::from_raw_parts_mut(tmp_buf.as_mut_ptr() as *mut f32, n) };
-    if hadamard {
-        let offset = match stride {
-            2 => 0,
-            4 => 2,
-            8 => 6,
-            16 => 14,
-            _ => 0,
-        };
-        let ordery = &ORDERY_TABLE[offset..offset + stride];
-        for i in 0..stride {
-            for j in 0..n0 {
-                tmp[j * stride + i] = x[ordery[i] as usize * n0 + j];
+    // Zero-initialised, size-tiered scratch; the checked slice enforces
+    // n0 * stride <= MAX_PVQ_N (was MaybeUninit + from_raw_parts_mut with the
+    // bound only documented).
+    with_zeroed_scratch(n, |tmp: &mut [f32]| {
+        if hadamard {
+            let offset = match stride {
+                2 => 0,
+                4 => 2,
+                8 => 6,
+                16 => 14,
+                _ => 0,
+            };
+            let ordery = &ORDERY_TABLE[offset..offset + stride];
+            for i in 0..stride {
+                for j in 0..n0 {
+                    tmp[j * stride + i] = x[ordery[i] as usize * n0 + j];
+                }
             }
-        }
-    } else {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            if n0 >= 4 {
-                interleave_hadamard_neon(x, n0, stride);
+        } else {
+            #[cfg(target_arch = "aarch64")]
+            if n0 >= 4 && crate::isa::neon() {
+                // SAFETY: the kernel has no remaining precondition: `tmp` and `x`
+                // accesses are bounds-checked.
+                unsafe { interleave_hadamard_neon(x, tmp, n0, stride) };
                 return;
             }
-        }
-        for i in 0..stride {
-            for j in 0..n0 {
-                tmp[j * stride + i] = x[i * n0 + j];
+            for i in 0..stride {
+                for j in 0..n0 {
+                    tmp[j * stride + i] = x[i * n0 + j];
+                }
             }
         }
-    }
-    x[..n].copy_from_slice(tmp);
+        x[..n].copy_from_slice(tmp);
+    });
 }
 
 const ORDERY_TABLE: [i32; 30] = [
@@ -1534,7 +1518,7 @@ fn quant_band_n1(
     let mut sign = 0;
     if ctx.remaining_bits >= 1 << BITRES {
         if ctx.encode {
-            sign = if x[0] < 0.0 { 1 } else { 0 };
+            sign = i32::from(x[0] < 0.0);
             ctx.rc.enc_bits(sign as u32, 1);
         } else {
             sign = ctx.rc.dec_bits(1) as i32;
@@ -1548,7 +1532,7 @@ fn quant_band_n1(
         let mut y_sign = 0;
         if ctx.remaining_bits >= 1 << BITRES {
             if ctx.encode {
-                y_sign = if y_val[0] < 0.0 { 1 } else { 0 };
+                y_sign = i32::from(y_val[0] < 0.0);
                 ctx.rc.enc_bits(y_sign as u32, 1);
             } else {
                 y_sign = ctx.rc.dec_bits(1) as i32;
@@ -1747,14 +1731,7 @@ fn stereo_split(x: &mut [f32], y: &mut [f32], n: usize) {
 }
 
 #[inline(always)]
-fn intensity_stereo(
-    m: &CeltMode,
-    x: &mut [f32],
-    y: &mut [f32],
-    band_e: &[f32],
-    band: usize,
-    n: usize,
-) {
+fn intensity_stereo(m: &CeltMode, x: &mut [f32], y: &[f32], band_e: &[f32], band: usize, n: usize) {
     let left = band_e[band].max(MIN_STEREO_ENERGY);
     let right = band_e[m.nb_ebands + band].max(MIN_STEREO_ENERGY);
     let norm = (left * left + right * right).sqrt().max(MIN_STEREO_ENERGY);
@@ -1782,15 +1759,15 @@ fn special_hybrid_folding(m: &CeltMode, norm: &mut [f32], start: usize, m_val: u
     }
 }
 
-fn prepare_lowband_views(
-    norm: &mut [f32],
-    lowband_scratch_ptr: *mut f32,
+fn prepare_lowband_views<'a>(
+    norm: &'a mut [f32],
+    lowband_scratch: &'a mut [f32],
     allow_lowband_scratch: bool,
     effective_lowband: i32,
     norm_pos: usize,
     n: usize,
     want_out: bool,
-) -> (Option<&mut [f32]>, Option<&mut [f32]>) {
+) -> (Option<&'a mut [f32]>, Option<&'a mut [f32]>) {
     let len = norm.len();
     let out_range = if want_out && norm_pos + n <= len {
         Some((norm_pos, norm_pos + n))
@@ -1813,12 +1790,14 @@ fn prepare_lowband_views(
     }
 
     if allow_lowband_scratch {
-        unsafe {
-            std::ptr::copy_nonoverlapping(norm.as_ptr().add(lb_start), lowband_scratch_ptr, n)
-        };
-        let lb = Some(unsafe { std::slice::from_raw_parts_mut(lowband_scratch_ptr, n) });
+        // Copy the lowband into the caller's scratch buffer (a distinct
+        // allocation) so the band can be coded while `norm` is rewritten.
+        // Safe slices with a shared lifetime replace the former raw-pointer
+        // copy + from_raw_parts_mut.
+        let scratch = &mut lowband_scratch[..n];
+        scratch.copy_from_slice(&norm[lb_start..lb_end]);
         let lb_out = out_range.map(|(s, e)| &mut norm[s..e]);
-        return (lb, lb_out);
+        return (Some(scratch), lb_out);
     }
 
     if let Some((out_start, out_end)) = out_range {
@@ -1840,65 +1819,6 @@ fn prepare_lowband_views(
     (Some(&mut norm[lb_start..lb_end]), None)
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[allow(dead_code)]
-unsafe fn stereo_merge_avx2(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usize) {
-    use std::arch::x86_64::*;
-
-    let mut i = 0;
-
-    let v_mid = _mm256_set1_ps(mid);
-    let v_side = _mm256_set1_ps(side);
-
-    while i + 15 < n {
-        let x0 = _mm256_loadu_ps(x.as_ptr().add(i));
-        let x1 = _mm256_loadu_ps(x.as_ptr().add(i + 8));
-        let y0 = _mm256_loadu_ps(y.as_ptr().add(i));
-        let y1 = _mm256_loadu_ps(y.as_ptr().add(i + 8));
-
-        let x_val0 = _mm256_mul_ps(x0, v_mid);
-        let x_val1 = _mm256_mul_ps(x1, v_mid);
-        let y_val0 = _mm256_mul_ps(y0, v_side);
-        let y_val1 = _mm256_mul_ps(y1, v_side);
-
-        let new_x0 = _mm256_sub_ps(x_val0, y_val0);
-        let new_x1 = _mm256_sub_ps(x_val1, y_val1);
-        let new_y0 = _mm256_add_ps(x_val0, y_val0);
-        let new_y1 = _mm256_add_ps(x_val1, y_val1);
-
-        _mm256_storeu_ps(x.as_mut_ptr().add(i), new_x0);
-        _mm256_storeu_ps(x.as_mut_ptr().add(i + 8), new_x1);
-        _mm256_storeu_ps(y.as_mut_ptr().add(i), new_y0);
-        _mm256_storeu_ps(y.as_mut_ptr().add(i + 8), new_y1);
-
-        i += 16;
-    }
-
-    while i + 7 < n {
-        let x0 = _mm256_loadu_ps(x.as_ptr().add(i));
-        let y0 = _mm256_loadu_ps(y.as_ptr().add(i));
-
-        let x_val = _mm256_mul_ps(x0, v_mid);
-        let y_val = _mm256_mul_ps(y0, v_side);
-
-        let new_x = _mm256_sub_ps(x_val, y_val);
-        let new_y = _mm256_add_ps(x_val, y_val);
-
-        _mm256_storeu_ps(x.as_mut_ptr().add(i), new_x);
-        _mm256_storeu_ps(y.as_mut_ptr().add(i), new_y);
-
-        i += 8;
-    }
-
-    for j in i..n {
-        let x_val = x[j] * mid;
-        let y_val = y[j] * side;
-        x[j] = x_val - y_val;
-        y[j] = x_val + y_val;
-    }
-}
-
 #[allow(dead_code)]
 #[inline]
 fn stereo_merge_scalar(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usize) {
@@ -1907,69 +1827,6 @@ fn stereo_merge_scalar(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usi
         let y_val = y[i] * side;
         x[i] = x_val - y_val;
         y[i] = x_val + y_val;
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[allow(dead_code)]
-fn stereo_merge_neon(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usize) {
-    use std::arch::aarch64::*;
-
-    unsafe {
-        let vmid = vdupq_n_f32(mid);
-        let vside = vdupq_n_f32(side);
-
-        let n16 = n & !15;
-        for i in (0..n16).step_by(16) {
-            let x0 = vld1q_f32(x.as_ptr().add(i));
-            let x1 = vld1q_f32(x.as_ptr().add(i + 4));
-            let x2 = vld1q_f32(x.as_ptr().add(i + 8));
-            let x3 = vld1q_f32(x.as_ptr().add(i + 12));
-
-            let y0 = vld1q_f32(y.as_ptr().add(i));
-            let y1 = vld1q_f32(y.as_ptr().add(i + 4));
-            let y2 = vld1q_f32(y.as_ptr().add(i + 8));
-            let y3 = vld1q_f32(y.as_ptr().add(i + 12));
-
-            let xv0 = vmulq_f32(x0, vmid);
-            let xv1 = vmulq_f32(x1, vmid);
-            let xv2 = vmulq_f32(x2, vmid);
-            let xv3 = vmulq_f32(x3, vmid);
-
-            let yv0 = vmulq_f32(y0, vside);
-            let yv1 = vmulq_f32(y1, vside);
-            let yv2 = vmulq_f32(y2, vside);
-            let yv3 = vmulq_f32(y3, vside);
-
-            vst1q_f32(x.as_mut_ptr().add(i), vsubq_f32(xv0, yv0));
-            vst1q_f32(x.as_mut_ptr().add(i + 4), vsubq_f32(xv1, yv1));
-            vst1q_f32(x.as_mut_ptr().add(i + 8), vsubq_f32(xv2, yv2));
-            vst1q_f32(x.as_mut_ptr().add(i + 12), vsubq_f32(xv3, yv3));
-
-            vst1q_f32(y.as_mut_ptr().add(i), vaddq_f32(xv0, yv0));
-            vst1q_f32(y.as_mut_ptr().add(i + 4), vaddq_f32(xv1, yv1));
-            vst1q_f32(y.as_mut_ptr().add(i + 8), vaddq_f32(xv2, yv2));
-            vst1q_f32(y.as_mut_ptr().add(i + 12), vaddq_f32(xv3, yv3));
-        }
-
-        let n4 = (n & !3) - n16;
-        for i in (n16..n16 + n4).step_by(4) {
-            let xv = vld1q_f32(x.as_ptr().add(i));
-            let yv = vld1q_f32(y.as_ptr().add(i));
-
-            let x_val = vmulq_f32(xv, vmid);
-            let y_val = vmulq_f32(yv, vside);
-
-            vst1q_f32(x.as_mut_ptr().add(i), vsubq_f32(x_val, y_val));
-            vst1q_f32(y.as_mut_ptr().add(i), vaddq_f32(x_val, y_val));
-        }
-
-        for i in (n16 + n4)..n {
-            let x_val = x[i] * mid;
-            let y_val = y[i] * side;
-            x[i] = x_val - y_val;
-            y[i] = x_val + y_val;
-        }
     }
 }
 
@@ -2045,15 +1902,9 @@ pub fn quant_band_stereo(
         if sbits != 0 {
             if ctx.encode {
                 sign = if c {
-                    if (y[0] * x[1] - y[1] * x[0]) < 0.0 {
-                        1
-                    } else {
-                        0
-                    }
-                } else if (x[0] * y[1] - x[1] * y[0]) < 0.0 {
-                    1
+                    i32::from((y[0] * x[1] - y[1] * x[0]) < 0.0)
                 } else {
-                    0
+                    i32::from((x[0] * y[1] - x[1] * y[0]) < 0.0)
                 };
                 ctx.rc.enc_bits(sign as u32, 1);
             } else {
@@ -2190,7 +2041,7 @@ pub fn quant_band_stereo(
     if ctx.resynth {
         stereo_merge(x, y, mid_gain, side_gain, n);
         if sctx.inv {
-            for yv in y[..n].iter_mut() {
+            for yv in &mut y[..n] {
                 *yv = -*yv;
             }
         }
@@ -2235,15 +2086,18 @@ pub fn quant_all_bands(
     const MAX_NORM_SIZE: usize = 800;
     debug_assert!(norm_size <= MAX_NORM_SIZE);
 
-    let mut norm_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_NORM_SIZE];
-    let norm =
-        unsafe { std::slice::from_raw_parts_mut(norm_buf.as_mut_ptr() as *mut f32, norm_size) };
-    let mut norm2_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_NORM_SIZE];
-    let norm2 =
-        unsafe { std::slice::from_raw_parts_mut(norm2_buf.as_mut_ptr() as *mut f32, norm_size) };
+    let mut norm_buf = [0.0f32; MAX_NORM_SIZE];
+    // Zero-initialised (was MaybeUninit + from_raw_parts_mut, which formed a
+    // reference over uninitialised memory); the checked slice also enforces
+    // the length bound that was previously only documented.
+    let norm = &mut norm_buf[..norm_size];
+    let mut norm2_buf = [0.0f32; MAX_NORM_SIZE];
+    // Zero-initialised (was MaybeUninit + from_raw_parts_mut, which formed a
+    // reference over uninitialised memory); the checked slice also enforces
+    // the length bound that was previously only documented.
+    let norm2 = &mut norm2_buf[..norm_size];
 
-    let mut lowband_scratch_buf = [std::mem::MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
-    let lowband_scratch_ptr = lowband_scratch_buf.as_mut_ptr() as *mut f32;
+    let mut lowband_scratch_buf = [0.0f32; MAX_PVQ_N];
 
     let mut lowband_offset: usize = 0;
     let mut update_lowband = true;
@@ -2369,12 +2223,14 @@ pub fn quant_all_bands(
             }
         }
 
-        if *dual_stereo {
-            let y_slice = &mut y.as_mut().unwrap()[offset..offset + n];
+        // dual_stereo is only ever decoded for stereo, where `y` is Some; a
+        // missing `y` falls through to the mono path instead of panicking.
+        if let (true, Some(y_dual)) = (*dual_stereo, y.as_mut()) {
+            let y_slice = &mut y_dual[offset..offset + n];
 
             let (lb_x, lb_out_x) = prepare_lowband_views(
                 norm,
-                lowband_scratch_ptr,
+                &mut lowband_scratch_buf,
                 allow_lowband_scratch,
                 effective_lowband,
                 norm_pos,
@@ -2396,7 +2252,7 @@ pub fn quant_all_bands(
 
             let (lb_y, lb_out_y) = prepare_lowband_views(
                 norm2,
-                lowband_scratch_ptr,
+                &mut lowband_scratch_buf,
                 allow_lowband_scratch,
                 effective_lowband,
                 norm_pos,
@@ -2419,7 +2275,7 @@ pub fn quant_all_bands(
             let y_slice = &mut y_all[offset..offset + n];
             let (lb, lb_out) = prepare_lowband_views(
                 norm,
-                lowband_scratch_ptr,
+                &mut lowband_scratch_buf,
                 allow_lowband_scratch,
                 effective_lowband,
                 norm_pos,
@@ -2443,7 +2299,7 @@ pub fn quant_all_bands(
         } else {
             let (lb, lb_out) = prepare_lowband_views(
                 norm,
-                lowband_scratch_ptr,
+                &mut lowband_scratch_buf,
                 allow_lowband_scratch,
                 effective_lowband,
                 norm_pos,
@@ -2476,6 +2332,11 @@ fn compute_band_energy_neon(band: &[f32]) -> f32 {
     let n = band.len();
     let mut sum = 1e-27f32;
 
+    // SAFETY: NEON is a baseline feature of the aarch64 targets this crate
+    // builds for (the caller additionally gates on `isa::neon()`).
+    // `n = band.len()`, and the vector loops only load `band[i..i + 16]` with
+    // `i + 16 <= n16 <= n` and `band[i..i + 4]` with `i + 4 <= n & !3 <= n`,
+    // so every raw-pointer load is in bounds; the tail is bounds-checked.
     unsafe {
         let n16 = n & !15;
         if n16 > 0 {
@@ -2521,9 +2382,21 @@ fn compute_band_energy_neon(band: &[f32]) -> f32 {
     sum.sqrt()
 }
 
+/// AVX2+FMA L2 norm of `band` (plus the 1e-27 floor).
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 and FMA
+///   (`#[target_feature(enable = "avx2,fma")]`); check with
+///   `crate::isa::avx2_fma()` before calling.
+/// - No length precondition: all unaligned loads are bounded by
+///   `band.len()` (`i + 16 <= n` / `i + 8 <= n` with `n = band.len()`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn compute_band_energy_avx2(band: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let n = band.len();
@@ -2574,7 +2447,9 @@ pub fn compute_band_energies(
     let frame_size = m.short_mdct_size << lm;
 
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = std::arch::is_x86_feature_detected!("avx2");
+    let use_avx2 = crate::isa::avx2_fma();
+    #[cfg(target_arch = "aarch64")]
+    let use_neon = crate::isa::neon();
 
     for c in 0..channels {
         let ch = &x[c * frame_size..(c + 1) * frame_size];
@@ -2584,23 +2459,20 @@ pub fn compute_band_energies(
             let band = &ch[offset..offset + n];
 
             #[cfg(target_arch = "aarch64")]
-            {
+            if use_neon {
                 band_e[c * m.nb_ebands + i] = compute_band_energy_neon(band);
+                continue;
             }
             #[cfg(target_arch = "x86_64")]
-            {
-                if n >= 8 && use_avx2 {
-                    band_e[c * m.nb_ebands + i] = unsafe { compute_band_energy_avx2(band) };
-                } else {
-                    let sum = band.iter().fold(1e-27f32, |acc, &v| acc + v * v);
-                    band_e[c * m.nb_ebands + i] = sum.sqrt();
-                }
+            if n >= 8 && use_avx2 {
+                // SAFETY: `use_avx2` is `isa::avx2_fma()`, matching the kernel's
+                // `avx2,fma` target features; the kernel bounds all loads by
+                // `band.len()`, so it has no further precondition.
+                band_e[c * m.nb_ebands + i] = unsafe { compute_band_energy_avx2(band) };
+                continue;
             }
-            #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
-            {
-                let sum = band.iter().fold(1e-27f32, |acc, &v| acc + v * v);
-                band_e[c * m.nb_ebands + i] = sum.sqrt();
-            }
+            let sum = band.iter().fold(1e-27f32, |acc, &v| acc + v * v);
+            band_e[c * m.nb_ebands + i] = sum.sqrt();
         }
     }
 }
@@ -2645,7 +2517,7 @@ pub fn normalise_bands(
     let lm = m_val.trailing_zeros() as usize;
     let frame_size = m.short_mdct_size << lm;
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = std::arch::is_x86_feature_detected!("avx2");
+    let use_avx2 = crate::isa::avx2();
     for c in 0..channels {
         for i in 0..end {
             let base = c * frame_size + ((m.e_bands[i] as usize) << lm);
@@ -2655,11 +2527,18 @@ pub fn normalise_bands(
             let dst = &mut x[base..base + n];
             #[cfg(target_arch = "x86_64")]
             if n >= 8 && use_avx2 {
+                // SAFETY: `use_avx2` is `isa::avx2()`, matching the kernel's
+                // `avx2` target feature; `src` and `dst` were sliced (bounds-
+                // checked) as `[base..base + n]`, so both have exactly `n`
+                // elements.
                 unsafe { scale_slice_avx2(src, dst, norm, n) };
                 continue;
             }
             #[cfg(target_arch = "aarch64")]
-            if n >= 8 {
+            if n >= 8 && crate::isa::neon() {
+                // SAFETY: `isa::neon()` was checked in the condition; `src` and
+                // `dst` are bounds-checked `[base..base + n]` slices, so both
+                // have exactly `n` elements.
                 unsafe { scale_slice_neon(src, dst, norm, n) };
                 continue;
             }
@@ -2670,9 +2549,22 @@ pub fn normalise_bands(
     }
 }
 
+/// AVX2 `dst[i] = src[i] * scale` for `i < n`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 (`#[target_feature(enable = "avx2")]`); check
+///   with `crate::isa::avx2()` before calling.
+/// - `src.len() >= n` and `dst.len() >= n`: the vector loops load
+///   `src[0..i]` and store `dst[0..i]` (largest multiple of 8 `i <= n`)
+///   through unaligned raw pointers with no bounds checks; only the scalar
+///   tail is checked.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn scale_slice_avx2(src: &[f32], dst: &mut [f32], scale: f32, n: usize) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
     let vscale = _mm256_set1_ps(scale);
     let mut i = 0;
@@ -2694,6 +2586,16 @@ unsafe fn scale_slice_avx2(src: &[f32], dst: &mut [f32], scale: f32, n: usize) {
     }
 }
 
+/// NEON `dst[i] = src[i] * scale` for `i < n`.
+///
+/// # Safety
+///
+/// - NEON must be available (baseline on aarch64; callers gate on
+///   `crate::isa::neon()`).
+/// - `src.len() >= n` and `dst.len() >= n`: the vector loops load
+///   `src[0..i]` and store `dst[0..i]` (largest multiple of 4 `i <= n`)
+///   through raw pointers with no bounds checks; only the scalar tail is
+///   checked.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -2744,7 +2646,7 @@ pub fn denormalise_bands(
     let lm = m_val.trailing_zeros() as usize;
     let frame_size = m.short_mdct_size << lm;
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = std::arch::is_x86_feature_detected!("avx2");
+    let use_avx2 = crate::isa::avx2();
 
     for c in 0..channels {
         for i in start..end {
@@ -2764,11 +2666,19 @@ pub fn denormalise_bands(
             let dst = &mut freq[base..base + n];
             #[cfg(target_arch = "x86_64")]
             if n >= 8 && use_avx2 {
+                // SAFETY: `use_avx2` is `isa::avx2()`, matching the kernel's
+                // `avx2` target feature; `src` and `dst` are bounds-checked
+                // `[base..base + n]` slices (and `base + n` was also checked
+                // against both buffers above), so both have exactly `n`
+                // elements.
                 unsafe { scale_slice_avx2(src, dst, g, n) };
                 continue;
             }
             #[cfg(target_arch = "aarch64")]
-            if n >= 8 {
+            if n >= 8 && crate::isa::neon() {
+                // SAFETY: `isa::neon()` was checked in the condition; `src` and
+                // `dst` are bounds-checked `[base..base + n]` slices, so both
+                // have exactly `n` elements.
                 unsafe { scale_slice_neon(src, dst, g, n) };
                 continue;
             }
@@ -2783,6 +2693,15 @@ pub fn celt_lcg_rand(seed: u32) -> u32 {
     seed.wrapping_mul(1664525).wrapping_add(1013904223)
 }
 
+/// NEON in-place `x[..n] *= gain / ||x[..n]||`.
+///
+/// # Safety
+///
+/// - NEON must be available (baseline on aarch64; callers gate on
+///   `crate::isa::neon()`).
+/// - `x.len() >= n`: both passes load (and the second stores) `x[0..i]`
+///   (largest multiple of 4 `i <= n`) through raw pointers with no bounds
+///   checks; only the scalar tails are checked.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -2859,9 +2778,24 @@ unsafe fn renormalise_vector_neon(x: &mut [f32], n: usize, gain: f32) {
     }
 }
 
+/// AVX2+FMA in-place `x[..n] *= gain / ||x[..n]||`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 and FMA
+///   (`#[target_feature(enable = "avx2,fma")]`); check with
+///   `crate::isa::avx2_fma()` before calling.
+/// - `x.len() >= n`: the vector loops load (and the second pass stores)
+///   `x[0..i]` (largest multiple of 8 `i <= n`) through unaligned raw
+///   pointers with no bounds checks. The `&x[i..n]` tail slices are checked,
+///   but the first one runs only after the unchecked loads, so it cannot
+///   prevent an out-of-bounds read.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn renormalise_vector_avx2(x: &mut [f32], n: usize, gain: f32) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let mut i = 0usize;
@@ -2918,38 +2852,30 @@ unsafe fn renormalise_vector_avx2(x: &mut [f32], n: usize, gain: f32) {
 }
 
 pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
+    assert!(n <= x.len(), "renormalise_vector: n = {n} > x.len()");
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        renormalise_vector_neon(x, n, gain);
+    if crate::isa::neon() {
+        // SAFETY: `isa::neon()` was checked above. The kernel needs
+        // `x.len() >= n`, which the `assert!` at the top of this function
+        // enforces.
+        unsafe { renormalise_vector_neon(x, n, gain) };
+        return;
     }
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        if n >= 16 && std::arch::is_x86_feature_detected!("avx2") {
-            renormalise_vector_avx2(x, n, gain);
-            return;
-        }
+    if n >= 16 && crate::isa::avx2_fma() {
+        // SAFETY: `isa::avx2_fma()` in the condition matches the kernel's
+        // `avx2,fma` target features. The kernel needs `x.len() >= n`, which
+        // the `assert!` at the top of this function enforces.
+        unsafe { renormalise_vector_avx2(x, n, gain) };
+        return;
     }
-    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
-    {
-        let mut e = 1e-15f32;
-        for &xv in x[..n].iter() {
-            e += xv * xv;
-        }
-        let norm = gain / e.sqrt();
-        for xv in x[..n].iter_mut() {
-            *xv *= norm;
-        }
+    let mut e = 1e-15f32;
+    for &xv in &x[..n] {
+        e += xv * xv;
     }
-    #[cfg(target_arch = "x86_64")]
-    {
-        let mut e = 1e-15f32;
-        for &xv in x[..n].iter() {
-            e += xv * xv;
-        }
-        let norm = gain / e.sqrt();
-        for xv in x[..n].iter_mut() {
-            *xv *= norm;
-        }
+    let norm = gain / e.sqrt();
+    for xv in &mut x[..n] {
+        *xv *= norm;
     }
 }
 
@@ -3036,5 +2962,70 @@ mod tests {
         assert_eq!(bitexact_log2tan(30274, 12540), 2611);
         assert_eq!(bitexact_log2tan(23171, 23171), 0);
         assert_eq!(bitexact_log2tan(200, 32767), -15059);
+    }
+}
+
+/// SIMD-vs-scalar oracle for the band energy / (de)normalisation dispatchers.
+#[cfg(test)]
+mod isa_oracle {
+    use super::*;
+    use crate::isa::oracle::{Rng, both, close_slices};
+
+    #[test]
+    fn band_energy_and_normalisation_match_scalar() {
+        let m = crate::modes::default_mode();
+        let mut r = Rng(0x0bad_cafe_dead_beef);
+        for _ in 0..crate::isa::oracle::iters(400) {
+            let lm = r.below(m.max_lm + 1);
+            let mv = 1usize << lm;
+            let n = m.short_mdct_size << lm;
+            let ch = 1 + r.below(2);
+            let end = 1 + r.below(m.nb_ebands);
+            let x = r.vec(n * ch, 30000.0);
+            let (e_s, e_c) = both(|| {
+                let mut e = vec![0.0f32; m.nb_ebands * ch];
+                compute_band_energies(m, &x, &mut e, end, ch, lm);
+                e
+            });
+            close_slices(
+                &e_s,
+                &e_c,
+                &format!("compute_band_energies lm={lm} end={end} ch={ch}"),
+            );
+            let (n_s, n_c) = both(|| {
+                let mut o = vec![0.0f32; n * ch];
+                normalise_bands(m, &x, &mut o, &e_c, end, ch, mv);
+                o
+            });
+            close_slices(&n_s, &n_c, &format!("normalise_bands lm={lm}"));
+            let amp: Vec<f32> = (0..m.nb_ebands * ch).map(|_| r.f32(6.0)).collect();
+            let start = r.below(end);
+            let (d_s, d_c) = both(|| {
+                let mut f = vec![0.0f32; n * ch];
+                denormalise_bands(m, &n_c, &mut f, &amp, start, end, ch, mv);
+                f
+            });
+            close_slices(
+                &d_s,
+                &d_c,
+                &format!("denormalise_bands lm={lm} start={start} end={end}"),
+            );
+        }
+    }
+
+    #[test]
+    fn renormalise_vector_matches_scalar() {
+        let mut r = Rng(0x1357_9bdf_2468_ace0);
+        for _ in 0..crate::isa::oracle::iters(3000) {
+            let n = 1 + r.below(176);
+            let x0 = r.vec(n, 4.0);
+            let gain = 0.1 + r.f32(1.0).abs();
+            let (s, c) = both(|| {
+                let mut x = x0.clone();
+                renormalise_vector(&mut x, n, gain);
+                x
+            });
+            close_slices(&s, &c, &format!("renormalise_vector n={n}"));
+        }
     }
 }

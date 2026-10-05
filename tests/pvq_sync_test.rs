@@ -10,12 +10,12 @@ fn test_pvq_sync() {
     y[19] = 2;
 
     let index = icwrs(n, k, &y);
-    println!("Vector: {:?}", y);
-    println!("N={}, K={}, Index={}", n, k, index);
+    println!("Vector: {y:?}");
+    println!("N={n}, K={k}, Index={index}");
 
     let mut y2 = vec![0i32; n as usize];
     cwrsi(n, k, index, &mut y2);
-    println!("Decoded: {:?}", y2);
+    println!("Decoded: {y2:?}");
 
     assert_eq!(y, y2, "PVQ Sync Failure!");
     println!("PVQ Sync Success for N=20, K=10");
@@ -27,7 +27,7 @@ fn test_pvq_sync() {
     y[5] = -3;
     y[9] = 2;
     let index = icwrs(n, k, &y);
-    println!("N={}, K={}, Index (big K)={}", n, k, index);
+    println!("N={n}, K={k}, Index (big K)={index}");
     let mut y2 = vec![0i32; n as usize];
     cwrsi(n, k, index, &mut y2);
     assert_eq!(y, y2, "PVQ Sync Failure (big K)!");

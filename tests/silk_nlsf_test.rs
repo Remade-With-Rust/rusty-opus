@@ -37,7 +37,7 @@ fn test_nlsf_encode_decode_nb_mb() {
     println!("  Original NLSF: {:?}", &nlsf_original[..order]);
     println!("  Quantized NLSF: {:?}", &nlsf_quantized[..order]);
     println!("  Indices: {:?}", &indices[..order + 1]);
-    println!("  RD cost (Q25): {}", rd_q25);
+    println!("  RD cost (Q25): {rd_q25}");
 
     // Decode
     let mut nlsf_decoded = [0i16; MAX_LPC_ORDER];
@@ -116,7 +116,7 @@ fn test_nlsf_encode_decode_wb() {
     println!("  Original NLSF: {:?}", &nlsf_original[..order]);
     println!("  Quantized NLSF: {:?}", &nlsf_quantized[..order]);
     println!("  Indices: {:?}", &indices[..order + 1]);
-    println!("  RD cost (Q25): {}", rd_q25);
+    println!("  RD cost (Q25): {rd_q25}");
 
     // Decode
     let mut nlsf_decoded = [0i16; MAX_LPC_ORDER];
@@ -194,7 +194,7 @@ fn test_nlsf_stability() {
         min_spacing = min_spacing.min(spacing);
     }
 
-    println!("  Minimum spacing: {}", min_spacing);
+    println!("  Minimum spacing: {min_spacing}");
 
     // Verify NLSFs are still ordered (basic requirement)
     for i in 1..order {
@@ -238,7 +238,6 @@ fn test_nlsf_interpolation_activated_at_complexity5() {
 
     // Encode multiple frames and verify output is valid (non-empty, non-crashing)
     let mut bytes_interp = Vec::new();
-    let mut bytes_no_interp = Vec::new();
 
     for frame_idx in 0..10 {
         let mut input = vec![0.0f32; frame_size];
@@ -253,9 +252,7 @@ fn test_nlsf_interpolation_activated_at_complexity5() {
             .expect("Encode with interpolation failed");
         assert!(
             n_interp >= 3,
-            "Frame {}: Interpolation output too short: {}",
-            frame_idx,
-            n_interp
+            "Frame {frame_idx}: Interpolation output too short: {n_interp}"
         );
         bytes_interp.push(n_interp);
 
@@ -265,25 +262,16 @@ fn test_nlsf_interpolation_activated_at_complexity5() {
             .expect("Encode without interpolation failed");
         assert!(
             n_no_interp >= 3,
-            "Frame {}: No-interpolation output too short: {}",
-            frame_idx,
-            n_no_interp
+            "Frame {frame_idx}: No-interpolation output too short: {n_no_interp}"
         );
-        bytes_no_interp.push(n_no_interp);
 
-        println!(
-            "Frame {}: interp={} bytes, no_interp={} bytes",
-            frame_idx, n_interp, n_no_interp
-        );
+        println!("Frame {frame_idx}: interp={n_interp} bytes, no_interp={n_no_interp} bytes");
     }
 
     // Both encoders should produce a range of output sizes (VBR mode)
     let max_interp = *bytes_interp.iter().max().unwrap();
     let min_interp = *bytes_interp.iter().min().unwrap();
-    println!(
-        "Interpolation encoder: min={} max={} bytes",
-        min_interp, max_interp
-    );
+    println!("Interpolation encoder: min={min_interp} max={max_interp} bytes");
 
     println!("✅ NLSF interpolation test passed - encoder runs correctly at complexity=5");
 }
@@ -315,8 +303,8 @@ fn test_nlsf_interpolation_40ms_frames() {
             .encode(&input, frame_size, &mut output)
             .expect("40ms encode failed");
 
-        assert!(n >= 3, "Frame {}: output too short: {}", frame_idx, n);
-        println!("40ms Frame {}: {} bytes encoded", frame_idx, n);
+        assert!(n >= 3, "Frame {frame_idx}: output too short: {n}");
+        println!("40ms Frame {frame_idx}: {n} bytes encoded");
     }
 
     println!("✅ NLSF interpolation 40ms multi-frame test passed");
@@ -369,9 +357,7 @@ fn test_nlsf_interp_coefficient_bounds() {
         for i in 1..order {
             assert!(
                 decoded[i] > decoded[i - 1],
-                "interp_coef={}: NLSF ordering violated at index {}",
-                interp_coef_q2,
-                i
+                "interp_coef={interp_coef_q2}: NLSF ordering violated at index {i}"
             );
         }
 

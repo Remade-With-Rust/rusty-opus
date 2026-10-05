@@ -30,39 +30,39 @@ pub fn get_pulses(i: i32) -> i32 {
 pub fn bits2pulses(m: &CeltMode, band: usize, mut lm: i32, bits: i32) -> i32 {
     lm += 1;
     let idx = lm as usize * m.nb_ebands + band;
-    let cache_index = unsafe { *m.cache.index.get_unchecked(idx) };
+    // Checked indexing throughout (was get_unchecked / raw-pointer reads that
+    // relied on an unchecked caller contract): out-of-range band/lm now panics
+    // instead of reading out of bounds. Cost: a few compares per band.
+    let cache_index = m.cache.index[idx];
     if cache_index < 0 {
         return 0;
     }
     let cache = &m.cache.bits[cache_index as usize..];
-    let cache_ptr = cache.as_ptr();
 
     let mut lo = 0i32;
-    let mut hi = unsafe { *cache_ptr } as i32;
+    let mut hi = cache[0] as i32;
     let bits = bits - 1; // bits--
 
-    unsafe {
-        for _ in 0..6 {
-            // LOG_MAX_PSEUDO = 6
-            let mid = (lo + hi + 1) >> 1; // round up, matches C
-            if *cache_ptr.add(mid as usize) as i32 >= bits {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
+    for _ in 0..6 {
+        // LOG_MAX_PSEUDO = 6
+        let mid = (lo + hi + 1) >> 1; // round up, matches C
+        if cache[mid as usize] as i32 >= bits {
+            hi = mid;
+        } else {
+            lo = mid;
         }
+    }
 
-        let lo_val = if lo == 0 {
-            -1i32
-        } else {
-            *cache_ptr.add(lo as usize) as i32
-        };
-        let hi_val = *cache_ptr.add(hi as usize) as i32;
-        if bits - lo_val <= hi_val - bits {
-            lo
-        } else {
-            hi
-        }
+    let lo_val = if lo == 0 {
+        -1i32
+    } else {
+        cache[lo as usize] as i32
+    };
+    let hi_val = cache[hi as usize] as i32;
+    if bits - lo_val <= hi_val - bits {
+        lo
+    } else {
+        hi
     }
 }
 
@@ -73,13 +73,14 @@ pub fn pulses2bits(m: &CeltMode, band: usize, mut lm: i32, pulses: i32) -> i32 {
     }
     lm += 1;
     let idx = lm as usize * m.nb_ebands + band;
-    let cache_index = unsafe { *m.cache.index.get_unchecked(idx) };
+    // Checked indexing (was get_unchecked / raw-pointer read on an unchecked
+    // caller contract).
+    let cache_index = m.cache.index[idx];
     if cache_index < 0 {
         return 0;
     }
     let cache = &m.cache.bits[cache_index as usize..];
-
-    unsafe { (*cache.as_ptr().add(pulses as usize) as i32) + 1 }
+    cache[pulses as usize] as i32 + 1
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -276,7 +277,7 @@ fn interp_bits2pulses(
     let mut lo = 0;
     let mut hi = 1 << 6;
     let alloc_floor = c << BITRES;
-    let stereo = if c > 1 { 1 } else { 0 };
+    let stereo = i32::from(c > 1);
     let log_m = lm << BITRES;
 
     let mut bits_buf = [0i32; MAX_EBANDS];
@@ -400,7 +401,7 @@ fn interp_bits2pulses(
         if encode {
             rc.encode_bit_logp(*dual_stereo != 0, 1);
         } else {
-            *dual_stereo = if rc.decode_bit_logp(1) { 1 } else { 0 };
+            *dual_stereo = i32::from(rc.decode_bit_logp(1));
         }
     } else {
         *dual_stereo = 0;
@@ -438,12 +439,8 @@ fn interp_bits2pulses(
             excess = max(bit - cap[j], 0);
             bits[j] = bit - excess;
 
-            let den = c * n
-                + (if c == 2 && n > 2 && *dual_stereo == 0 && (j as i32) < *intensity {
-                    1
-                } else {
-                    0
-                });
+            let den =
+                c * n + i32::from(c == 2 && n > 2 && *dual_stereo == 0 && (j as i32) < *intensity);
             let nc_log_n = den * (m.log_n[j] as i32 + log_m);
             let mut offset = (nc_log_n >> 1) - den * FINE_OFFSET;
 
@@ -470,11 +467,7 @@ fn interp_bits2pulses(
                 ebits[j] = bits[j] >> stereo >> BITRES;
             }
             ebits[j] = min(ebits[j], MAX_FINE_BITS);
-            fine_priority[j] = if ebits[j] * (den << BITRES) >= bits[j] + offset {
-                1
-            } else {
-                0
-            };
+            fine_priority[j] = i32::from(ebits[j] * (den << BITRES) >= bits[j] + offset);
             bits[j] -= (c * ebits[j]) << BITRES;
         } else {
             excess = max(0, bit - (c << BITRES));
@@ -487,7 +480,7 @@ fn interp_bits2pulses(
             let extra_fine = min(excess >> (stereo + BITRES), MAX_FINE_BITS - ebits[j]);
             ebits[j] += extra_fine;
             let extra_bits = (extra_fine * c) << BITRES;
-            fine_priority[j] = if extra_bits >= excess - balance { 1 } else { 0 };
+            fine_priority[j] = i32::from(extra_bits >= excess - balance);
             excess -= extra_bits;
         }
         balance = excess;
@@ -498,7 +491,7 @@ fn interp_bits2pulses(
     for j in coded_bands..end {
         ebits[j] = bits[j] >> stereo >> BITRES;
         bits[j] = 0;
-        fine_priority[j] = if ebits[j] < 1 { 1 } else { 0 };
+        fine_priority[j] = i32::from(ebits[j] < 1);
         pulses[j] = 0;
     }
 

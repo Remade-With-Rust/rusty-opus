@@ -9,11 +9,7 @@ pub fn silk_decode_core(
     xq: &mut [i16],
     pulses: &[i16],
 ) {
-    let nlsf_interpolation_flag = if ps_dec.indices.nlsf_interp_coef_q2 < 4 {
-        1
-    } else {
-        0
-    };
+    let nlsf_interpolation_flag = i32::from(ps_dec.indices.nlsf_interp_coef_q2 < 4);
 
     let offset_q10 = SILK_QUANTIZATION_OFFSETS_Q10[(ps_dec.indices.signal_type >> 1) as usize]
         [ps_dec.indices.quant_offset_type as usize] as i32;
@@ -56,7 +52,7 @@ pub fn silk_decode_core(
 
     for k in 0..ps_dec.nb_subfr as usize {
         let a_q12 = &ps_dec_ctrl.pred_coef_q12[k >> 1];
-        let b_q14 = &ps_dec_ctrl.ltp_coef_q14[k * LTP_ORDER..];
+        let mut b_q14 = &ps_dec_ctrl.ltp_coef_q14[k * LTP_ORDER..];
         let signal_type = ps_dec.indices.signal_type;
 
         let mut inv_gain_q31 = silk_inverse32_varq(ps_dec_ctrl.gains_q16[k], 47);
@@ -74,11 +70,15 @@ pub fn silk_decode_core(
 
         ps_dec.prev_gain_q16 = ps_dec_ctrl.gains_q16[k];
 
+        // "Avoid abrupt transition from voiced PLC to unvoiced normal decoding":
+        // a pure 0.25 centre LTP tap at the previous lag (decode_core.c).
+        const PLC_TO_UNVOICED_B_Q14: [i16; LTP_ORDER] = [0, 0, 4096, 0, 0];
         let (eff_signal_type, eff_pitch_l) = if ps_dec.loss_cnt > 0
             && ps_dec.prev_signal_type == TYPE_VOICED
             && ps_dec.indices.signal_type as i32 != TYPE_VOICED
             && k < MAX_NB_SUBFR / 2
         {
+            b_q14 = &PLC_TO_UNVOICED_B_Q14;
             (TYPE_VOICED, ps_dec.lag_prev)
         } else {
             (signal_type as i32, ps_dec_ctrl.pitch_l[k])

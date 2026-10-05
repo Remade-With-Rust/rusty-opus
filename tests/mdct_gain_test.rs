@@ -27,5 +27,5 @@ fn test_mdct_gain() {
     println!("Output[core]: {:?}", &output[overlap..overlap + 10]);
 
     let gain = output[overlap] / input[overlap];
-    println!("Total Loopback Gain: {}", gain);
+    println!("Total Loopback Gain: {gain}");
 }

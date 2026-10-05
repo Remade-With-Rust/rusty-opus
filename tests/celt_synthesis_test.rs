@@ -137,17 +137,13 @@ fn celt_synthesis_chain_bypass() {
         }
     }
 
-    eprintln!(
-        "Synthesis chain bypass: Best SNR = {:.2} dB at delay {}",
-        best_snr, best_delay
-    );
+    eprintln!("Synthesis chain bypass: Best SNR = {best_snr:.2} dB at delay {best_delay}");
 
     // TODO: With no quantization, this should be near-perfect (>60 dB)
     // Current implementation achieves ~3 dB, indicating MDCT/emphasis issues
     assert!(
         best_snr > 0.0,
-        "Synthesis chain SNR too low: {:.2} dB — MDCT or emphasis bug",
-        best_snr
+        "Synthesis chain SNR too low: {best_snr:.2} dB — MDCT or emphasis bug"
     );
 }
 
@@ -415,16 +411,12 @@ fn celt_energy_roundtrip_only() {
         }
     }
 
-    eprintln!(
-        "Energy roundtrip only: Best SNR = {:.2} dB at delay {}",
-        best_snr, best_delay
-    );
+    eprintln!("Energy roundtrip only: Best SNR = {best_snr:.2} dB at delay {best_delay}");
 
     // TODO: Energy quantization adds noise but should still be >10 dB
     // Current implementation achieves ~3 dB, needs improvement
     assert!(
         best_snr > 0.0,
-        "Energy-only roundtrip SNR too low: {:.2} dB",
-        best_snr
+        "Energy-only roundtrip SNR too low: {best_snr:.2} dB"
     );
 }

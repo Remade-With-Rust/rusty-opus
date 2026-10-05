@@ -93,19 +93,15 @@ fn test_silk_encode_decode_loopback() {
         all_decoded.extend_from_slice(&decoded[..dec_len]);
     }
 
-    eprintln!(
-        "Total encoded: {} bytes for {} frames",
-        total_encoded_bytes, num_frames
-    );
+    eprintln!("Total encoded: {total_encoded_bytes} bytes for {num_frames} frames");
     eprintln!("Total decoded: {} samples", all_decoded.len());
 
     // Verify: decoded output should not be all zeros
     let max_abs: f32 = all_decoded.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-    eprintln!("Max absolute decoded value: {}", max_abs);
+    eprintln!("Max absolute decoded value: {max_abs}");
     assert!(
         max_abs > 0.001,
-        "Decoded output is essentially silence (max_abs={})",
-        max_abs
+        "Decoded output is essentially silence (max_abs={max_abs})"
     );
 
     // Verify basic signal quality with delay compensation:
@@ -133,17 +129,12 @@ fn test_silk_encode_decode_loopback() {
             }
         }
     }
-    eprintln!(
-        "Delay-compensated SNR: {:.2} dB (delay={} samples)",
-        best_snr, best_delay
-    );
+    eprintln!("Delay-compensated SNR: {best_snr:.2} dB (delay={best_delay} samples)");
 
     // For SILK at 10kbps, we expect reasonable signal reconstruction
     assert!(
         best_snr > 5.0,
-        "SNR too low: {:.2} dB at delay {} (possible decoding corruption)",
-        best_snr,
-        best_delay
+        "SNR too low: {best_snr:.2} dB at delay {best_delay} (possible decoding corruption)"
     );
 }
 
@@ -168,7 +159,7 @@ fn test_silk_encode_decode_nonzero_output() {
     let enc_len = encoder.encode(&input, frame_size, &mut encoded).unwrap();
     encoded.truncate(enc_len);
 
-    assert!(enc_len > 1, "Encoded output too short: {} bytes", enc_len);
+    assert!(enc_len > 1, "Encoded output too short: {enc_len} bytes");
 
     // Verify it's a SILK packet
     let toc = encoded[0];
@@ -176,8 +167,7 @@ fn test_silk_encode_decode_nonzero_output() {
     // SILK-only: bit 7 = 0, bits 5-6 != 11
     assert!(
         toc & 0x80 == 0,
-        "Expected SILK mode, got CELT (TOC=0x{:02x})",
-        toc
+        "Expected SILK mode, got CELT (TOC=0x{toc:02x})"
     );
 
     // Decode
@@ -225,7 +215,7 @@ fn test_silk_multi_frame_continuity() {
     // After warmup (skip first 2 frames), the decoded signal should have some periodicity
     let skip = 2 * frame_size;
     let snr = compute_snr(&input, &all_decoded, skip);
-    eprintln!("Multi-frame SNR (skip 2 frames): {:.2} dB", snr);
+    eprintln!("Multi-frame SNR (skip 2 frames): {snr:.2} dB");
 
     // At 16kbps, we should get reasonable reconstruction
     // Even with numerical differences, the signal should be recognizable
@@ -235,7 +225,6 @@ fn test_silk_multi_frame_continuity() {
         .fold(0.0f32, f32::max);
     assert!(
         max_abs > 0.01,
-        "Decoded output is near-silence after warmup (max_abs={})",
-        max_abs
+        "Decoded output is near-silence after warmup (max_abs={max_abs})"
     );
 }

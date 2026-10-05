@@ -1,5 +1,6 @@
-use crate::silk::decoder_structs::SilkDecoderState;
+use crate::silk::decoder_structs::{SilkCNGState, SilkDecoderState, SilkPLCState};
 use crate::silk::define::*;
+use crate::silk::structs::SideInfoIndices;
 use crate::silk::tables_nlsf::*;
 
 pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i32) -> i32 {
@@ -59,9 +60,8 @@ pub fn silk_decoder_set_fs(dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i
     };
 
     dec.ps_nlsf_cb = match fs_khz {
-        8 => Some(&SILK_NLSF_CB_NB_MB),
-        12 => Some(&SILK_NLSF_CB_NB_MB),
-        _ => Some(&SILK_NLSF_CB_WB),
+        8 | 12 => &SILK_NLSF_CB_NB_MB,
+        _ => &SILK_NLSF_CB_WB,
     };
 
     if fs_changed {
@@ -92,7 +92,7 @@ pub fn silk_reset_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
     ps_dec.prev_nlsf_q15.fill(0);
     ps_dec.loss_cnt = 0;
     ps_dec.prev_signal_type = TYPE_NO_VOICE_ACTIVITY;
-    ps_dec.indices = Default::default();
+    ps_dec.indices = SideInfoIndices::default();
     // silk_decoder_set_fs relies on nb_subfr already holding a valid value (the
     // caller sets it per-packet); seed it so the very first set_fs computes the
     // right frame_length / pitch-contour table.
@@ -104,10 +104,10 @@ pub fn silk_reset_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
 pub fn silk_init_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
     silk_reset_decoder(ps_dec);
 
-    ps_dec.s_cng = Default::default();
+    ps_dec.s_cng = SilkCNGState::default();
     crate::silk::cng::silk_cng_reset(ps_dec);
 
-    ps_dec.s_plc = Default::default();
+    ps_dec.s_plc = SilkPLCState::default();
 
     0
 }

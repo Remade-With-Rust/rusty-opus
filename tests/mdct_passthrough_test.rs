@@ -92,17 +92,12 @@ fn test_celt_mdct_passthrough() {
         }
     }
 
-    eprintln!(
-        "CELT MDCT passthrough: best SNR = {:.2} dB at delay = {}",
-        best_snr, best_delay
-    );
+    eprintln!("CELT MDCT passthrough: best SNR = {best_snr:.2} dB at delay = {best_delay}");
 
     // TODO: Current MDCT implementation has quality issues
     // Target: >60 dB, Current: varies
     assert!(
         best_snr > 0.0,
-        "MDCT passthrough SNR too low: {:.2} dB at delay {}",
-        best_snr,
-        best_delay
+        "MDCT passthrough SNR too low: {best_snr:.2} dB at delay {best_delay}"
     );
 }

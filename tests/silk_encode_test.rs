@@ -59,16 +59,12 @@ fn test_silk_encode_frame_no_crash() {
     assert_eq!(ret, 0, "silk_encode_frame should return 0 (no error)");
     assert!(
         n_bytes_out > 0,
-        "Encoded frame should produce some bytes, got {}",
-        n_bytes_out
+        "Encoded frame should produce some bytes, got {n_bytes_out}"
     );
 
     // Verify pulses are not all zero (something was quantized)
     let pulse_sum: i32 = enc.pulses.iter().map(|&p| p.abs() as i32).sum();
-    println!(
-        "Encoded {} bytes, pulse energy = {}",
-        n_bytes_out, pulse_sum
-    );
+    println!("Encoded {n_bytes_out} bytes, pulse energy = {pulse_sum}");
     assert!(pulse_sum > 0, "Pulses should be non-zero for voiced input");
 }
 
@@ -109,7 +105,7 @@ fn test_silk_encode_two_frames() {
         0,
     );
     assert_eq!(ret, 0);
-    println!("Frame 1: {} bytes, Frame 2: {} bytes", bytes1, n_bytes2);
+    println!("Frame 1: {bytes1} bytes, Frame 2: {n_bytes2} bytes");
     assert!(n_bytes2 > 0, "Second frame should also produce bytes");
 }
 
@@ -132,7 +128,7 @@ fn test_silk_encode_silent_input() {
         0,
     );
     assert_eq!(ret, 0);
-    println!("Silent frame: {} bytes", n_bytes);
+    println!("Silent frame: {n_bytes} bytes");
     assert!(n_bytes > 0, "Even silence should produce some bytes");
 }
 
@@ -180,30 +176,20 @@ fn test_lbrr_encoding_enabled() {
 
         assert!(
             n_no_fec >= 3,
-            "Frame {}: no-FEC packet too short: {}",
-            frame_idx,
-            n_no_fec
+            "Frame {frame_idx}: no-FEC packet too short: {n_no_fec}"
         );
         assert!(
             n_with_fec >= 3,
-            "Frame {}: FEC packet too short: {}",
-            frame_idx,
-            n_with_fec
+            "Frame {frame_idx}: FEC packet too short: {n_with_fec}"
         );
 
         total_bytes_no_fec += n_no_fec;
         total_bytes_with_fec += n_with_fec;
 
-        println!(
-            "Frame {}: no-FEC={} bytes, with-FEC={} bytes",
-            frame_idx, n_no_fec, n_with_fec
-        );
+        println!("Frame {frame_idx}: no-FEC={n_no_fec} bytes, with-FEC={n_with_fec} bytes");
     }
 
-    println!(
-        "Total: no-FEC={} bytes, with-FEC={} bytes",
-        total_bytes_no_fec, total_bytes_with_fec
-    );
+    println!("Total: no-FEC={total_bytes_no_fec} bytes, with-FEC={total_bytes_with_fec} bytes");
     // With LBRR enabled, packets from frame 2 onward should include LBRR data
     // so total bytes with FEC >= total bytes without FEC (or roughly equal).
     // Note: First packet has no LBRR (no previous frame to protect).
@@ -224,7 +210,6 @@ fn test_lbrr_flag_in_packet() {
 
     // Encode 3 frames: first frame has no LBRR (no previous frame),
     // subsequent frames may include LBRR
-    let mut packet_lbrr_flags = Vec::new();
 
     for frame_idx in 0..3 {
         let mut input = vec![0.0f32; frame_size];
@@ -238,18 +223,14 @@ fn test_lbrr_flag_in_packet() {
             .encode(&input, frame_size, &mut output)
             .expect("Encode failed");
 
-        assert!(n >= 3, "Frame {}: packet too short", frame_idx);
+        assert!(n >= 3, "Frame {frame_idx}: packet too short");
 
         // The SILK payload LBRR flag is in the preamble bits.
         // For Code 3 packets: TOC[1] + count[1] + SILK_payload[...]
         // SILK preamble: VAD flags + LBRR flag encoded as range coder bits.
         // We can detect it indirectly: if LBRR active, packet is larger.
         let has_lbrr = n > 10; // rough heuristic
-        packet_lbrr_flags.push((frame_idx, n, has_lbrr));
-        println!(
-            "Frame {}: {} bytes (LBRR data likely present: {})",
-            frame_idx, n, has_lbrr
-        );
+        println!("Frame {frame_idx}: {n} bytes (LBRR data likely present: {has_lbrr})");
     }
 
     println!("✅ LBRR flag test passed");

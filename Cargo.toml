@@ -2,11 +2,12 @@
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>", "Remade-With-Rust"]
 name = "rusty-opus"
-version = "0.9.1"
-description = "pure Rust Opus codec - performance fork of opus-rs (AVX2 SILK/CELT kernels, frame-parallel encode)"
+version = "1.0.0"
+description = "Pure-Rust Opus audio codec (RFC 6716): encoder and decoder, SILK/CELT/Hybrid, SIMD-accelerated, zero dependencies"
 license = "BSD-3-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty-opus"
 homepage = "https://github.com/Remade-With-Rust/rusty-opus"
+documentation = "https://docs.rs/rusty-opus"
 readme = "README.md"
 keywords = ["opus", "audio", "codec", "decoder", "encoder"]
 categories = ["multimedia::audio", "multimedia::encoding"]
@@ -23,22 +24,121 @@ exclude = [
     "tools/",
     "fixtures/gate_corpus/",
     "docs/census-2026-08-07/",
+    # Repository infrastructure, not part of the library.
+    ".github/",
+    ".semgrep/",
+    "supply-chain/",
+    "docs/audit/",
+    "docs/plans/",
+    # Internal engineering journals (kept in the repository).
+    "docs/great-gate.md",
+    "docs/gate-ledger.md",
+    "docs/newmath-quality-plan.md",
+    "docs/optimization-plan.md",
+    "rust-toolchain.toml",
+    ".cargo/",
 ]
 
 [features]
 # Dev-only stage profiler (src/prof.rs): per-stage tick buckets + dump().
 # OFF (default) = zero-cost ZST guards, release builds byte-identical.
 profile = []
+# Development toggles read from the environment (mode forcing, A/B switches,
+# the tuning-harvest log used by tools/gate_*). OFF (default) = the environment
+# is never consulted except for the documented RUSTY_OPUS_ISA cap. Never enable
+# in production.
+research = []
 
 [dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
-proptest = "1"
+# No plotting/HTML backend: benches report on stdout. Keeps ~1M lines of
+# wasm-bindgen/web-sys/plotters out of the (cargo-vet audited) dev graph.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+# std only: the default fork/timeout features pull a process-forking subtree
+# (rusty-fork, wait-timeout, tempfile) that also blocks wasm test builds.
+proptest = { version = "1", default-features = false, features = ["std"] }
 # PROJECT CONVENTION: every encoder-carrying binary/bench/example runs under our
 # own rusty_alloc (pure-Rust mimalloc remake), because that is what ships - an
 # arm measured under the system allocator is not comparable to production.
 # A DEV-dependency on purpose: the library must never set a global allocator, or
 # it would hijack a downstream binary's choice.
 rusty_alloc-api = "=1.1.6"
+
+# Lint policy (hardening gate H-15): clippy all + pedantic + nursery, with the
+# exceptions below. Every allow states why the lint does not fit a bit-exact
+# libopus port; anything not listed here must be clean.
+[lints.rust]
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Every `unsafe` block carries a `// SAFETY:` justification (gate H-16).
+undocumented_unsafe_blocks = "deny"
+# --- Fixed-point DSP: numeric casts ARE the arithmetic. Each mirrors a libopus
+# --- C conversion; widths of untrusted lengths are validated before casting.
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# --- Bit-exactness with libopus: these rewrites change rounding.
+suboptimal_flops = "allow"     # mul_add fuses and rounds once
+imprecise_flops = "allow"      # ln_1p/hypot etc. round differently
+manual_midpoint = "allow"      # midpoint() rounds toward -inf, (a+b)/2 truncates
+float_cmp = "allow"            # exact compares mirror libopus early-outs
+# --- Reference fidelity: tables and names are kept diffable against libopus.
+unreadable_literal = "allow"   # coefficient tables copied verbatim
+excessive_precision = "allow"  # ditto
+approx_constant = "allow"      # libopus' own literals (e.g. 1.442695f)
+similar_names = "allow"        # libopus variable names (x/y, b0/b1, ...)
+many_single_char_names = "allow"
+too_many_lines = "allow"       # functions mirror their libopus counterparts
+struct_excessive_bools = "allow"   # mirrors libopus state structs
+fn_params_excessive_bools = "allow"
+# --- SIMD kernels.
+inline_always = "allow"        # forced inlining is part of each kernel's design
+wildcard_imports = "allow"     # `use std::arch::x86_64::*` intrinsic sets
+cast_ptr_alignment = "allow"   # loadu/storeu intrinsics take unaligned pointers
+ptr_as_ptr = "allow"           # `as *const __m256` is the intrinsic idiom
+as_ptr_cast_mut = "allow"
+range_plus_one = "allow"       # `..=` loops measurably slower in hot paths
+# --- API/doc style lints that would churn a mostly-internal surface.
+must_use_candidate = "allow"
+missing_const_for_fn = "allow"
+doc_markdown = "allow"
+too_long_first_doc_paragraph = "allow"
+items_after_statements = "allow"   # local consts sit next to their use
+module_name_repetitions = "allow"
+large_stack_arrays = "allow"       # fixed scratch replaces per-frame heap allocation
+drop_non_drop = "allow"            # explicit end of a (feature-gated) profiler scope
+# --- Control-flow shape kept as in libopus (branch order, per-case arms,
+# --- declare-then-assign, if/else chains, explicit counters) for diffability.
+if_not_else = "allow"
+match_same_arms = "allow"
+branches_sharing_code = "allow"
+useless_let_if_seq = "allow"
+comparison_chain = "allow"
+explicit_counter_loop = "allow"
+neg_cmp_op_on_partial_ord = "allow"   # `!(x < t)` is deliberate NaN handling
+needless_range_loop = "allow"   # index loops mirror libopus; bounds are explicit
+too_many_arguments = "allow"    # stage functions take libopus' parameter lists
+
+# Release builds made in this repository (tests, examples, fuzz repro) keep
+# integer overflow checks: a codec fed hostile packets should fail loudly on an
+# arithmetic bug rather than wrap silently (gate H-05). Libraries stay
+# unwind-safe; there is no shipped binary, so no panic strategy is imposed.
+# Downstream crates are unaffected: Cargo uses the consumer's profile.
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+
+# Performance measurement profile: identical code generation without the
+# overflow checks, so benchmark numbers stay comparable to what users ship.
+[profile.bench]
+inherits = "release"
+overflow-checks = false
 
 [[bench]]
 name = "opus_bench"

@@ -39,8 +39,7 @@ fn test_celt_multi_frame() {
         let ratio = output_rms / input_rms.max(1e-10);
 
         println!(
-            "Frame {}: input_rms={:.6}, output_rms={:.6}, ratio={:.4}",
-            frame, input_rms, output_rms, ratio
+            "Frame {frame}: input_rms={input_rms:.6}, output_rms={output_rms:.6}, ratio={ratio:.4}"
         );
 
         // Print first few samples

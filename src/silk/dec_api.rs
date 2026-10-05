@@ -1,8 +1,7 @@
 use crate::range_coder::RangeCoder;
 use crate::silk::decode_frame::{FLAG_DECODE_NORMAL, FLAG_PACKET_LOST, silk_decode_frame};
 use crate::silk::decode_indices::{
-    silk_decode_indices, silk_stereo_decode_mid_only, silk_stereo_decode_pred,
-    silk_stereo_ms_to_lr,
+    silk_decode_indices, silk_stereo_decode_mid_only, silk_stereo_decode_pred, silk_stereo_ms_to_lr,
 };
 use crate::silk::decode_pulses::silk_decode_pulses;
 use crate::silk::decoder_structs::SilkDecoderState;
@@ -139,10 +138,10 @@ impl SilkDecoder {
             for n in 0..n_channels {
                 for i in 0..n_frames_per_packet as usize {
                     let vad = range_dec.decode_bit_logp(1);
-                    self.channel_state[n].vad_flags[i] = if vad { 1 } else { 0 };
+                    self.channel_state[n].vad_flags[i] = i32::from(vad);
                 }
                 let lbrr = range_dec.decode_bit_logp(1);
-                self.channel_state[n].lbrr_flag = if lbrr { 1 } else { 0 };
+                self.channel_state[n].lbrr_flag = i32::from(lbrr);
             }
 
             for n in 0..n_channels {
@@ -210,13 +209,19 @@ impl SilkDecoder {
             // coder in sync.
             ms_pred_q13 = silk_stereo_decode_pred(range_dec);
             if self.channel_state[1].vad_flags[frame_index] == 0 {
-                decode_only_middle = if silk_stereo_decode_mid_only(range_dec) {
-                    1
-                } else {
-                    0
-                };
+                decode_only_middle = i32::from(silk_stereo_decode_mid_only(range_dec));
             }
+        } else if self.n_channels_internal == 2 {
+            // Lost frame: keep the previous predictor (dec_API.c pred_prev_Q13).
+            ms_pred_q13 = self.s_stereo_pred_prev_q13;
         }
+        // Side present? Coded flag for a normal frame; for a lost one, whether
+        // the previous frame had side (dec_API.c has_side).
+        let has_side = if lost_flag == FLAG_DECODE_NORMAL {
+            decode_only_middle == 0
+        } else {
+            self.prev_decode_only_middle == 0
+        };
 
         // Reset the side channel's prediction memory for the first frame that
         // codes side after a run of mid-only frames (libopus dec_API.c:249-256).
@@ -257,7 +262,11 @@ impl SilkDecoder {
         // frame's bits MUST still be consumed or the range coder desyncs for the
         // next internal frame of a multi-frame packet (the mid of frames 2/3 then
         // decodes from garbage). Decode it into a scratch buffer and discard.
-        if self.n_channels_internal == 2 && decode_only_middle == 0 && lost_flag == FLAG_DECODE_NORMAL
+        // Normal frames decode the side when coded; lost frames conceal it when
+        // the previous frame had one (libopus runs PLC on both channels).
+        if self.n_channels_internal == 2
+            && has_side
+            && (lost_flag == FLAG_DECODE_NORMAL || lost_flag == FLAG_PACKET_LOST)
         {
             // libopus FrameIndex for the side (n=1) = channel_state[0].nFramesDecoded - 1,
             // evaluated AFTER ch0's own increment, which equals the original
@@ -352,9 +361,14 @@ impl SilkDecoder {
         )
     }
 
+    /// silk_ResetDecoder: both channel states, the stereo state (sStereo:
+    /// predictor + 2-sample mid/side histories) and prev_decode_only_middle.
     pub fn reset(&mut self) {
         silk_init_decoder(&mut self.channel_state[0]);
         silk_init_decoder(&mut self.channel_state[1]);
+        self.s_stereo_pred_prev_q13 = [0; 2];
+        self.s_stereo_mid = [0; 2];
+        self.s_stereo_side = [0; 2];
         self.prev_decode_only_middle = 0;
     }
 

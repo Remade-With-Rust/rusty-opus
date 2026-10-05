@@ -213,11 +213,7 @@ pub fn silk_process_gains_fix(
         &mut ps_enc.s_cmn.indices.gains_indices,
         &mut ps_enc_ctrl.gains_q16,
         &mut ps_shape_st.last_gain_index,
-        if cond_coding == CODE_CONDITIONALLY {
-            1
-        } else {
-            0
-        },
+        i32::from(cond_coding == CODE_CONDITIONALLY),
         ps_enc.s_cmn.nb_subfr as usize,
     );
 

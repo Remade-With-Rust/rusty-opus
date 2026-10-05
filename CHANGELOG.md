@@ -1,5 +1,113 @@
 # Changelog
 
+## 1.0.0 — 2026-10-04
+
+The first stable release. The public API is now covered by semantic versioning, every
+packet-facing path has been hardened against hostile input, and the codec has been
+verified against `libopus` across its whole configuration space.
+
+### Breaking changes
+
+- **Typed errors.** Every fallible function now returns `Result<_, rusty_opus::Error>`
+  instead of `Result<_, &'static str>`. `Error` is a `#[non_exhaustive]` enum mirroring the
+  `libopus` error codes (`BadArg`, `BufferTooSmall`, `InvalidPacket`, `Internal`), implements
+  `std::error::Error`, and `Display`s the same messages as before; `Error::code()` returns the
+  `libopus` integer. Code that only formats errors (`{e}`) or uses `?` into `Box<dyn Error>`
+  is unaffected.
+- **Smaller documented API.** Internal codec stages (`bands`, `celt`, `silk`, `pvq`,
+  `range_coder`, ...) and the `CeltEncoder`/`CeltDecoder`/`SilkResampler*` re-exports are now
+  hidden from the documentation and excluded from the semver guarantee. The supported API is
+  `OpusEncoder`, `OpusDecoder`, `Application`, `Bandwidth`, `SignalType`, `Error`, and the
+  `multistream`, `repacketizer` and `parallel` modules.
+- `OpusDecoder::decode` treats `frame_size` as a capacity (as `libopus` does) and returns the
+  packet's own duration.
+
+### Security
+
+- `OpusDecoder::decode`, `decode_fec` and packet-loss concealment returned a panic instead of
+  an error when the output buffer was smaller than the decoded frame; they now return
+  `Error::BufferTooSmall`. Every panic site on the decode path has been removed.
+- The x86 AVX2 PVQ search could write past its output buffer when the encoder was given
+  NaN or infinite samples. Non-finite input is now neutralised before the search, and the
+  kernel can no longer index past its band.
+- The aarch64 NEON inverse-MDCT pre-rotation read one element past its input buffer.
+- Undefined behaviour removed: stereo band coding wrote through a pointer derived from a
+  shared reference (12 of 1,800 tested low-rate 12 kHz stereo configurations produce
+  different, equally valid bitstreams as a result, with identical quality); NEON FFT kernels
+  mixed raw-pointer and indexed access; scratch buffers formed references to uninitialised
+  memory.
+- `OpusEncoder::encode` panicked when given a 2-byte output buffer in VBR mode, or a
+  40-120 ms frame with a buffer too small to share between its sub-frames. It now emits a
+  TOC-only packet, as `libopus` does.
+- In CBR mode at high bitrates with a large output buffer, `OpusEncoder::encode` planned
+  SILK frames over the 1,275-byte limit: 40/60 ms SILK packets were emitted that conformant
+  decoders reject, and some inputs panicked. Packets are now capped at the RFC limit, as in
+  `libopus`. (Both encoder defects were found by fuzzing.)
+- Development toggles that changed encoder output or wrote a tuning log to a path taken
+  from the environment are now compiled only with the new, non-default `research` feature.
+  A default build reads no environment variable except `RUSTY_OPUS_ISA`, and touches no
+  files.
+- Safe functions that hand slices to SIMD kernels now enforce each kernel's length contract.
+  The range decoder, rate tables and packet parsing contain no `unsafe` code at all.
+- New: [SECURITY.md](SECURITY.md) disclosure policy, [threat model](docs/threat-model.md),
+  and an [inventory of all `unsafe` code](UNSAFE.md).
+
+### Fixed
+
+- Decoding SILK wideband/mediumband streams at 8 or 12 kHz output produced garbage (the
+  decoder lacked the down-sampling FIR resampler).
+- Packet-loss concealment: CELT pitch search used the wrong history window, SILK bandwidth
+  expansion constant and CNG ordering differed from `libopus`, and the post-loss energy
+  safety, noise PLC for hybrid streams and background-energy tracking were missing.
+- In-band FEC: the encoder's redundant (LBRR) frames could not be parsed by any decoder,
+  `libopus` included: independently coded frames omitted the LTP-scaling symbol, and
+  stereo packets omitted the stereo prediction. They were also built by reusing the main
+  frame's pulses at a raised gain on every subframe, which made recovered audio louder
+  and panicked on some inputs. LBRR is now a port of `libopus` `silk_LBRR_encode`
+  (re-quantized at a coarser first gain), its bits are counted against the frame's rate
+  target, and a CBR packet that cannot hold it is sent without it. FEC streams are
+  verified against `libopus` in 480 configurations (`tools/coverage_fec.py`).
+- CBR SILK at low bitrates could overflow the packet budget and emit packets `libopus`
+  rejects (36 of 102 tested 60/120 ms configurations at 12-24 kb/s). The rate loop now
+  always ends in its fit-guaranteed fallback, and 60 ms packets share their budget across
+  frames as `libopus` does (2/5, 3/4). Those configurations now decode everywhere, with
+  higher SNR in all of them.
+- A stereo stream decoded to mono ignored intensity-stereo inversion.
+- The decoder rejected code-1 packets carrying two empty frames (valid per RFC 6716; they
+  are now concealed), accepted code-1 packets with an odd payload length, and did not
+  enforce the 1,275-byte frame limit.
+- Encoder: SILK multi-frame packets (40/60 ms) carried a single frame's size; the CELT
+  silence flag was set in hybrid mode; mode-transition redundancy was missing.
+- The AVX2/SSE/NEON PVQ search ranked candidates with an approximate reciprocal square root
+  and occasionally picked a worse codeword; it is now exact.
+- AVX+FMA kernels were selected on CPUs with AVX but without FMA (Sandy/Ivy Bridge, older
+  AMD), which would fault with an illegal instruction.
+- The NEON pitch downsampler loaded contiguous samples where every other sample was needed,
+  degrading mono CELT encoding on ARM.
+- `silk_sum_sqr_shift` SIMD tails were not bit-exact; the crate did not compile for i686 or
+  for its declared MSRV (1.85).
+- The frame-parallel encoder panicked on wasm targets without thread support.
+
+### Added
+
+- Verified support for aarch64 (NEON) and wasm32 (`unknown-unknown`, `wasip1`).
+- `RUSTY_OPUS_ISA=scalar|sse2|avx|avx2` caps the SIMD level on x86 and aarch64.
+- `OpusDecoder::decode` performs no heap allocation after warm-up, and `OpusEncoder::encode`
+  none outside SILK-to-CELT switches (previously 8-25 allocations per encoded frame, 2-4 per
+  decoded frame). Multi-frame packets and multistream decoding are allocation-free too.
+- `Repacketizer::reset`, `Repacketizer::out_into` and `Repacketizer::out_range_into` write
+  into a caller's buffer, so a reused repacketizer does not allocate.
+- Property tests for every packet-facing entry point, two new fuzz targets (repacketizer,
+  multistream decoder) and committed seed corpora for all fifteen.
+- Complete API documentation and a compiled quick-start example.
+
+### Assurance
+
+Conformance matrix (3,240 encoder configurations) and decoder sweep (every output rate and
+channel layout) against `libopus`; the full test suite on x86_64, aarch64 (NEON and scalar)
+and wasm32; Miri; `cargo-deny`, `cargo-audit` and `cargo-vet` (all dependencies audited).
+See the hardening status table in the README.
+
 ## 0.9.1 — 2026-08-08
 
 Development-tooling release; **no library code changed**, so encoder and decoder

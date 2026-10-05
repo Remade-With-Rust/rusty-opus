@@ -67,15 +67,11 @@ fn opus_celt_roundtrip_basic() {
     println!("DEBUG: input[0..20] = {:?}", &input[0..20]);
     println!("DEBUG: output[60..80] = {:?}", &output[60..80]);
     println!("DEBUG: output[120..140] = {:?}", &output[120..140]);
-    println!(
-        "SUCCESS: Best SNR = {:.2} dB at delay {}",
-        best_snr, best_delay
-    );
+    println!("SUCCESS: Best SNR = {best_snr:.2} dB at delay {best_delay}");
     // TODO: Current implementation quality needs improvement
     // Target: >30 dB, Current: ~3 dB
     assert!(
         best_snr > 0.0,
-        "Roundtrip SNR too low: {:.2} dB (best over delays)",
-        best_snr
+        "Roundtrip SNR too low: {best_snr:.2} dB (best over delays)"
     );
 }

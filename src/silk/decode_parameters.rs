@@ -7,7 +7,7 @@ use crate::silk::sigproc_fix::silk_bwexpander;
 use crate::silk::tables::SILK_LTP_SCALES_TABLE_Q14;
 use crate::silk::tables::SILK_LTP_VQ_PTRS_Q7;
 
-const BWE_AFTER_LOSS_Q16: i32 = 64738;
+const BWE_AFTER_LOSS_Q16: i32 = 63570; // define.h (was 64738: wrong expansion after every loss)
 
 fn silk_decode_pitch(
     lag_index: i16,
@@ -54,18 +54,14 @@ pub fn silk_decode_parameters(
         &mut ps_dec_ctrl.gains_q16,
         &ps_dec.indices.gains_indices,
         &mut ps_dec.last_gain_index,
-        if cond_coding == CODE_CONDITIONALLY {
-            1
-        } else {
-            0
-        },
+        i32::from(cond_coding == CODE_CONDITIONALLY),
         ps_dec.nb_subfr as usize,
     );
 
     silk_nlsf_decode(
         &mut p_nlsf_q15,
         &ps_dec.indices.nlsf_indices,
-        ps_dec.ps_nlsf_cb.unwrap(),
+        ps_dec.ps_nlsf_cb,
     );
 
     silk_nlsf2a(

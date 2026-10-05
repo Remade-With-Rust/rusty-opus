@@ -92,9 +92,9 @@ fn test_mdct_identity_full() {
             best_offset = offset;
         }
     }
-    println!("Best SNR: {:.2} dB at offset {}", best_snr, best_offset);
+    println!("Best SNR: {best_snr:.2} dB at offset {best_offset}");
 
     // TODO: Current MDCT implementation has quality issues
     // Target: >60 dB, Current: varies
-    assert!(best_snr > 0.0, "SNR too low: {:.2} dB", best_snr);
+    assert!(best_snr > 0.0, "SNR too low: {best_snr:.2} dB");
 }
