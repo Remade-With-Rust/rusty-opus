@@ -668,8 +668,10 @@ fn bench_pvq(c: &mut Criterion) {
 
     // Typical high-band: n=16, k=8 (moderate case)
     // High-freq bands: n=8, k=4
-    // Large bands: n=64, k=16
-    for &(n, k) in &[(8usize, 4i32), (16, 8), (32, 8), (64, 16)] {
+    // Large bands: n=32, k=7 and n=64, k=5 -- the largest pulse counts whose
+    // codebook V(n, k) fits in 32 bits. Larger (n, k) are never coded directly:
+    // CELT splits the band first, and encode_pulses' index would wrap.
+    for &(n, k) in &[(8usize, 4i32), (16, 8), (32, 7), (64, 5)] {
         let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
         let mut y = vec![0i32; n];
 
@@ -716,7 +718,7 @@ fn bench_pvq(c: &mut Criterion) {
     }
 
     // alg_quant (combined pvq_search + encode_pulses + exp_rotation)
-    for &(n, k) in &[(16usize, 8i32), (64, 16)] {
+    for &(n, k) in &[(16usize, 8i32), (64, 5)] {
         let mut x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
         group.bench_with_input(
             BenchmarkId::new(format!("alg_quant/n{n}/k{k}"), ""),
@@ -745,7 +747,7 @@ fn bench_pvq(c: &mut Criterion) {
     }
 
     // alg_unquant (decode path)
-    for &(n, k) in &[(16usize, 8i32), (64, 16)] {
+    for &(n, k) in &[(16usize, 8i32), (64, 5)] {
         // First encode to get valid bitstream
         let mut x_enc: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
         let mut rc_enc = RangeCoder::new_encoder(1024);
