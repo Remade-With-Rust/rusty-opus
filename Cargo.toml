@@ -2,7 +2,7 @@
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>", "Remade-With-Rust"]
 name = "rusty-opus"
-version = "1.0.0"
+version = "1.0.1"
 description = "Pure-Rust Opus audio codec (RFC 6716): encoder and decoder, SILK/CELT/Hybrid, SIMD-accelerated, zero dependencies"
 license = "BSD-3-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty-opus"

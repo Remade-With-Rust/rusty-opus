@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — 2026-10-08
+
+Allocator update; no API change (`cargo semver-checks` against crates.io: no semver update required).
+
+- `rusty_alloc-api` (and, where pinned, `rusty_alloc`) `=2.2.5`, part of the portfolio-wide rollout. 2.2.5 fixes 2.2.1–2.2.4 failing to build in an MSVC consumer that unwinds with LTO.
+
 ## 1.0.0 — 2026-10-04
 
 The first stable release. The public API is now covered by semantic versioning, every
