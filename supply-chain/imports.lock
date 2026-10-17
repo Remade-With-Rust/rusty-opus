@@ -83,15 +83,15 @@ user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.rusty_alloc]]
-version = "2.2.5"
-when = "2026-10-08"
+version = "2.2.6"
+when = "2026-10-09"
 user-id = 427321
 user-login = "Ttimmahlax"
 user-name = "farmer_timmm"
 
 [[publisher.rusty_alloc-api]]
-version = "2.2.5"
-when = "2026-10-08"
+version = "2.2.6"
+when = "2026-10-09"
 user-id = 427321
 user-login = "Ttimmahlax"
 user-name = "farmer_timmm"
