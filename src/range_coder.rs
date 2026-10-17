@@ -16,10 +16,30 @@ macro_rules! tell_frac_inline {
         let r = $rc.rng >> (l - 16);
         let b = (r >> 12).wrapping_sub(8);
 
-        let correction = unsafe { *CORRECTION.get_unchecked(b as usize) };
+        let correction = CORRECTION[b as usize]; // checked: `rng` is a pub field
         let b = b + (r > correction) as u32;
         nbits - (l << 3) - b as i32
     }};
+}
+
+/// The coder's scalar state WITHOUT its buffer: what libopus copies when it
+/// does `ec_enc saved = *enc;`. Restoring one rewinds the coder without
+/// touching `buf` -- valid when everything coded since the snapshot was
+/// front symbols (they only write at or after `offs`, and `done()` zeroes the
+/// gap), which is how every rate-search / two-pass caller uses it.
+#[derive(Clone, Copy)]
+pub struct RcState {
+    storage: u32,
+    end_offs: u32,
+    end_window: u32,
+    nend_bits: i32,
+    nbits_total: i32,
+    pub offs: u32,
+    rng: u32,
+    val: u32,
+    ext: u32,
+    rem: i32,
+    error: i32,
 }
 
 #[derive(Clone)]
@@ -39,9 +59,48 @@ pub struct RangeCoder {
 }
 
 impl RangeCoder {
+    #[inline]
+    pub fn save_state(&self) -> RcState {
+        RcState {
+            storage: self.storage,
+            end_offs: self.end_offs,
+            end_window: self.end_window,
+            nend_bits: self.nend_bits,
+            nbits_total: self.nbits_total,
+            offs: self.offs,
+            rng: self.rng,
+            val: self.val,
+            ext: self.ext,
+            rem: self.rem,
+            error: self.error,
+        }
+    }
+
+    /// Rewind to `s` (taken from this coder). `buf[..s.offs]` must be as it was
+    /// at the snapshot; callers that rewind PAST bytes they want back restore
+    /// those bytes themselves (libopus' `intra_bits` / `ec_buf_copy`).
+    #[inline]
+    pub fn restore_state(&mut self, s: RcState) {
+        debug_assert!(
+            self.storage == s.storage && self.end_offs == s.end_offs,
+            "restore_state across raw end-bits: the tail would not be rewound"
+        );
+        self.storage = s.storage;
+        self.end_offs = s.end_offs;
+        self.end_window = s.end_window;
+        self.nend_bits = s.nend_bits;
+        self.nbits_total = s.nbits_total;
+        self.offs = s.offs;
+        self.rng = s.rng;
+        self.val = s.val;
+        self.ext = s.ext;
+        self.rem = s.rem;
+        self.error = s.error;
+    }
+
     pub fn new_encoder(size: u32) -> Self {
         let buf = vec![0u8; size as usize];
-        RangeCoder {
+        Self {
             buf,
             storage: size,
             end_offs: 0,
@@ -62,9 +121,7 @@ impl RangeCoder {
         if self.buf.len() < size as usize {
             self.buf.resize(size as usize, 0);
         }
-        unsafe {
-            self.buf.set_len(size as usize);
-        }
+        self.buf.truncate(size as usize);
         self.storage = size;
         self.end_offs = 0;
         self.end_window = 0;
@@ -79,9 +136,16 @@ impl RangeCoder {
     }
 
     pub fn new_decoder(data: &[u8]) -> Self {
+        Self::new_decoder_in(Vec::new(), data)
+    }
+
+    /// `new_decoder` reusing `buf`'s allocation (the decoder keeps one across
+    /// packets instead of allocating a copy of every payload).
+    pub fn new_decoder_in(mut buf: Vec<u8>, data: &[u8]) -> Self {
         let storage = data.len() as u32;
-        let buf = data.to_vec();
-        let mut rc = RangeCoder {
+        buf.clear();
+        buf.extend_from_slice(data);
+        let mut rc = Self {
             buf,
             storage,
             end_offs: 0,
@@ -221,13 +285,7 @@ impl RangeCoder {
             let write_count = full_bytes.min(available);
             if write_count > 0 {
                 let start = (self.storage - self.end_offs - write_count) as usize;
-                unsafe {
-                    std::ptr::write_bytes(
-                        self.buf.as_mut_ptr().add(start),
-                        0,
-                        write_count as usize,
-                    );
-                }
+                self.buf[start..start + write_count as usize].fill(0);
                 self.end_offs += write_count;
             }
             if write_count < full_bytes {
@@ -295,7 +353,10 @@ impl RangeCoder {
     /// Shrink the range coder buffer, moving end-coded bytes to the new end.
     /// Equivalent to C's `ec_enc_shrink`.
     pub fn shrink(&mut self, new_size: u32) {
-        debug_assert!(self.offs + self.end_offs <= new_size);
+        assert!(
+            self.offs + self.end_offs <= new_size && new_size as usize <= self.buf.len(),
+            "RangeCoder::shrink: new_size out of range"
+        );
         if self.end_offs > 0 {
             let old_end_start = (self.storage - self.end_offs) as usize;
             let old_end_end = self.storage as usize;
@@ -309,9 +370,7 @@ impl RangeCoder {
     #[inline(always)]
     fn write_byte(&mut self, value: u8) {
         if self.offs + self.end_offs < self.storage {
-            unsafe {
-                *self.buf.get_unchecked_mut(self.offs as usize) = value;
-            }
+            self.buf[self.offs as usize] = value;
             self.offs += 1;
         } else {
             self.error = 1;
@@ -369,10 +428,7 @@ impl RangeCoder {
                 let carry = c >> EC_SYM_BITS;
                 if self.rem >= 0 {
                     if self.offs + self.end_offs < self.storage {
-                        unsafe {
-                            *self.buf.get_unchecked_mut(self.offs as usize) =
-                                (self.rem + carry) as u8;
-                        }
+                        self.buf[self.offs as usize] = (self.rem + carry) as u8;
                         self.offs += 1;
                     } else {
                         self.error = 1;
@@ -383,9 +439,7 @@ impl RangeCoder {
                     let ext = self.ext as usize;
                     for _j in 0..ext {
                         if self.offs + self.end_offs < self.storage {
-                            unsafe {
-                                *self.buf.get_unchecked_mut(self.offs as usize) = sym as u8;
-                            }
+                            self.buf[self.offs as usize] = sym as u8;
                             self.offs += 1;
                         } else {
                             self.error = 1;
@@ -420,14 +474,14 @@ impl RangeCoder {
     pub fn encode_icdf(&mut self, s: i32, icdf: &[u8], ftb: u32) {
         let r = self.rng >> ftb;
         if s > 0 {
-            let val = unsafe { *icdf.get_unchecked((s - 1) as usize) as u32 };
+            let val = icdf[(s - 1) as usize] as u32;
             self.val = self
                 .val
                 .wrapping_add(self.rng.wrapping_sub(r.wrapping_mul(val)));
-            let lower = unsafe { *icdf.get_unchecked(s as usize) };
+            let lower = icdf[s as usize];
             self.rng = r.wrapping_mul(val.wrapping_sub(lower as u32));
         } else {
-            let val = unsafe { *icdf.get_unchecked(s as usize) as u32 };
+            let val = icdf[s as usize] as u32;
             self.rng = self.rng.wrapping_sub(r.wrapping_mul(val));
         }
         self.normalize_encoder();
@@ -499,7 +553,7 @@ impl RangeCoder {
             let s = if val < 0 { -1 } else { 0 };
             val = (val + s) ^ s;
             fl = fs_val;
-            fs_val = self.laplace_get_freq1(fs_val, decay);
+            fs_val = Self::laplace_get_freq1(fs_val, decay);
 
             let mut i = 1;
             while fs_val > 0 && i < val {
@@ -524,7 +578,7 @@ impl RangeCoder {
         self.encode(fl, fl.wrapping_add(fs_val), 1 << 15);
     }
 
-    fn laplace_get_freq1(&self, fs0: u32, decay: i32) -> u32 {
+    const fn laplace_get_freq1(fs0: u32, decay: i32) -> u32 {
         let ft = 32768 - (2 * 16) - fs0;
         ((ft as i32 * (16384 - decay)) >> 15) as u32
     }
@@ -538,7 +592,7 @@ impl RangeCoder {
         if fm >= fs_val {
             val += 1;
             fl = fs_val;
-            fs_val = self.laplace_get_freq1(fs_val, decay) + 1;
+            fs_val = Self::laplace_get_freq1(fs_val, decay) + 1;
 
             while fs_val > 1 && fm >= fl + 2 * fs_val {
                 fs_val *= 2;
@@ -569,9 +623,7 @@ impl RangeCoder {
         if self.offs + self.end_offs < self.storage {
             self.end_offs += 1;
             let idx = (self.storage - self.end_offs) as usize;
-            unsafe {
-                *self.buf.get_unchecked_mut(idx) = value;
-            }
+            self.buf[idx] = value;
         } else {
             self.error = 1;
         }
@@ -645,17 +697,20 @@ impl RangeCoder {
     }
 
     pub fn finish(&mut self) -> Vec<u8> {
+        // done() flushes whole raw-bit bytes into the end region and ORs any
+        // leftover (< 8) raw bits into the byte just before it. That byte must be
+        // kept: it used to be dropped whenever end_offs > 0 (found by the
+        // range_coder_roundtrip property test). Range-coder termination makes
+        // the bytes after the front data irrelevant to the decoder, so placing it
+        // directly after them is exact (libopus ec_enc_shrink + ec_enc_done).
+        let partial = self.nend_bits % 8 != 0;
         self.done();
 
-        let extra_end = if self.nend_bits > 0 && self.end_offs == 0 {
-            1
-        } else {
-            0
-        };
+        let extra_end = u32::from(partial);
         let mut result = Vec::with_capacity((self.offs + self.end_offs + extra_end) as usize);
         result.extend_from_slice(&self.buf[0..self.offs as usize]);
-        if extra_end > 0 {
-            result.push(self.buf[(self.storage - 1) as usize]);
+        if partial {
+            result.push(self.buf[(self.storage - self.end_offs - 1) as usize]);
         }
         result.extend_from_slice(
             &self.buf[(self.storage - self.end_offs) as usize..self.storage as usize],
@@ -789,8 +844,8 @@ mod tests {
         dec.update(50, 60, 100);
 
         assert_eq!(b1, 1);
-        assert!((10..20).contains(&d1), "d1={} expected in [10, 20)", d1);
+        assert!((10..20).contains(&d1), "d1={d1} expected in [10, 20)");
         assert_eq!(b2, 5);
-        assert!((50..60).contains(&d2), "d2={} expected in [50, 60)", d2);
+        assert!((50..60).contains(&d2), "d2={d2} expected in [50, 60)");
     }
 }

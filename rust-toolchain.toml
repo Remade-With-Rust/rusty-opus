@@ -1,0 +1,7 @@
+# Pinned development toolchain (hardening gate H-03). The crate's MSRV is
+# `rust-version` in Cargo.toml (1.85); this pin is what CI and contributors build
+# and lint with, so results do not depend on whichever stable is installed.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

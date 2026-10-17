@@ -1,0 +1,16 @@
+
+Metric output format: x/y
+    x = unsafe code used by the build
+    y = total unsafe code found in the crate
+
+Symbols:
+    :) = No `unsafe` usage found, declares #![forbid(unsafe_code)]
+    ?  = No `unsafe` usage found, missing #![forbid(unsafe_code)]
+    !  = `unsafe` usage found
+
+Functions  Expressions  Impls  Traits  Methods  Dependency
+
+69/71      7436/7642    0/0    0/0     0/0      !  rusty-opus 0.9.1
+
+69/71      7436/7642    0/0    0/0     0/0
+

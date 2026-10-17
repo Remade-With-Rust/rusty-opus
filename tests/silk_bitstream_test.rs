@@ -84,7 +84,7 @@ fn test_silk_encode_nb_frame1_structure() {
     let icdf_preamble = [192u8, 0u8];
     rc.encode_icdf(0, &icdf_preamble, 8);
     let bits_after_preamble = rc.tell();
-    eprintln!("DBG preamble: bits_after_preamble={}", bits_after_preamble);
+    eprintln!("DBG preamble: bits_after_preamble={bits_after_preamble}");
 
     /* Run VAD before encoding (like the C encoder does) */
     silk_encode_do_vad(&mut enc, &input, 1);
@@ -116,31 +116,26 @@ fn test_silk_encode_nb_frame1_structure() {
             .copy_from_slice(&rc.buf[src_start..src_start + end_len]);
     }
 
-    println!("Frame 1: {} bytes", n_bytes_out);
+    println!("Frame 1: {n_bytes_out} bytes");
     print!("RUST_FRAME1:");
     for b in &payload {
-        print!("{:02x}", b);
+        print!("{b:02x}");
     }
     println!();
 
     // Basic sanity checks on the bitstream
     assert!(
         (5..=100).contains(&n_bytes_out),
-        "Output size {} should be reasonable for NB SILK",
-        n_bytes_out
+        "Output size {n_bytes_out} should be reasonable for NB SILK"
     );
 
     // Check signal type was determined
     let sig_type = enc.s_cmn.indices.signal_type;
-    println!(
-        "Signal type: {} (0=inactive, 1=unvoiced, 2=voiced)",
-        sig_type
-    );
+    println!("Signal type: {sig_type} (0=inactive, 1=unvoiced, 2=voiced)");
     // For a 440Hz sine, the encoder should detect it as voiced
     assert!(
         sig_type == TYPE_VOICED as i8 || sig_type == TYPE_UNVOICED as i8,
-        "Signal type {} should be voiced or unvoiced for sine input",
-        sig_type
+        "Signal type {sig_type} should be voiced or unvoiced for sine input"
     );
 }
 
@@ -167,10 +162,7 @@ fn test_silk_encode_nb_two_frames_consistency() {
     let sig1 = enc.s_cmn.indices.signal_type;
     let prev_lag = enc.s_cmn.prev_lag;
 
-    println!(
-        "Frame 1: {} bytes, signal_type={}, prev_lag={}",
-        n1, sig1, prev_lag
-    );
+    println!("Frame 1: {n1} bytes, signal_type={sig1}, prev_lag={prev_lag}");
 
     // Encode frame 2 with same input
     let mut rc2 = RangeCoder::new_encoder(1275);
@@ -189,17 +181,14 @@ fn test_silk_encode_nb_two_frames_consistency() {
 
     let sig2 = enc.s_cmn.indices.signal_type;
 
-    println!("Frame 2: {} bytes, signal_type={}", n2, sig2);
+    println!("Frame 2: {n2} bytes, signal_type={sig2}");
 
     // Both frames should produce valid output
     assert!(n1 > 0 && n2 > 0, "Both frames should produce output");
 
     // Signal type should be stable for same input
     // (after first frame warmup, subsequent frames should be consistent)
-    println!(
-        "Frame 1 signal_type: {}, Frame 2 signal_type: {}",
-        sig1, sig2
-    );
+    println!("Frame 1 signal_type: {sig1}, Frame 2 signal_type: {sig2}");
 }
 
 #[test]
@@ -237,19 +226,19 @@ fn test_silk_encode_nb_silent_frame() {
         1,
     );
 
-    println!("Silent frame: {} bytes", n2);
+    println!("Silent frame: {n2} bytes");
     assert!(n2 > 0, "Silent frame should still produce output");
 
     // Silent input should produce NO_VOICE_ACTIVITY or UNVOICED
     let sig = enc.s_cmn.indices.signal_type;
-    println!("Silent signal_type: {}", sig);
+    println!("Silent signal_type: {sig}");
 }
 
 #[test]
 fn test_opus_encoder_silk_nb() {
     // Test the full OpusEncoder in SILK mode
-    let mut enc =
-        rusty_opus::OpusEncoder::new(8000, 1, rusty_opus::Application::Voip).expect("Create encoder");
+    let mut enc = rusty_opus::OpusEncoder::new(8000, 1, rusty_opus::Application::Voip)
+        .expect("Create encoder");
     enc.bitrate_bps = 10000;
     enc.complexity = 0;
     enc.use_cbr = true;
@@ -266,7 +255,7 @@ fn test_opus_encoder_silk_nb() {
 
     match result {
         Ok(len) => {
-            println!("OpusEncoder SILK NB: {} bytes", len);
+            println!("OpusEncoder SILK NB: {len} bytes");
             print!("OPUS_OUTPUT:");
             for i in 0..len {
                 print!("{:02x}", output[i]);
@@ -278,18 +267,18 @@ fn test_opus_encoder_silk_nb() {
             let config = (toc >> 3) & 0x1f;
             let s = (toc >> 2) & 1;
             let c = toc & 3;
-            println!("TOC: {:02x} (config={}, s={}, c={})", toc, config, s, c);
+            println!("TOC: {toc:02x} (config={config}, s={s}, c={c})");
 
             // For SILK NB 20ms mono, config should be 1
             // But our gen_toc uses (bandwidth - NB) << 5 | (period-2) << 3
             // With NB: bw=0, 8kHz/160samples = 50fps → period computation
             // frame_rate=50, rate=50→100→200→400, period=3
             // toc = 0 | (3-2)<<3 | c = 8 | c
-            assert!(config <= 3, "Config {} should be valid SILK NB", config);
+            assert!(config <= 3, "Config {config} should be valid SILK NB");
             assert_eq!(s, 0, "Should be mono");
         }
         Err(e) => {
-            panic!("OpusEncoder encode failed: {}", e);
+            panic!("OpusEncoder encode failed: {e}");
         }
     }
 }
@@ -329,7 +318,7 @@ fn test_silk_encode_wb_frame() {
     );
 
     assert_eq!(ret, 0);
-    assert!(n > 0, "WB encode should produce output, got {} bytes", n);
+    assert!(n > 0, "WB encode should produce output, got {n} bytes");
     println!(
         "WB Frame: {} bytes, signal_type={}",
         n, enc.s_cmn.indices.signal_type

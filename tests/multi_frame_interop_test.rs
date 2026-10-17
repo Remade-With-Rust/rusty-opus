@@ -13,7 +13,13 @@ fn push_opus_len(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
-fn make_sine(freq: f64, sample_rate: i32, frame_size: usize, channels: usize, seed: usize) -> Vec<f32> {
+fn make_sine(
+    freq: f64,
+    sample_rate: i32,
+    frame_size: usize,
+    channels: usize,
+    seed: usize,
+) -> Vec<f32> {
     (0..frame_size * channels)
         .map(|i| {
             let t = (seed * frame_size + i / channels) as f64 / sample_rate as f64;
@@ -32,7 +38,12 @@ fn rms(samples: &[f32]) -> f32 {
 }
 
 /// Encode one frame, return full packet bytes
-fn encode_full(encoder: &mut OpusEncoder, pcm: &[f32], frame_size: usize, buf_size: usize) -> Vec<u8> {
+fn encode_full(
+    encoder: &mut OpusEncoder,
+    pcm: &[f32],
+    frame_size: usize,
+    buf_size: usize,
+) -> Vec<u8> {
     let mut packet = vec![0u8; buf_size];
     let n = encoder.encode(pcm, frame_size, &mut packet).unwrap();
     packet.truncate(n);
@@ -95,8 +106,14 @@ fn test_celt_multi_frame_code_0_and_1() {
     dec_mf.decode(&c1, fs * 2, &mut out).unwrap();
     let r0 = rms(&out[..fs]);
     let r1 = rms(&out[fs..]);
-    assert!((r0 / bl_rms0 - 1.0).abs() < 0.02, "frame 0: {:.6} vs {:.6}", r0, bl_rms0);
-    assert!((r1 / bl_rms1 - 1.0).abs() < 0.02, "frame 1: {:.6} vs {:.6}", r1, bl_rms1);
+    assert!(
+        (r0 / bl_rms0 - 1.0).abs() < 0.02,
+        "frame 0: {r0:.6} vs {bl_rms0:.6}"
+    );
+    assert!(
+        (r1 / bl_rms1 - 1.0).abs() < 0.02,
+        "frame 1: {r1:.6} vs {bl_rms1:.6}"
+    );
 }
 
 #[test]
@@ -133,8 +150,14 @@ fn test_celt_multi_frame_code_2() {
     dec_mf.decode(&c2, fs * 2, &mut out).unwrap();
     let r0 = rms(&out[..fs]);
     let r1 = rms(&out[fs..]);
-    assert!((r0 / bl_rms0 - 1.0).abs() < 0.02, "frame 0: {:.6} vs {:.6}", r0, bl_rms0);
-    assert!((r1 / bl_rms1 - 1.0).abs() < 0.02, "frame 1: {:.6} vs {:.6}", r1, bl_rms1);
+    assert!(
+        (r0 / bl_rms0 - 1.0).abs() < 0.02,
+        "frame 0: {r0:.6} vs {bl_rms0:.6}"
+    );
+    assert!(
+        (r1 / bl_rms1 - 1.0).abs() < 0.02,
+        "frame 1: {r1:.6} vs {bl_rms1:.6}"
+    );
 }
 
 #[test]
@@ -177,8 +200,14 @@ fn test_celt_multi_frame_code_3_with_padding() {
     dec_mf.decode(&c3, fs * 2, &mut out).unwrap();
     let r0 = rms(&out[..fs]);
     let r1 = rms(&out[fs..]);
-    assert!((r0 / bl_rms0 - 1.0).abs() < 0.05, "frame 0: {:.6} vs {:.6}", r0, bl_rms0);
-    assert!((r1 / bl_rms1 - 1.0).abs() < 0.05, "frame 1: {:.6} vs {:.6}", r1, bl_rms1);
+    assert!(
+        (r0 / bl_rms0 - 1.0).abs() < 0.05,
+        "frame 0: {r0:.6} vs {bl_rms0:.6}"
+    );
+    assert!(
+        (r1 / bl_rms1 - 1.0).abs() < 0.05,
+        "frame 1: {r1:.6} vs {bl_rms1:.6}"
+    );
 }
 
 #[test]
@@ -215,8 +244,14 @@ fn test_celt_multi_frame_code_3_self_delimiting() {
     dec_mf.decode(&c3, fs * 2, &mut out).unwrap();
     let r0 = rms(&out[..fs]);
     let r1 = rms(&out[fs..]);
-    assert!((r0 / bl_rms0 - 1.0).abs() < 0.02, "frame 0: {:.6} vs {:.6}", r0, bl_rms0);
-    assert!((r1 / bl_rms1 - 1.0).abs() < 0.02, "frame 1: {:.6} vs {:.6}", r1, bl_rms1);
+    assert!(
+        (r0 / bl_rms0 - 1.0).abs() < 0.02,
+        "frame 0: {r0:.6} vs {bl_rms0:.6}"
+    );
+    assert!(
+        (r1 / bl_rms1 - 1.0).abs() < 0.02,
+        "frame 1: {r1:.6} vs {bl_rms1:.6}"
+    );
 }
 
 #[test]
@@ -241,12 +276,15 @@ fn test_silk_multi_frame_code_3_padding_roundtrip() {
         packet.truncate(n);
 
         let code = packet[0] & 0x03;
-        assert!(code == 0 || code == 3, "expected code 0 or 3, got {}", code);
+        assert!(code == 0 || code == 3, "expected code 0 or 3, got {code}");
 
         let mut out = vec![0.0f32; fs];
         let decoded = dec.decode(&packet, fs, &mut out).unwrap();
         assert_eq!(decoded, fs);
-        assert!(rms(&out) > 0.01, "frame {} should have non-zero output", frame_idx);
+        assert!(
+            rms(&out) > 0.01,
+            "frame {frame_idx} should have non-zero output"
+        );
     }
 }
 
@@ -282,8 +320,14 @@ fn test_hybrid_multi_frame_roundtrip() {
 
     let r0 = rms(&out[..fs * ch]);
     let r1 = rms(&out[fs * ch..]);
-    assert!((r0 / bl_rms0 - 1.0).abs() < 0.1, "frame 0: {:.6} vs {:.6}", r0, bl_rms0);
-    assert!((r1 / bl_rms1 - 1.0).abs() < 0.1, "frame 1: {:.6} vs {:.6}", r1, bl_rms1);
+    assert!(
+        (r0 / bl_rms0 - 1.0).abs() < 0.1,
+        "frame 0: {r0:.6} vs {bl_rms0:.6}"
+    );
+    assert!(
+        (r1 / bl_rms1 - 1.0).abs() < 0.1,
+        "frame 1: {r1:.6} vs {bl_rms1:.6}"
+    );
 }
 
 #[test]
@@ -327,8 +371,14 @@ fn test_multi_frame_code_2_unequal_payloads() {
 
     let r_sil = rms(&out[..fs]);
     let r_tone = rms(&out[fs..]);
-    assert!(r_sil < 0.001, "silence frame should be near zero, got {:.6}", r_sil);
-    assert!((r_tone / bl_tone - 1.0).abs() < 0.02, "tone frame: {:.6} vs {:.6}", r_tone, bl_tone);
+    assert!(
+        r_sil < 0.001,
+        "silence frame should be near zero, got {r_sil:.6}"
+    );
+    assert!(
+        (r_tone / bl_tone - 1.0).abs() < 0.02,
+        "tone frame: {r_tone:.6} vs {bl_tone:.6}"
+    );
 }
 
 #[test]
@@ -363,8 +413,14 @@ fn test_multi_frame_all_codes_stereo() {
     dec_mf.decode(&c1, fs * 2, &mut out).unwrap();
     let r0 = rms(&out[..fs * ch]);
     let r1 = rms(&out[fs * ch..]);
-    assert!((r0 / bl_rms0 - 1.0).abs() < 0.05, "C1 f0: {:.6} vs {:.6}", r0, bl_rms0);
-    assert!((r1 / bl_rms1 - 1.0).abs() < 0.05, "C1 f1: {:.6} vs {:.6}", r1, bl_rms1);
+    assert!(
+        (r0 / bl_rms0 - 1.0).abs() < 0.05,
+        "C1 f0: {r0:.6} vs {bl_rms0:.6}"
+    );
+    assert!(
+        (r1 / bl_rms1 - 1.0).abs() < 0.05,
+        "C1 f1: {r1:.6} vs {bl_rms1:.6}"
+    );
 
     // Code 2
     let first_len = payload0.len();
@@ -375,8 +431,14 @@ fn test_multi_frame_all_codes_stereo() {
     let mut dec_mf = OpusDecoder::new(sr, ch).unwrap();
     let mut out = vec![0.0f32; fs * 2 * ch];
     dec_mf.decode(&c2, fs * 2, &mut out).unwrap();
-    assert!((rms(&out[..fs * ch]) / bl_rms0 - 1.0).abs() < 0.05, "C2 f0 mismatch");
-    assert!((rms(&out[fs * ch..]) / bl_rms1 - 1.0).abs() < 0.05, "C2 f1 mismatch");
+    assert!(
+        (rms(&out[..fs * ch]) / bl_rms0 - 1.0).abs() < 0.05,
+        "C2 f0 mismatch"
+    );
+    assert!(
+        (rms(&out[fs * ch..]) / bl_rms1 - 1.0).abs() < 0.05,
+        "C2 f1 mismatch"
+    );
 
     // Code 3 with padding
     let max_len = payload0.len().max(payload1.len());
@@ -392,8 +454,14 @@ fn test_multi_frame_all_codes_stereo() {
     let mut dec_mf = OpusDecoder::new(sr, ch).unwrap();
     let mut out = vec![0.0f32; fs * 2 * ch];
     dec_mf.decode(&c3, fs * 2, &mut out).unwrap();
-    assert!((rms(&out[..fs * ch]) / bl_rms0 - 1.0).abs() < 0.05, "C3p f0 mismatch");
-    assert!((rms(&out[fs * ch..]) / bl_rms1 - 1.0).abs() < 0.05, "C3p f1 mismatch");
+    assert!(
+        (rms(&out[..fs * ch]) / bl_rms0 - 1.0).abs() < 0.05,
+        "C3p f0 mismatch"
+    );
+    assert!(
+        (rms(&out[fs * ch..]) / bl_rms1 - 1.0).abs() < 0.05,
+        "C3p f1 mismatch"
+    );
 
     // Code 3 self-delimiting
     let len0 = payload0.len();
@@ -405,6 +473,12 @@ fn test_multi_frame_all_codes_stereo() {
     let mut dec_mf = OpusDecoder::new(sr, ch).unwrap();
     let mut out = vec![0.0f32; fs * 2 * ch];
     dec_mf.decode(&c3s, fs * 2, &mut out).unwrap();
-    assert!((rms(&out[..fs * ch]) / bl_rms0 - 1.0).abs() < 0.05, "C3s f0 mismatch");
-    assert!((rms(&out[fs * ch..]) / bl_rms1 - 1.0).abs() < 0.05, "C3s f1 mismatch");
+    assert!(
+        (rms(&out[..fs * ch]) / bl_rms0 - 1.0).abs() < 0.05,
+        "C3s f0 mismatch"
+    );
+    assert!(
+        (rms(&out[fs * ch..]) / bl_rms1 - 1.0).abs() < 0.05,
+        "C3s f1 mismatch"
+    );
 }

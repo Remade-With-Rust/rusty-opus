@@ -8,7 +8,7 @@
 //! noise rather than dead air.
 
 use crate::silk::decoder_structs::{SilkDecoderControl, SilkDecoderState};
-use crate::silk::define::{MAX_LPC_ORDER, TYPE_NO_VOICE_ACTIVITY};
+use crate::silk::define::{MAX_FRAME_LENGTH, MAX_LPC_ORDER, TYPE_NO_VOICE_ACTIVITY};
 use crate::silk::macros::{
     silk_add_sat16, silk_add_sat32, silk_lshift_sat32, silk_rand, silk_rshift_round, silk_sat16,
     silk_smlawb, silk_smulwb, silk_smulww, silk_sqrt_approx,
@@ -58,8 +58,9 @@ pub fn silk_cng(
     if ps_dec.loss_cnt == 0 && ps_dec.prev_signal_type == TYPE_NO_VOICE_ACTIVITY {
         for i in 0..lpc_order {
             let d = ps_dec.prev_nlsf_q15[i] as i32 - ps_dec.s_cng.cng_smth_nlsf_q15[i] as i32;
-            ps_dec.s_cng.cng_smth_nlsf_q15[i] =
-                (ps_dec.s_cng.cng_smth_nlsf_q15[i] as i32 + silk_smulwb(d, CNG_NLSF_SMTH_Q16)) as i16;
+            ps_dec.s_cng.cng_smth_nlsf_q15[i] = (ps_dec.s_cng.cng_smth_nlsf_q15[i] as i32
+                + silk_smulwb(d, CNG_NLSF_SMTH_Q16))
+                as i16;
         }
         // Find the subframe with the highest gain and buffer its excitation.
         let mut max_gain_q16 = 0i32;
@@ -74,8 +75,9 @@ pub fn silk_cng(
             .s_cng
             .cng_exc_buf_q14
             .copy_within(0..(nb_subfr - 1) * subfr_length, subfr_length);
-        ps_dec.s_cng.cng_exc_buf_q14[..subfr_length]
-            .copy_from_slice(&ps_dec.exc_q14[subfr * subfr_length..subfr * subfr_length + subfr_length]);
+        ps_dec.s_cng.cng_exc_buf_q14[..subfr_length].copy_from_slice(
+            &ps_dec.exc_q14[subfr * subfr_length..subfr * subfr_length + subfr_length],
+        );
         for i in 0..nb_subfr {
             let g = ps_dec_ctrl.gains_q16[i];
             ps_dec.s_cng.cng_smth_gain_q16 +=
@@ -87,7 +89,8 @@ pub fn silk_cng(
     }
 
     if ps_dec.loss_cnt != 0 {
-        let mut cng_sig_q14 = vec![0i32; length + MAX_LPC_ORDER];
+        let mut cng_sig_buf = [0i32; MAX_FRAME_LENGTH + MAX_LPC_ORDER];
+        let cng_sig_q14 = &mut cng_sig_buf[..length + MAX_LPC_ORDER];
 
         // Comfort-noise gain from the PLC scale and the smoothed background gain.
         let mut gain_q16 = silk_smulww(
@@ -132,7 +135,10 @@ pub fn silk_cng(
             cng_sig_q14[idx] = silk_add_sat32(cng_sig_q14[idx], silk_lshift_sat32(lpc_pred_q10, 4));
             frame[i] = silk_add_sat16(
                 frame[i],
-                silk_sat16(silk_rshift_round(silk_smulww(cng_sig_q14[idx], gain_q10), 8)) as i16,
+                silk_sat16(silk_rshift_round(
+                    silk_smulww(cng_sig_q14[idx], gain_q10),
+                    8,
+                )) as i16,
             );
         }
         ps_dec

@@ -181,7 +181,12 @@ fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize) -> i32 {
     let c = &FIR_COEFS_12_8[ti];
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("sse2") {
+        if crate::isa::sse2() {
+            // SAFETY: `crate::isa::sse2()` just returned true, matching the
+            // kernel's `#[target_feature(enable = "sse2")]`. The kernel's only
+            // memory requirement, `buf8.len() >= 8`, is guaranteed by the
+            // bounds-checked slice `&buf[bi..bi + 8]` (exactly 8 elements, or a
+            // panic); `c` is a `&[i16; 8]`.
             return unsafe { resampler_fir12_8_sse2(&buf[bi..bi + 8], c) };
         }
     }
@@ -192,9 +197,20 @@ fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize) -> i32 {
     r
 }
 
+/// SSE2 twin of the 8-tap fractional-FIR dot product in `resampler_fir12_8`.
+///
+/// # Safety
+///
+/// - The CPU must support SSE2 (the kernel is compiled with
+///   `#[target_feature(enable = "sse2")]`; check `crate::isa::sse2()`).
+/// - `buf8.len() >= 8`: the first 8 elements are read with one unaligned
+///   16-byte load. (`c` is a `&[i16; 8]`, always valid for that load.)
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn resampler_fir12_8_sse2(buf8: &[i16], c: &[i16; 8]) -> i32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
     let b = _mm_loadu_si128(buf8.as_ptr() as *const __m128i);
     let cc = _mm_loadu_si128(c.as_ptr() as *const __m128i);
@@ -213,6 +229,7 @@ enum ResamplerMode {
     Copy,
     Up2HQ,
     IirFir,
+    DownFir,
 }
 
 #[derive(Clone)]
@@ -234,6 +251,9 @@ pub struct SilkResampler {
     inv_ratio_q16: i32,
 
     mode: ResamplerMode,
+
+    /// DOWN_FIR state (output rate below the SILK rate: 16->8/12, 12->8).
+    down: Option<SilkDownFirResampler>,
 }
 
 impl Default for SilkResampler {
@@ -248,6 +268,7 @@ impl Default for SilkResampler {
             batch_size: 0,
             inv_ratio_q16: 0,
             mode: ResamplerMode::Copy,
+            down: None,
         }
     }
 }
@@ -283,15 +304,20 @@ impl SilkResampler {
             self.mode = ResamplerMode::Copy;
         } else if fs_hz_out == fs_hz_in * 2 {
             self.mode = ResamplerMode::Up2HQ;
-        } else {
+        } else if fs_hz_out > fs_hz_in {
             self.mode = ResamplerMode::IirFir;
+        } else {
+            // silk_resampler_init: any downsampling ratio is DOWN_FIR (it used to
+            // fall into IIR_FIR, garbling every 8/12 kHz decode of WB/MB SILK).
+            self.mode = ResamplerMode::DownFir;
+            self.down = SilkDownFirResampler::new(fs_hz_in, fs_hz_out)
+                .map(|r| r.with_input_delay(self.input_delay as usize));
+            if self.down.is_none() {
+                return -1;
+            }
         }
 
-        let up2x = if self.mode == ResamplerMode::IirFir {
-            1
-        } else {
-            0
-        };
+        let up2x = i32::from(self.mode == ResamplerMode::IirFir);
         self.inv_ratio_q16 = ((((fs_hz_in as i64) << (14 + up2x)) / fs_hz_out as i64) << 2) as i32;
 
         while silk_smulww(self.inv_ratio_q16, fs_hz_out) < (fs_hz_in << up2x) {
@@ -305,6 +331,11 @@ impl SilkResampler {
         if in_len < self.fs_in_khz {
             return -1;
         }
+        if let Some(down) = self.down.as_mut() {
+            // Owns its own 1 ms delay-buffer stage (same silk_resampler() top level).
+            down.process(out, &input[..in_len as usize]);
+            return 0;
+        }
 
         let n_samples = self.fs_in_khz - self.input_delay;
 
@@ -312,6 +343,8 @@ impl SilkResampler {
             .copy_from_slice(&input[..n_samples as usize]);
 
         match self.mode {
+            // DownFir returned through `down` above; nothing reaches here.
+            ResamplerMode::DownFir => {}
             ResamplerMode::Copy => {
                 out[..self.fs_in_khz as usize]
                     .copy_from_slice(&self.delay_buf[..self.fs_in_khz as usize]);
@@ -643,6 +676,30 @@ static RESAMPLER_1_3_COEFS: [i16; 2 + RESAMPLER_DOWN_ORDER_FIR2 / 2] = [
     -13, 0, 20, 26, 5, -31, -43, -4, 65, 90, 7, -157, -248, -44, 593, 1583, 2612, 3271,
 ];
 
+// The remaining silk_resampler_init downsampling ratios (resampler_rom.c),
+// needed so SILK can run at its NB/MB/WB internal rate from ANY API rate:
+// 16->12 (3:4), 16->8 / 24->12 (1:2), 48->12 (1:4), 48->8 (1:6). 12->8 and
+// 24->8 reuse 2:3 and 1:3 above.
+const RESAMPLER_DOWN_ORDER_FIR1: usize = 24;
+static RESAMPLER_3_4_COEFS: [i16; 2 + 3 * (RESAMPLER_DOWN_ORDER_FIR0 / 2)] = [
+    -20694, -13867, //
+    -49, 64, 17, -157, 353, -496, 163, 11047, 22205, //
+    -39, 6, 91, -170, 186, 23, -896, 6336, 19928, //
+    -19, -36, 102, -89, -24, 328, -951, 2568, 15909,
+];
+static RESAMPLER_1_2_COEFS: [i16; 2 + RESAMPLER_DOWN_ORDER_FIR1 / 2] = [
+    616, -14323, //
+    -10, 39, 58, -46, -84, 120, 184, -315, -541, 1284, 5380, 9024,
+];
+static RESAMPLER_1_4_COEFS: [i16; 2 + RESAMPLER_DOWN_ORDER_FIR2 / 2] = [
+    22500, -15099, //
+    3, -14, -20, -15, 2, 25, 37, 25, -16, -71, -107, -79, 50, 292, 623, 982, 1288, 1464,
+];
+static RESAMPLER_1_6_COEFS: [i16; 2 + RESAMPLER_DOWN_ORDER_FIR2 / 2] = [
+    27540, -15257, //
+    17, 12, 8, 1, -10, -22, -30, -32, -22, 3, 44, 100, 168, 243, 317, 381, 429, 455,
+];
+
 /// silk_resampler_private_AR2, exact port. (The older silk_resampler_private_ar2
 /// above has a different state recurrence and is kept for its down2_3 caller.)
 fn ar2_q14_exact(s: &mut [i32; 2], out_q8: &mut [i32], input: &[i16], a_q14: &[i16]) {
@@ -661,6 +718,7 @@ fn sat16_round_q6(a: i32) -> i16 {
     r.clamp(-32768, 32767) as i16
 }
 
+#[derive(Clone)]
 pub struct SilkDownFirResampler {
     s_iir: [i32; 2],
     s_fir: [i32; RESAMPLER_DOWN_ORDER_FIR2],
@@ -676,25 +734,29 @@ pub struct SilkDownFirResampler {
 }
 
 impl SilkDownFirResampler {
-    /// Supports the encoder ratios used from >16 kHz APIs: 48k->16k (1:3) and
-    /// 24k->16k (2:3).
+    /// Every silk_resampler_init downsampling ratio, in libopus's test order:
+    /// 3:4, 2:3, 1:2, 1:3, 1:4, 1:6 (resampler.c). `None` for anything else
+    /// (equal rates are the caller's copy path).
     pub fn new(fs_hz_in: i32, fs_hz_out: i32) -> Option<Self> {
         let (coefs, fir_order, fir_fracs): (&'static [i16], usize, i32) =
-            if fs_hz_out * 3 == fs_hz_in * 2 {
+            if fs_hz_out * 4 == fs_hz_in * 3 {
+                (&RESAMPLER_3_4_COEFS, RESAMPLER_DOWN_ORDER_FIR0, 3)
+            } else if fs_hz_out * 3 == fs_hz_in * 2 {
                 (&RESAMPLER_2_3_COEFS, RESAMPLER_DOWN_ORDER_FIR0, 2)
+            } else if fs_hz_out * 2 == fs_hz_in {
+                (&RESAMPLER_1_2_COEFS, RESAMPLER_DOWN_ORDER_FIR1, 1)
             } else if fs_hz_out * 3 == fs_hz_in {
                 (&RESAMPLER_1_3_COEFS, RESAMPLER_DOWN_ORDER_FIR2, 1)
+            } else if fs_hz_out * 4 == fs_hz_in {
+                (&RESAMPLER_1_4_COEFS, RESAMPLER_DOWN_ORDER_FIR2, 1)
+            } else if fs_hz_out * 6 == fs_hz_in {
+                (&RESAMPLER_1_6_COEFS, RESAMPLER_DOWN_ORDER_FIR2, 1)
             } else {
                 return None;
             };
         // delay_matrix_enc[rateID(in)][rateID(out)] (resampler.c:53).
-        const DELAY_MATRIX_ENC: [[i8; 3]; 5] = [
-            [6, 0, 3],
-            [0, 7, 3],
-            [0, 1, 10],
-            [0, 2, 6],
-            [18, 10, 12],
-        ];
+        const DELAY_MATRIX_ENC: [[i8; 3]; 5] =
+            [[6, 0, 3], [0, 7, 3], [0, 1, 10], [0, 2, 6], [18, 10, 12]];
         let rid_in = match fs_hz_in {
             8000 => 0,
             12000 => 1,
@@ -714,7 +776,7 @@ impl SilkDownFirResampler {
         while (((inv_ratio_q16 as i64) * fs_hz_out as i64) >> 16) < fs_hz_in as i64 {
             inv_ratio_q16 += 1;
         }
-        Some(SilkDownFirResampler {
+        Some(Self {
             s_iir: [0; 2],
             s_fir: [0; RESAMPLER_DOWN_ORDER_FIR2],
             delay_buf: [0; 48],
@@ -727,6 +789,14 @@ impl SilkDownFirResampler {
             fs_out_khz: (fs_hz_out / 1000) as usize,
             coefs,
         })
+    }
+
+    /// Decoder use: silk_resampler_init(forEnc=0) takes the delay from
+    /// delay_matrix_dec instead of delay_matrix_enc.
+    #[must_use]
+    pub fn with_input_delay(mut self, input_delay: usize) -> Self {
+        self.input_delay = input_delay;
+        self
     }
 
     fn interpol(&self, buf: &[i32], out: &mut [i16], max_index_q16: i32) -> usize {
@@ -744,10 +814,23 @@ impl SilkDownFirResampler {
                 for j in 0..9 {
                     res = silk_smlawb(res, buf[b + j], p[j] as i32);
                 }
-                let p2 = &fir_coefs
-                    [RESAMPLER_DOWN_ORDER_FIR0 / 2 * (self.fir_fracs as usize - 1 - interpol_ind)..];
+                let p2 = &fir_coefs[RESAMPLER_DOWN_ORDER_FIR0 / 2
+                    * (self.fir_fracs as usize - 1 - interpol_ind)..];
                 for j in 0..9 {
                     res = silk_smlawb(res, buf[b + 17 - j], p2[j] as i32);
+                }
+                out[n_out] = sat16_round_q6(res);
+                n_out += 1;
+                index_q16 += inc;
+            }
+        } else if self.fir_order == RESAMPLER_DOWN_ORDER_FIR1 {
+            // RESAMPLER_DOWN_ORDER_FIR1 (symmetric 24-tap, 1:2)
+            while index_q16 < max_index_q16 {
+                let b = (index_q16 >> 16) as usize;
+                let mut res = 0i32;
+                for j in 0..12 {
+                    let sum = buf[b + j].wrapping_add(buf[b + 23 - j]);
+                    res = silk_smlawb(res, sum, fir_coefs[j] as i32);
                 }
                 out[n_out] = sat16_round_q6(res);
                 n_out += 1;
@@ -812,7 +895,29 @@ impl SilkDownFirResampler {
         let first_ms: [i16; 48] = self.delay_buf;
         let produced = self.down_fir(&first_ms[..self.fs_in_khz], &mut out[..self.fs_out_khz]);
         debug_assert_eq!(produced, self.fs_out_khz);
-        self.down_fir(&input[n..in_len - self.input_delay], &mut out[self.fs_out_khz..]);
+        self.down_fir(
+            &input[n..in_len - self.input_delay],
+            &mut out[self.fs_out_khz..],
+        );
         self.delay_buf[..self.input_delay].copy_from_slice(&input[in_len - self.input_delay..]);
+    }
+}
+
+/// SIMD-vs-scalar oracle: integer kernel, so the gate is bit-identity.
+#[cfg(test)]
+mod isa_oracle {
+    use super::*;
+    use crate::isa::oracle::{Rng, both};
+
+    #[test]
+    fn resampler_fir12_8_matches_scalar() {
+        let mut r = Rng(0x0051_1c0d_e0f1_2a8b);
+        for _ in 0..crate::isa::oracle::iters(20000) {
+            let buf = r.i16s(64, 32767);
+            let bi = r.below(56);
+            let ti = r.below(12);
+            let (s, c) = both(|| resampler_fir12_8(&buf, bi, ti));
+            assert_eq!(s, c, "resampler_fir12_8 bi={bi} ti={ti}");
+        }
     }
 }

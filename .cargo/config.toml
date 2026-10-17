@@ -1,0 +1,29 @@
+# Hardening defaults for every build made in this repository (gate H-04).
+# These govern our tests, benches, examples and fuzzers - not downstream crates,
+# which use their own configuration.
+
+[build]
+# Frame pointers: reliable stack traces in crash reports, profilers and fuzz
+# triage at a cost of ~1 register.
+rustflags = ["-C", "force-frame-pointers=yes"]
+
+# Target-specific rustflags replace [build] rustflags, so each repeats it.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    "-C", "link-arg=-Wl,-z,relro,-z,now",   # full RELRO
+    "-C", "link-arg=-Wl,-z,noexecstack",    # non-executable stack
+]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    "-C", "link-arg=-Wl,-z,relro,-z,now",
+    "-C", "link-arg=-Wl,-z,noexecstack",
+]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    "-C", "link-arg=/CETCOMPAT",            # CET shadow-stack compatible
+]

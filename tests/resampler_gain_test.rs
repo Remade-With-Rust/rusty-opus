@@ -20,7 +20,7 @@ fn test_down2_3_gain_consistency() {
     // Calculate input energy
     let input_energy: f64 =
         input.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / input.len() as f64;
-    println!("Input energy: {}", input_energy);
+    println!("Input energy: {input_energy}");
 
     // Test 3x downsampling (16kHz -> 10.67kHz approx, actually 2/3 for 16k->10.67k)
     // Actually for 24kHz -> 16kHz, we use down2_3 which is 2/3 rate
@@ -39,7 +39,7 @@ fn test_down2_3_gain_consistency() {
 
     let input_energy_24k: f64 =
         input_24k.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / input_24k.len() as f64;
-    println!("Input 24k energy: {}", input_energy_24k);
+    println!("Input 24k energy: {input_energy_24k}");
 
     // Downsample using down2_3 (24kHz -> 16kHz)
     let output_len = num_samples_24k * 2 / 3;
@@ -50,17 +50,16 @@ fn test_down2_3_gain_consistency() {
 
     let output_energy: f64 =
         output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / output.len() as f64;
-    println!("Output energy after down2_3: {}", output_energy);
+    println!("Output energy after down2_3: {output_energy}");
 
     // Calculate gain
     let gain = (output_energy / input_energy_24k).sqrt();
-    println!("Gain: {}", gain);
+    println!("Gain: {gain}");
 
     // Gain should be close to 1.0 (maybe 0.9-1.1 range)
     assert!(
         gain > 0.5 && gain < 2.0,
-        "Gain {} is outside reasonable range",
-        gain
+        "Gain {gain} is outside reasonable range"
     );
 }
 
@@ -81,7 +80,7 @@ fn test_silk_resampler_up2_gain() {
 
     let input_energy: f64 =
         input.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / input.len() as f64;
-    println!("Input energy: {}", input_energy);
+    println!("Input energy: {input_energy}");
 
     // Test resampler 16kHz -> 32kHz
     let mut resampler = SilkResampler::default();
@@ -94,10 +93,10 @@ fn test_silk_resampler_up2_gain() {
 
     let output_energy: f64 =
         output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / output.len() as f64;
-    println!("Output energy after 16k->32k: {}", output_energy);
+    println!("Output energy after 16k->32k: {output_energy}");
 
     let gain = (output_energy / input_energy).sqrt();
-    println!("Gain: {}", gain);
+    println!("Gain: {gain}");
 
     // For up2, energy per sample should be similar, but we have 2x samples
     // Total energy should be roughly preserved
@@ -120,7 +119,7 @@ fn test_silk_resampler_16k_to_48k() {
 
     let input_rms =
         (input.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / input.len() as f64).sqrt();
-    println!("Input RMS: {}", input_rms);
+    println!("Input RMS: {input_rms}");
 
     // Test resampler 16kHz -> 48kHz
     let mut resampler = SilkResampler::default();
@@ -134,18 +133,17 @@ fn test_silk_resampler_16k_to_48k() {
 
     let output_rms =
         (output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / output.len() as f64).sqrt();
-    println!("Output RMS after 16k->48k: {}", output_rms);
+    println!("Output RMS after 16k->48k: {output_rms}");
 
     // The ratio should be close to 1.0 (signal amplitude preserved)
     let ratio = output_rms / input_rms;
-    println!("Amplitude ratio: {}", ratio);
+    println!("Amplitude ratio: {ratio}");
 
     // Allow some tolerance but it should be roughly 1.0
     // If there's a gain issue, this will fail
     assert!(
         ratio > 0.5 && ratio < 2.0,
-        "Amplitude ratio {} is outside reasonable range [0.5, 2.0]",
-        ratio
+        "Amplitude ratio {ratio} is outside reasonable range [0.5, 2.0]"
     );
 }
 
@@ -179,10 +177,7 @@ fn test_down_1_6_dc_passthrough() {
         let diff = (s as i32 - amplitude as i32).abs();
         assert!(
             diff < 500,
-            "DC output sample {} too far from {} (diff {})",
-            s,
-            amplitude,
-            diff
+            "DC output sample {s} too far from {amplitude} (diff {diff})"
         );
     }
 }
@@ -195,7 +190,7 @@ fn test_down_1_6_silence() {
     let mut state = SilkResamplerDown1_6::default();
     silk_resampler_down_1_6(&mut state, &mut output, &input);
     for &s in &output {
-        assert_eq!(s, 0, "Expected silence, got {}", s);
+        assert_eq!(s, 0, "Expected silence, got {s}");
     }
 }
 
@@ -231,8 +226,7 @@ fn test_down_1_6_gain() {
     let ratio = output_rms / input_rms;
     assert!(
         ratio > 0.5 && ratio < 2.0,
-        "Gain ratio {} outside [0.5, 2.0] for 48→8 kHz resampler",
-        ratio
+        "Gain ratio {ratio} outside [0.5, 2.0] for 48→8 kHz resampler"
     );
 }
 
@@ -266,8 +260,7 @@ fn test_down_1_6_alias_rejection() {
     let attenuation = output_rms / input_rms;
     assert!(
         attenuation < 0.3,
-        "5 kHz alias not sufficiently attenuated: ratio = {}",
-        attenuation
+        "5 kHz alias not sufficiently attenuated: ratio = {attenuation}"
     );
 }
 

@@ -60,8 +60,7 @@ mod tests {
         // Check that output is not all zeros
         assert!(
             max_val > 0.01,
-            "MDCT forward output too small: max={}",
-            max_val
+            "MDCT forward output too small: max={max_val}"
         );
 
         // Inverse MDCT
@@ -92,8 +91,7 @@ mod tests {
         // Check that output is reasonable
         assert!(
             max_val > 0.1,
-            "MDCT backward output too small: max={}",
-            max_val
+            "MDCT backward output too small: max={max_val}"
         );
     }
 }

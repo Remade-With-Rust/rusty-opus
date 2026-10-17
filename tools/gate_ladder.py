@@ -70,7 +70,7 @@ def app_for(clip):
 
 def check_fresh():
     if not os.path.exists(RT):
-        sys.exit(f'build first: cargo build --release --example roundtrip ({RT} missing)')
+        sys.exit(f'build first: cargo build --release --features research --example roundtrip ({RT} missing)')
     if RT_PINNED:
         print(f'PINNED binary (staleness check bypassed): {RT} '
               f'mtime {os.path.getmtime(RT):.0f}')

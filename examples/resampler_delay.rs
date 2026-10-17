@@ -24,7 +24,10 @@ fn measure(fs_in: i32) -> f64 {
     let mut imp = vec![0i16; frame];
     imp[0] = 10000;
     r.process(&mut out, &imp, frame as i32);
-    let e: f64 = out[..out_frame].iter().map(|&x| (x as f64) * (x as f64)).sum();
+    let e: f64 = out[..out_frame]
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum();
     let centroid: f64 = out[..out_frame]
         .iter()
         .enumerate()
@@ -37,7 +40,7 @@ fn measure(fs_in: i32) -> f64 {
 fn main() {
     for &fs in &[8000, 12000, 16000] {
         let d = measure(fs);
-        println!("in {:5} Hz -> 48000: impulse-energy centroid @ {:.2} output samples", fs, d);
+        println!("in {fs:5} Hz -> 48000: impulse-energy centroid @ {d:.2} output samples");
     }
 }
 

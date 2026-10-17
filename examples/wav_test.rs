@@ -123,7 +123,7 @@ fn write_wav(path: &Path, sample_rate: u32, num_channels: u16, samples: &[i16]) 
         file.write_all(&sample.to_le_bytes()).unwrap();
     }
 
-    println!("Wrote WAV: {} samples to {:?}", samples.len(), path);
+    println!("Wrote WAV: {} samples to {}", samples.len(), path.display());
 }
 
 // High-quality resampler using SILK's resampler
@@ -154,6 +154,7 @@ struct ModeConfig {
     skip_celt: bool,
 }
 
+#[allow(clippy::needless_pass_by_value)] // small config struct, consumed per mode
 fn process_mode(config: ModeConfig, src_samples: &[i16], src_rate: u32) {
     let ModeConfig {
         app_name,
@@ -172,33 +173,29 @@ fn process_mode(config: ModeConfig, src_samples: &[i16], src_rate: u32) {
         effective_app_mode = Application::Voip;
         effective_bitrate = bitrate.max(48000);
         println!(
-            "[compat] 48k Audio fallback active: use VoIP profile at {} bps to reduce artifacts",
-            effective_bitrate
+            "[compat] 48k Audio fallback active: use VoIP profile at {effective_bitrate} bps to reduce artifacts"
         );
     }
 
     println!("\n{}", "=".repeat(60));
-    println!("=== {} + {} ===", app_name, rate_name);
+    println!("=== {app_name} + {rate_name} ===");
     println!("{}", "=".repeat(60));
 
     // Resample if necessary
     let input_samples: Vec<i16> = if src_rate != target_rate {
-        println!(
-            "Resampling {} Hz -> {} Hz (using SILK resampler)",
-            src_rate, target_rate
-        );
+        println!("Resampling {src_rate} Hz -> {target_rate} Hz (using SILK resampler)");
         resample_silk(src_samples, src_rate as i32, target_rate as i32)
     } else {
-        println!("Input already at target rate {} Hz", target_rate);
+        println!("Input already at target rate {target_rate} Hz");
         src_samples.to_vec()
     };
 
     let frame_size = (target_rate as usize) * 20 / 1000; // 20ms frame
 
     println!("\n--- Encoding ---");
-    println!("Frame size: {} samples (20ms)", frame_size);
-    println!("Bitrate: {} bps", effective_bitrate);
-    println!("Application mode: {:?}", effective_app_mode);
+    println!("Frame size: {frame_size} samples (20ms)");
+    println!("Bitrate: {effective_bitrate} bps");
+    println!("Application mode: {effective_app_mode:?}");
 
     // Initialize encoder
     let mut encoder = OpusEncoder::new(target_rate as i32, 1, effective_app_mode)
@@ -327,7 +324,7 @@ fn process_mode(config: ModeConfig, src_samples: &[i16], src_rate: u32) {
     } else {
         999.0
     };
-    println!("SNR: {:.2} dB (delay: {} samples)", snr, best_delay);
+    println!("SNR: {snr:.2} dB (delay: {best_delay} samples)");
 
     // Print SNR at specific delays for debugging
     for &check_delay in &[0i32, 120, 316, 960, 1251, 1320, 1566, 1863, best_delay] {
@@ -346,10 +343,7 @@ fn process_mode(config: ModeConfig, src_samples: &[i16], src_rate: u32) {
         }
         if cnt > 0 && se > 0.0 {
             let check_snr = 10.0 * (se / ne.max(1e-10)).log10();
-            println!(
-                "  SNR at delay {:5}: {:.2} dB ({} samples)",
-                check_delay, check_snr, cnt
-            );
+            println!("  SNR at delay {check_delay:5}: {check_snr:.2} dB ({cnt} samples)");
         }
     }
 
@@ -374,7 +368,7 @@ fn main() {
         .unwrap_or_else(|| "fixtures/answer_16k.wav".to_string());
     let input_path = Path::new(&input_arg);
 
-    println!("Input file: {:?}", input_path);
+    println!("Input file: {}", input_path.display());
 
     // Read input WAV
     println!("\n=== Reading input WAV ===");
@@ -467,10 +461,7 @@ fn main() {
                     2 => "WB",
                     _ => "SWB",
                 };
-                println!(
-                    "TOC=0x{:02x} SILK={} {}BW {} bytes/pkt",
-                    toc, is_silk, bw, n
-                );
+                println!("TOC=0x{toc:02x} SILK={is_silk} {bw}BW {n} bytes/pkt");
             }
 
             // 16kHz decode
@@ -489,8 +480,7 @@ fn main() {
             };
             if ratio16 < 0.1 || ratio16 > 10.0 {
                 println!(
-                    "  [16k] frame {}: in={:.4} out={:.4} ratio={:.3} <- FAIL",
-                    i, in_rms, out_rms16, ratio16
+                    "  [16k] frame {i}: in={in_rms:.4} out={out_rms16:.4} ratio={ratio16:.3} <- FAIL"
                 );
                 fail16 += 1;
             }
@@ -515,8 +505,7 @@ fn main() {
             };
             if ratio48 < 0.1 || ratio48 > 10.0 {
                 println!(
-                    "  [48k] frame {}: in={:.4} out={:.4} ratio={:.3} <- FAIL",
-                    i, in_rms, out_rms48, ratio48
+                    "  [48k] frame {i}: in={in_rms:.4} out={out_rms48:.4} ratio={ratio48:.3} <- FAIL"
                 );
                 fail48 += 1;
             }
@@ -539,12 +528,9 @@ fn main() {
         );
 
         if fail16 == 0 && fail48 == 0 {
-            println!(
-                "OK 24kbps RS-only loopback: {} frames passed (16k + 48k)",
-                n_frames
-            );
+            println!("OK 24kbps RS-only loopback: {n_frames} frames passed (16k + 48k)");
         } else {
-            println!("FAIL 16k={} 48k={} / {} frames", fail16, fail48, n_frames);
+            println!("FAIL 16k={fail16} 48k={fail48} / {n_frames} frames");
         }
     }
 

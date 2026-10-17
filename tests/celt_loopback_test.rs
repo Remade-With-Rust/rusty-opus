@@ -35,7 +35,7 @@ fn test_celt_loopback() {
         assert_eq!(decoded_len, frame_size);
         all_out.extend_from_slice(&pcm_out);
 
-        println!("Frame {}:", f);
+        println!("Frame {f}:");
         println!("  pcm_in[0..5] = {:?}", &pcm_in[0..5]);
         println!("  pcm_out[0..5] = {:?}", &pcm_out[0..5]);
         // println!("  pcm_out[60..65] = {:?}", &pcm_out[60..65]);
@@ -54,7 +54,7 @@ fn test_celt_loopback() {
                 sq_sig += s_in * s_in;
             }
             let snr = 10.0 * (sq_sig / (sq_err + 1e-10)).log10();
-            println!("Frame {} SNR (0 delay): {:.2} dB", f, snr);
+            println!("Frame {f} SNR (0 delay): {snr:.2} dB");
         }
     }
 
@@ -89,11 +89,8 @@ fn test_celt_loopback() {
     }
 
     let snr_0 = calculate_snr(&all_in, &all_out, 0, start_idx, end_idx);
-    println!("SNR at delay 0: {:.2} dB", snr_0);
-    println!(
-        "Loopback Global Best SNR: {:.2} dB at delay {}",
-        best_snr, best_delay
-    );
+    println!("SNR at delay 0: {snr_0:.2} dB");
+    println!("Loopback Global Best SNR: {best_snr:.2} dB at delay {best_delay}");
 
     println!("Samples at delay 0:");
     for i in 0..10 {
@@ -105,7 +102,7 @@ fn test_celt_loopback() {
             );
         }
     }
-    println!("Samples at delay {}:", best_delay);
+    println!("Samples at delay {best_delay}:");
     for i in 0..10 {
         let idx = start_idx + i;
         if idx < all_in.len() && idx + best_delay < all_out.len() {
@@ -120,7 +117,7 @@ fn test_celt_loopback() {
 
     // Current Rust CELT loopback baseline on this test shape is around 2 dB.
     // Keep a floor to catch regressions while avoiding false failures.
-    assert!(best_snr > 1.8, "SNR too low: {:.2} dB", best_snr);
+    assert!(best_snr > 1.8, "SNR too low: {best_snr:.2} dB");
 }
 
 fn calculate_snr(all_in: &[f32], all_out: &[f32], delay: usize, start: usize, end: usize) -> f32 {

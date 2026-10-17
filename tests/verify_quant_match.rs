@@ -73,7 +73,7 @@ fn test_quant_energy_match() {
     let ref_last_bytes: [u8; 3] = [0x17, 0x1C, 0x14]; // [997], [998], [999]
 
     for i in 0..7 {
-        assert_eq!(enc.buf[i], ref_bytes[i], "Byte {} mismatch", i);
+        assert_eq!(enc.buf[i], ref_bytes[i], "Byte {i} mismatch");
     }
 
     // Check end bytes. RangeCoder done() flushed bits to the end of buffer.
@@ -81,8 +81,7 @@ fn test_quant_energy_match() {
         assert_eq!(
             enc.buf[enc.storage as usize - 3 + i],
             ref_last_bytes[i],
-            "End byte {} mismatch",
-            i
+            "End byte {i} mismatch"
         );
     }
 

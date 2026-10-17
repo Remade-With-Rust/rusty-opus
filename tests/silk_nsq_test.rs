@@ -143,7 +143,7 @@ fn test_nsq_unvoiced_basic() {
 
     // Verify pulse magnitudes are reasonable (typical range -8..8 for SILK)
     let max_pulse = pulses.iter().map(|&p| (p as i32).abs()).max().unwrap();
-    println!("NSQ Unvoiced: max pulse magnitude = {}", max_pulse);
+    println!("NSQ Unvoiced: max pulse magnitude = {max_pulse}");
     assert!(
         max_pulse <= 127,
         "Pulse magnitude should be within i8 range"
@@ -323,7 +323,7 @@ fn test_nsq_silent_input() {
 
     // Silent input should produce mostly zero or very small pulses
     let total_energy: i64 = pulses.iter().map(|&p| (p as i64) * (p as i64)).sum();
-    println!("NSQ Silent: total pulse energy = {}", total_energy);
+    println!("NSQ Silent: total pulse energy = {total_energy}");
     // Not asserting zero because noise dithering may produce small pulses
 
     println!("✅ NSQ silent input test passed");
@@ -399,10 +399,7 @@ fn test_nsq_gain_scaling() {
     // With higher gain, we expect smaller pulse magnitudes (gain absorbs more signal)
     let energy_low: i64 = pulses_low.iter().map(|&p| (p as i64) * (p as i64)).sum();
     let energy_high: i64 = pulses_high.iter().map(|&p| (p as i64) * (p as i64)).sum();
-    println!(
-        "NSQ Gain: low_gain_energy={}, high_gain_energy={}",
-        energy_low, energy_high
-    );
+    println!("NSQ Gain: low_gain_energy={energy_low}, high_gain_energy={energy_high}");
 
     // Higher gain should result in different pulse distribution
     assert_ne!(
@@ -498,10 +495,7 @@ fn test_nsq_consistency_unvoiced_wb() {
     let pulse_sum: i64 = pulses.iter().map(|&p| p as i64).sum();
     let pulse_sq_sum: i64 = pulses.iter().map(|&p| (p as i64) * (p as i64)).sum();
 
-    println!(
-        "Unvoiced WB consistency: pulse_sum={}, pulse_sq_sum={}",
-        pulse_sum, pulse_sq_sum
-    );
+    println!("Unvoiced WB consistency: pulse_sum={pulse_sum}, pulse_sq_sum={pulse_sq_sum}");
     println!(
         "NSQ state after: lag_prev={}, rand_seed={}",
         nsq.lag_prev, nsq.rand_seed
@@ -561,10 +555,7 @@ fn test_nsq_consistency_voiced_wb() {
     let pulse_sum: i64 = pulses.iter().map(|&p| p as i64).sum();
     let pulse_sq_sum: i64 = pulses.iter().map(|&p| (p as i64) * (p as i64)).sum();
 
-    println!(
-        "Voiced WB consistency: pulse_sum={}, pulse_sq_sum={}",
-        pulse_sum, pulse_sq_sum
-    );
+    println!("Voiced WB consistency: pulse_sum={pulse_sum}, pulse_sq_sum={pulse_sq_sum}");
     println!(
         "NSQ state after: lag_prev={}, rand_seed={}",
         nsq.lag_prev, nsq.rand_seed
@@ -610,10 +601,7 @@ fn test_nsq_consistency_unvoiced_nb() {
     let pulse_sum: i64 = pulses.iter().map(|&p| p as i64).sum();
     let pulse_sq_sum: i64 = pulses.iter().map(|&p| (p as i64) * (p as i64)).sum();
 
-    println!(
-        "Unvoiced NB consistency: pulse_sum={}, pulse_sq_sum={}",
-        pulse_sum, pulse_sq_sum
-    );
+    println!("Unvoiced NB consistency: pulse_sum={pulse_sum}, pulse_sq_sum={pulse_sq_sum}");
     println!(
         "NSQ state after: lag_prev={}, rand_seed={}",
         nsq.lag_prev, nsq.rand_seed
@@ -666,10 +654,7 @@ fn test_nsq_consistency_voiced_nb() {
     let pulse_sum: i64 = pulses.iter().map(|&p| p as i64).sum();
     let pulse_sq_sum: i64 = pulses.iter().map(|&p| (p as i64) * (p as i64)).sum();
 
-    println!(
-        "Voiced NB consistency: pulse_sum={}, pulse_sq_sum={}",
-        pulse_sum, pulse_sq_sum
-    );
+    println!("Voiced NB consistency: pulse_sum={pulse_sum}, pulse_sq_sum={pulse_sq_sum}");
     println!(
         "NSQ state after: lag_prev={}, rand_seed={}",
         nsq.lag_prev, nsq.rand_seed

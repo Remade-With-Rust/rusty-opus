@@ -55,7 +55,8 @@ fn kf_factor(n_orig: usize, factors: &mut [i16; 2 * MAXFACTORS]) -> bool {
     let mut stages = 0;
 
     loop {
-        while !n.is_multiple_of(p as usize) {
+        while n % p as usize != 0 {
+            // not is_multiple_of: MSRV 1.85 predates it
             p = match p {
                 4 => 2,
                 2 => 3,
@@ -162,7 +163,7 @@ impl KissFftState {
         })
     }
 
-    pub fn new_sub(base: &KissFftState, nfft: usize) -> Option<Self> {
+    pub fn new_sub(base: &Self, nfft: usize) -> Option<Self> {
         let mut factors = [0i16; 2 * MAXFACTORS];
         if !kf_factor(nfft, &mut factors) {
             return None;
@@ -200,6 +201,18 @@ impl KissFftState {
     }
 }
 
+/// NEON radix-2 butterfly for the `m == 1` stage: `n` pairs
+/// `(fout[2k], fout[2k + 1])`.
+///
+/// # Safety
+///
+/// - NEON must be available. It is baseline on aarch64; callers gate on
+///   `crate::isa::neon()` for capping.
+/// - `fout.len() >= 2 * n`. The vector loops load and store 16 bytes at a
+///   time through a raw `*mut f32` derived from `fout` (via the
+///   `#[repr(C)]` `KissCpx` layout) with no bounds checks.
+///
+/// No alignment is required.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn kf_bfly2_m1_neon(fout: &mut [KissCpx], n: usize) {
@@ -271,17 +284,26 @@ unsafe fn kf_bfly2_m1_neon(fout: &mut [KissCpx], n: usize) {
 fn kf_bfly2(fout: &mut [KissCpx], m: usize, n: usize) {
     if m == 1 {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel uses only bounds-checked indexing,
+        // so it has no memory precondition.
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 kf_bfly2_m1_avx(fout, n);
                 return;
             }
         }
         #[cfg(target_arch = "aarch64")]
-        unsafe {
-            kf_bfly2_m1_neon(fout, n);
+        if crate::isa::neon() {
+            // SAFETY: NEON is baseline on aarch64. The kernel's raw 16-byte
+            // loads and stores cover `fout[..2 * n]`. In the radix-2 `m == 1`
+            // stage, `opus_fft_impl` passes `n = fstride_i` with
+            // `2 * n == st.nfft`, so this needs `fout.len() >= st.nfft`, which
+            // the `assert!` at the top of `opus_fft_impl` enforces.
+            unsafe { kf_bfly2_m1_neon(fout, n) };
+            return;
         }
-        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..n {
             let idx = i * 2;
             let t = fout[idx + 1];
@@ -318,6 +340,16 @@ fn kf_bfly2(fout: &mut [KissCpx], m: usize, n: usize) {
     }
 }
 
+/// NEON radix-4 butterfly for the `m == 1` stage: `n` groups of four
+/// consecutive elements.
+///
+/// # Safety
+///
+/// - NEON must be available (baseline on aarch64).
+/// - `fout.len() >= 4 * n`. The vector loop reads and writes
+///   `fout[4i..4i + 8]` as raw `f32`s with no bounds checks.
+///
+/// No alignment is required.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn kf_bfly4_m1_neon(fout: &mut [KissCpx], n: usize) {
@@ -387,6 +419,14 @@ unsafe fn kf_bfly4_m1_neon(fout: &mut [KissCpx], n: usize) {
     }
 }
 
+/// Radix-4 butterfly for the general (`m > 1`) stage, on the NEON
+/// dispatch path.
+///
+/// # Safety
+///
+/// No caller obligations. The body uses no intrinsics and no raw
+/// pointers, and every access is bounds-checked indexing (inconsistent
+/// arguments panic). It is `unsafe` only to match its dispatch siblings.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn kf_bfly4_neon_inner(
@@ -473,17 +513,26 @@ fn kf_bfly4(
 ) {
     if m == 1 {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel uses only bounds-checked indexing,
+        // so it has no memory precondition.
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 kf_bfly4_m1_avx(fout, n);
                 return;
             }
         }
         #[cfg(target_arch = "aarch64")]
-        unsafe {
-            kf_bfly4_m1_neon(fout, n);
+        if crate::isa::neon() {
+            // SAFETY: NEON is baseline on aarch64. The kernel's raw loads and
+            // stores cover `fout[..4 * n]`. In the radix-4 `m == 1` stage,
+            // `opus_fft_impl` passes `n = fstride_i` with `4 * n == st.nfft`,
+            // so this needs `fout.len() >= st.nfft`, which the `assert!` at
+            // the top of `opus_fft_impl` enforces.
+            unsafe { kf_bfly4_m1_neon(fout, n) };
+            return;
         }
-        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..n {
             let base = i * 4;
 
@@ -499,17 +548,24 @@ fn kf_bfly4(
         }
     } else {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel uses only bounds-checked indexing,
+        // so it has no memory precondition.
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 kf_bfly4_avx_inner(fout, twiddles, m, n, mm, fstride);
                 return;
             }
         }
         #[cfg(target_arch = "aarch64")]
-        unsafe {
-            kf_bfly4_neon_inner(fout, twiddles, m, n, mm, fstride);
+        if crate::isa::neon() {
+            // SAFETY: the kernel uses no intrinsics and no raw pointers. Every
+            // access is bounds-checked indexing, so calling it has no
+            // obligations.
+            unsafe { kf_bfly4_neon_inner(fout, twiddles, m, n, mm, fstride) };
+            return;
         }
-        #[cfg(not(target_arch = "aarch64"))]
         {
             let stride2 = fstride * 2;
             let stride3 = fstride * 3;
@@ -559,17 +615,30 @@ fn kf_bfly3(
     mm: usize,
 ) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+    // true, which confirms the CPU supports the `avx` feature in its
+    // `#[target_feature]`. The kernel uses only bounds-checked indexing, so
+    // it has no memory precondition.
     unsafe {
-        if std::arch::is_x86_feature_detected!("avx") {
+        if crate::isa::avx() {
             kf_bfly3_avx_inner(fout, fstride, twiddles, m, n, mm);
             return;
         }
     }
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        kf_bfly3_neon_inner(fout, fstride, twiddles, m, n, mm);
+    if crate::isa::neon() {
+        // SAFETY: NEON is baseline on aarch64. `opus_fft_impl` passes a
+        // consistent radix-3 stage: `mm == 3 * m`, `n * mm == st.nfft`, and
+        // `fstride = fstride_i << st.shift` with `fstride_i * mm == st.nfft`.
+        // So the highest raw `fout` element touched,
+        // `(n - 1) * mm + (m - 1) + 2 * m`, is `st.nfft - 1`. The highest
+        // twiddle, `2 * (m - 1) * fstride`, is below
+        // `st.nfft << shift == twiddles.len()`. This needs
+        // `fout.len() >= st.nfft`, which the `assert!` at the top of
+        // `opus_fft_impl` enforces.
+        unsafe { kf_bfly3_neon_inner(fout, fstride, twiddles, m, n, mm) };
+        return;
     }
-    #[cfg(not(target_arch = "aarch64"))]
     {
         let m2 = 2 * m;
 
@@ -622,17 +691,30 @@ fn kf_bfly5(
     mm: usize,
 ) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+    // true, which confirms the CPU supports the `avx` feature in its
+    // `#[target_feature]`. The kernel uses only bounds-checked indexing, so
+    // it has no memory precondition.
     unsafe {
-        if std::arch::is_x86_feature_detected!("avx") {
+        if crate::isa::avx() {
             kf_bfly5_avx_inner(fout, fstride, twiddles, m, n, mm);
             return;
         }
     }
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        kf_bfly5_neon_inner(fout, fstride, twiddles, m, n, mm);
+    if crate::isa::neon() {
+        // SAFETY: NEON is baseline on aarch64. `opus_fft_impl` passes a
+        // consistent radix-5 stage: `mm == 5 * m`, `n * mm == st.nfft`, and
+        // `fstride = fstride_i << st.shift`. So the highest raw `fout` element
+        // touched, `(n - 1) * mm + (m - 1) + 4 * m`, is `st.nfft - 1`. The
+        // highest twiddle, `4 * (m - 1) * fstride`, is below
+        // `twiddles.len() == st.nfft << shift`. This needs
+        // `fout.len() >= st.nfft`, which the `assert!` at the top of
+        // `opus_fft_impl` enforces. (See the kernel's `# Safety` note on the
+        // remaining Stacked Borrows issue in its vector loop.)
+        unsafe { kf_bfly5_neon_inner(fout, fstride, twiddles, m, n, mm) };
+        return;
     }
-    #[cfg(not(target_arch = "aarch64"))]
     {
         let ya = KissCpx::new(0.309_017, -0.95105652);
         let yb = KissCpx::new(-0.809_017, -0.58778525);
@@ -707,6 +789,12 @@ fn kf_bfly5(
     }
 }
 
+/// AVX-compiled radix-2 `m == 1` butterfly (scalar body, AVX codegen).
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn kf_bfly2_m1_avx(fout: &mut [KissCpx], n: usize) {
@@ -718,6 +806,12 @@ unsafe fn kf_bfly2_m1_avx(fout: &mut [KissCpx], n: usize) {
     }
 }
 
+/// AVX-compiled radix-4 `m == 1` butterfly.
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn kf_bfly4_m1_avx(fout: &mut [KissCpx], n: usize) {
@@ -737,6 +831,12 @@ unsafe fn kf_bfly4_m1_avx(fout: &mut [KissCpx], n: usize) {
     }
 }
 
+/// AVX-compiled radix-4 general-stage butterfly.
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn kf_bfly4_avx_inner(
@@ -784,6 +884,12 @@ unsafe fn kf_bfly4_avx_inner(
     }
 }
 
+/// AVX-compiled radix-3 butterfly.
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn kf_bfly3_avx_inner(
@@ -828,6 +934,12 @@ unsafe fn kf_bfly3_avx_inner(
     }
 }
 
+/// AVX-compiled radix-5 butterfly.
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn kf_bfly5_avx_inner(
@@ -909,6 +1021,12 @@ unsafe fn kf_bfly5_avx_inner(
     }
 }
 
+/// Two packed complex multiplies `a * b` on `[re0, im0, re1, im1]` lanes.
+///
+/// # Safety
+///
+/// NEON must be available (baseline on aarch64). This is a pure register
+/// operation with no memory access, so there are no other obligations.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn neon_cmul_2(
@@ -935,6 +1053,21 @@ unsafe fn neon_cmul_2(
     vaddq_f32(t1, t2)
 }
 
+/// NEON radix-3 butterfly stage.
+///
+/// # Safety
+///
+/// - NEON must be available (baseline on aarch64).
+/// - The arguments must describe a consistent radix-3 stage of a
+///   `KissFftState` `st` (as `opus_fft_impl` passes them):
+///   - `mm == 3 * m`.
+///   - `n * mm <= fout.len()`, so the raw two-element loads and stores up
+///     to `fout[(n - 1) * mm + m - 1 + 2 * m]` stay in bounds.
+///   - `2 * (m - 1) * fstride < twiddles.len()`, which holds for the raw
+///     `vld1_f32` twiddle loads when `fstride = (st.nfft / mm) << st.shift`
+///     and `twiddles` is `st.twiddles`.
+///
+/// No alignment is required.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn kf_bfly3_neon_inner(
@@ -950,10 +1083,13 @@ unsafe fn kf_bfly3_neon_inner(
     let m2 = 2 * m;
     let epi3_i: f32 = -0.866_025_4;
     let stride2 = fstride * 2;
-    let fout_ptr = fout.as_mut_ptr() as *mut f32;
     let tw_ptr = twiddles.as_ptr() as *const f32;
 
     for i in 0..n {
+        // Re-derived each iteration: the scalar tail below writes through
+        // `fout[..]`, and under Stacked Borrows that reborrow invalidates a
+        // raw pointer taken earlier (it was hoisted out of this loop).
+        let fout_ptr = fout.as_mut_ptr() as *mut f32;
         let base = i * mm;
         let mut tw1 = 0usize;
         let mut tw2 = 0usize;
@@ -1029,6 +1165,26 @@ unsafe fn kf_bfly3_neon_inner(
     }
 }
 
+/// NEON radix-5 butterfly stage.
+///
+/// # Safety
+///
+/// - NEON must be available (baseline on aarch64).
+/// - The arguments must describe a consistent radix-5 stage of a
+///   `KissFftState` `st` (as `opus_fft_impl` passes them):
+///   - `mm == 5 * m`.
+///   - `n * mm <= fout.len()`, so the raw loads up to
+///     `fout[(n - 1) * mm + m - 1 + 4 * m]` stay in bounds.
+///   - `4 * (m - 1) * fstride < twiddles.len()`, which holds for the raw
+///     twiddle loads when `fstride = (st.nfft / mm) << st.shift` and
+///     `twiddles` is `st.twiddles`.
+///
+/// No alignment is required.
+///
+/// Aliasing: within one outer `i` iteration the vector loop both loads and
+/// stores through `fout_ptr` only; the scalar tail then uses `fout[..]`, and
+/// `fout_ptr` is re-derived at the top of the next iteration. No raw pointer is
+/// used after an indexed write could have invalidated it (Stacked Borrows).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn kf_bfly5_neon_inner(
@@ -1053,10 +1209,14 @@ unsafe fn kf_bfly5_neon_inner(
     let yb_r: f32 = -0.809_017;
     let yb_i: f32 = -0.58778525;
 
-    let fout_ptr = fout.as_mut_ptr() as *mut f32;
     let tw_ptr = twiddles.as_ptr() as *const f32;
 
     for i in 0..n {
+        // Re-derived each iteration: the scalar tail below writes through
+        // `fout[..]`, and under Stacked Borrows that reborrow invalidates a raw
+        // pointer taken earlier. The vector loop loads AND stores through this
+        // pointer only (see the `# Safety` aliasing note).
+        let fout_ptr = fout.as_mut_ptr() as *mut f32;
         let base = i * mm;
         let mut tw1 = 0usize;
         let mut tw2 = 0usize;
@@ -1127,28 +1287,28 @@ unsafe fn kf_bfly5_neon_inner(
 
                 let idx = idx0 + k;
 
-                fout[idx].r = f0r + s7r + s8r;
-                fout[idx].i = f0i + s7i + s8i;
+                *fout_ptr.add(2 * (idx)) = f0r + s7r + s8r;
+                *fout_ptr.add(2 * (idx) + 1) = f0i + s7i + s8i;
 
                 let s5r = f0r + s7r * ya_r + s8r * yb_r;
                 let s5i = f0i + s7i * ya_r + s8i * yb_r;
                 let s6r = s10i * ya_i + s9i * yb_i;
                 let s6i = -(s10r * ya_i + s9r * yb_i);
 
-                fout[idx + m].r = s5r - s6r;
-                fout[idx + m].i = s5i - s6i;
-                fout[idx + m4].r = s5r + s6r;
-                fout[idx + m4].i = s5i + s6i;
+                *fout_ptr.add(2 * (idx + m)) = s5r - s6r;
+                *fout_ptr.add(2 * (idx + m) + 1) = s5i - s6i;
+                *fout_ptr.add(2 * (idx + m4)) = s5r + s6r;
+                *fout_ptr.add(2 * (idx + m4) + 1) = s5i + s6i;
 
                 let s11r = f0r + s7r * yb_r + s8r * ya_r;
                 let s11i = f0i + s7i * yb_r + s8i * ya_r;
                 let s12r = s9i * ya_i - s10i * yb_i;
                 let s12i = s10r * yb_i - s9r * ya_i;
 
-                fout[idx + m2].r = s11r + s12r;
-                fout[idx + m2].i = s11i + s12i;
-                fout[idx + m3].r = s11r - s12r;
-                fout[idx + m3].i = s11i - s12i;
+                *fout_ptr.add(2 * (idx + m2)) = s11r + s12r;
+                *fout_ptr.add(2 * (idx + m2) + 1) = s11i + s12i;
+                *fout_ptr.add(2 * (idx + m3)) = s11r - s12r;
+                *fout_ptr.add(2 * (idx + m3) + 1) = s11i - s12i;
             }
 
             tw1 += 2 * fstride;
@@ -1200,6 +1360,11 @@ unsafe fn kf_bfly5_neon_inner(
 }
 
 pub fn opus_fft_impl(st: &KissFftState, fout: &mut [KissCpx]) {
+    // The butterfly kernels address `fout` through raw pointers up to nfft.
+    assert!(
+        fout.len() >= st.nfft,
+        "opus_fft_impl: fout shorter than nfft"
+    );
     let factors = &st.factors;
     let twiddles = &st.twiddles;
 
@@ -1280,7 +1445,7 @@ mod tests {
         (a - b).abs() < tolerance
     }
 
-    fn cpx_almost_equal(a: &KissCpx, b: &KissCpx, tolerance: f32) -> bool {
+    fn cpx_almost_equal(a: KissCpx, b: KissCpx, tolerance: f32) -> bool {
         almost_equal(a.r, b.r, tolerance) && almost_equal(a.i, b.i, tolerance)
     }
 
@@ -1303,7 +1468,7 @@ mod tests {
         for &nfft in &[60, 120, 240, 480] {
             let st = KissFftState::new(nfft).unwrap();
             let mut sorted: Vec<i16> = st.bitrev.clone();
-            sorted.sort();
+            sorted.sort_unstable();
             let expected: Vec<i16> = (0..nfft).map(|x| x as i16).collect();
             assert_eq!(
                 sorted,
@@ -1344,7 +1509,7 @@ mod tests {
         for i in 0..nfft {
             let expected = if i == 0 { 1.0 } else { 0.0 };
             assert!(
-                cpx_almost_equal(&finv[i], &KissCpx::new(expected, 0.0), 1e-5),
+                cpx_almost_equal(finv[i], KissCpx::new(expected, 0.0), 1e-5),
                 "Roundtrip failed at index {}: got ({}, {}), expected ({}, 0)",
                 i,
                 finv[i].r,
@@ -1372,7 +1537,7 @@ mod tests {
 
         for i in 0..nfft {
             assert!(
-                cpx_almost_equal(&finv[i], &fin[i], 1e-4),
+                cpx_almost_equal(finv[i], fin[i], 1e-4),
                 "Roundtrip failed at index {}: got ({}, {}), expected ({}, {})",
                 i,
                 finv[i].r,
@@ -1404,7 +1569,7 @@ mod tests {
 
         for i in 0..nfft {
             assert!(
-                cpx_almost_equal(&finv[i], &fin[i], 1e-4),
+                cpx_almost_equal(finv[i], fin[i], 1e-4),
                 "Roundtrip failed at index {}: got ({}, {}), expected ({}, {})",
                 i,
                 finv[i].r,
@@ -1434,7 +1599,7 @@ mod tests {
 
         for i in 1..nfft {
             assert!(
-                cpx_almost_equal(&fout[i], &KissCpx::new(0.0, 0.0), 1e-5),
+                cpx_almost_equal(fout[i], KissCpx::new(0.0, 0.0), 1e-5),
                 "Non-DC component at index {} is ({}, {}), expected (0, 0)",
                 i,
                 fout[i].r,
@@ -1444,6 +1609,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "wall-clock timing benchmark; meaningless under the Miri interpreter"
+    )]
     fn test_fft_performance() {
         use std::time::Instant;
 
@@ -1461,7 +1630,7 @@ mod tests {
             );
         }
 
-        for _ in 0..100 {
+        for _ in 0..crate::isa::oracle::iters(100) {
             opus_fft(&st, &fin, &mut fout);
             opus_ifft(&st, &fout, &mut finv);
         }
@@ -1477,12 +1646,9 @@ mod tests {
         let elapsed = start.elapsed();
         let ns_per_iter = elapsed.as_nanos() as f64 / (iterations as f64 * 2.0);
 
-        println!("\nFFT/IFFT performance (nfft={}):", nfft);
-        println!(
-            "  Total time for {} FFT+IFFT pairs: {:?}",
-            iterations, elapsed
-        );
-        println!("  Time per FFT or IFFT: {:.2} ns", ns_per_iter);
+        println!("\nFFT/IFFT performance (nfft={nfft}):");
+        println!("  Total time for {iterations} FFT+IFFT pairs: {elapsed:?}");
+        println!("  Time per FFT or IFFT: {ns_per_iter:.2} ns");
         println!(
             "  Throughput: {:.2} M points/sec",
             (nfft as f64) / ns_per_iter * 1000.0

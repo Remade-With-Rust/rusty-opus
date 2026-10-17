@@ -13,71 +13,12 @@ use crate::rate::{BITRES, clt_compute_allocation};
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn sum_abs_neon(x: &[f32], n: usize) -> f32 {
-    let mut sum_vec = vdupq_n_f32(0.0);
-    let mut i = 0;
-
-    while i + 16 <= n {
-        let x0 = vld1q_f32(x.as_ptr().add(i));
-        let x1 = vld1q_f32(x.as_ptr().add(i + 4));
-        let x2 = vld1q_f32(x.as_ptr().add(i + 8));
-        let x3 = vld1q_f32(x.as_ptr().add(i + 12));
-
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x0), vdupq_n_f32(1.0));
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x1), vdupq_n_f32(1.0));
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x2), vdupq_n_f32(1.0));
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x3), vdupq_n_f32(1.0));
-
-        i += 16;
-    }
-
-    while i + 8 <= n {
-        let x0 = vld1q_f32(x.as_ptr().add(i));
-        let x1 = vld1q_f32(x.as_ptr().add(i + 4));
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x0), vdupq_n_f32(1.0));
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x1), vdupq_n_f32(1.0));
-        i += 8;
-    }
-
-    while i + 4 <= n {
-        let x0 = vld1q_f32(x.as_ptr().add(i));
-        sum_vec = vfmaq_f32(sum_vec, vabsq_f32(x0), vdupq_n_f32(1.0));
-        i += 4;
-    }
-
-    let mut sum = vaddvq_f32(sum_vec);
-
-    for j in i..n {
-        sum += x[j].abs();
-    }
-
-    sum
-}
-
-#[inline(always)]
-fn sum_abs(x: &[f32]) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        if std::arch::is_x86_feature_detected!("avx") {
-            return sum_abs_avx(x, x.len());
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        sum_abs_neon(x, x.len())
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        x.iter().map(|&v| v.abs()).sum()
-    }
-}
-
 const MAX_FRAME_SIZE: usize = 2880;
 
-const DECODE_BUFFER_SIZE: usize = 3072;
+/// libopus DEC_PITCH_BUF_SIZE. The PLC pitch search spans exactly this window,
+/// so it must match (3072 searched older history and picked different lags);
+/// 2048 suffices because concealment is chunked to <= 20 ms (decode_plc).
+const DECODE_BUFFER_SIZE: usize = 2048;
 /// CELT packet-loss-concealment constants (celt_decoder.c).
 const PLC_LPC_ORDER: usize = 24;
 const PLC_PITCH_LAG_MAX: usize = 720;
@@ -137,7 +78,7 @@ fn transient_analysis(
     tf_chan: &mut usize,
     allow_weak_transients: bool,
     weak_transient: &mut bool,
-    _tone_freq: f32,
+    tone_freq: f32,
     toneishness: f32,
     tmp: &mut [f32],
     tmp2: &mut [f32],
@@ -207,7 +148,7 @@ fn transient_analysis(
 
     let mut is_transient = mask_metric > 200.0;
 
-    if toneishness > 0.98 && _tone_freq < 0.026 {
+    if toneishness > 0.98 && tone_freq < 0.026 {
         is_transient = false;
         mask_metric = 0.0;
     }
@@ -219,28 +160,44 @@ fn transient_analysis(
 
 fn l1_metric(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: `l1_metric_avx` is only called after `isa::avx()` confirmed the
+    // CPU supports AVX (its sole `#[target_feature]`). It reads `tmp[..n]`
+    // unchecked, so it needs `tmp.len() >= n`: every caller in this module
+    // passes `&tmp[..n]` (a slice of exactly `n` elements, bounds-checked at
+    // the call site), and the scalar fallback below would index `tmp[..n]` too.
     unsafe {
-        if n >= 16 && std::arch::is_x86_feature_detected!("avx") {
+        if n >= 16 && crate::isa::avx() {
             return l1_metric_avx(tmp, n, lm, bias);
         }
     }
     #[cfg(target_arch = "aarch64")]
-    {
-        if n >= 16 {
-            return unsafe { l1_metric_neon(tmp, n, lm, bias) };
-        }
+    if n >= 16 && crate::isa::neon() {
+        // SAFETY: `isa::neon()` confirmed NEON (the kernel's `#[target_feature]`).
+        // `tmp.len() >= n` because every caller passes `&tmp[..n]` (exactly `n`
+        // elements, bounds-checked at the call site).
+        return unsafe { l1_metric_neon(tmp, n, lm, bias) };
     }
 
     let mut l1 = 0.0f32;
-    for &tv in tmp[..n].iter() {
+    for &tv in &tmp[..n] {
         l1 += tv.abs();
     }
     l1 + (lm as f32) * bias * l1
 }
 
+/// AVX sum of `|x[i]|` over `x[..n]`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX (gate on `isa::avx()`).
+/// - `x.len() >= n`: the 8-wide loads read `x[i..i + 8]` for every
+///   `i + 8 <= n` without bounds checks (the scalar tail is bounds-checked).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 unsafe fn sum_abs_avx(x: &[f32], n: usize) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let mut sum0 = _mm256_setzero_ps();
@@ -278,6 +235,12 @@ unsafe fn sum_abs_avx(x: &[f32], n: usize) -> f32 {
     out
 }
 
+/// AVX `l1_metric`: `L1(tmp[..n]) * (1 + lm * bias)`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX (gate on `isa::avx()`).
+/// - `tmp.len() >= n` (forwarded to `sum_abs_avx`, which loads unchecked).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 unsafe fn l1_metric_avx(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
@@ -285,9 +248,19 @@ unsafe fn l1_metric_avx(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
     l1 + (lm as f32) * bias * l1
 }
 
+/// NEON `l1_metric`: `L1(tmp[..n]) * (1 + lm * bias)`.
+///
+/// # Safety
+///
+/// - The CPU must support NEON (gate on `isa::neon()`).
+/// - `tmp.len() >= n`: the 4-wide loads read `tmp[i..i + 4]` for every
+///   `i + 3 < n` without bounds checks (the scalar tail is bounds-checked).
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn l1_metric_neon(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
+    // SAFETY: this block only inherits the caller's `# Safety` contract above
+    // (NEON present, `tmp.len() >= n`); the loop guards `i + 15 < n` /
+    // `i + 3 < n` keep every `vld1q_f32` inside `tmp[..n]`.
     unsafe {
         let mut sum4 = vdupq_n_f32(0.0);
         let mut i = 0;
@@ -371,7 +344,7 @@ fn tf_analysis(
             }
         }
 
-        for k in 0..(lm + if is_transient || narrow { 0 } else { 1 }) {
+        for k in 0..(lm + i32::from(!(is_transient || narrow))) {
             let b = if is_transient { lm - k - 1 } else { k + 1 };
 
             haar1(&mut tmp[..n], n >> k, 1 << k);
@@ -447,7 +420,7 @@ fn tf_analysis(
             .abs()
         + (if is_transient { 0.0 } else { lambda as f32 });
 
-    tf_res[0] = if cost0 < cost1 { 0 } else { 1 };
+    tf_res[0] = i32::from(cost0 >= cost1);
 
     for i in 1..len {
         let curr0 = cost0.min(cost1 + lambda as f32);
@@ -465,7 +438,7 @@ fn tf_analysis(
                         [4 * (is_transient as usize) + 2 * tf_select + 1]
                         as i32) as f32)
                     .abs();
-        tf_res[i] = if cost0 < cost1 { 0 } else { 1 };
+        tf_res[i] = i32::from(cost0 >= cost1);
     }
 
     tf_select as i32
@@ -486,10 +459,10 @@ fn tf_encode(
     let mut budget = rc.storage as i32 * 8;
     let mut tell = rc.tell();
 
-    let tf_select_rsv = if lm > 0 && tell + logp < budget { 1 } else { 0 };
+    let tf_select_rsv = i32::from(lm > 0 && tell + logp < budget);
     budget -= tf_select_rsv;
 
-    for tf_res_i in tf_res[start..end].iter_mut() {
+    for tf_res_i in &mut tf_res[start..end] {
         if tell + logp <= budget {
             rc.encode_bit_logp(*tf_res_i ^ curr != 0, logp as u32);
             tell = rc.tell();
@@ -510,7 +483,7 @@ fn tf_encode(
         tf_select = 0;
     }
 
-    for tf_res_i in tf_res[start..end].iter_mut() {
+    for tf_res_i in &mut tf_res[start..end] {
         *tf_res_i = TF_SELECT_TABLE[lm as usize]
             [4 * (is_transient as usize) + 2 * (tf_select as usize) + (*tf_res_i as usize)]
             as i32;
@@ -533,16 +506,12 @@ fn tf_decode(
     let budget = rc.storage as i32 * 8;
     let mut tell = rc.tell();
 
-    let tf_select_rsv = if lm > 0 && tell + logp < budget { 1 } else { 0 };
+    let tf_select_rsv = i32::from(lm > 0 && tell + logp < budget);
     let budget = budget - tf_select_rsv;
 
-    for tf_res_i in tf_res[start..end].iter_mut() {
+    for tf_res_i in &mut tf_res[start..end] {
         if tell + logp <= budget {
-            curr ^= if rc.decode_bit_logp(logp as u32) {
-                1
-            } else {
-                0
-            };
+            curr ^= i32::from(rc.decode_bit_logp(logp as u32));
             tell = rc.tell();
             tf_changed |= curr;
         }
@@ -551,15 +520,14 @@ fn tf_decode(
     }
 
     let mut tf_select = 0;
-    let _budget = budget + tf_select_rsv;
     if tf_select_rsv > 0
         && TF_SELECT_TABLE[lm as usize][4 * (is_transient as usize) + (tf_changed as usize)]
             != TF_SELECT_TABLE[lm as usize][4 * (is_transient as usize) + 2 + (tf_changed as usize)]
     {
-        tf_select = if rc.decode_bit_logp(1) { 1 } else { 0 };
+        tf_select = i32::from(rc.decode_bit_logp(1));
     }
 
-    for tf_res_i in tf_res[start..end].iter_mut() {
+    for tf_res_i in &mut tf_res[start..end] {
         *tf_res_i = TF_SELECT_TABLE[lm as usize]
             [4 * (is_transient as usize) + 2 * (tf_select as usize) + (*tf_res_i as usize)]
             as i32;
@@ -617,29 +585,42 @@ fn comb_filter_const(
     g12: f32,
 ) {
     #[cfg(target_arch = "aarch64")]
-    {
+    if crate::isa::neon() {
         comb_filter_const_neon(y, x, y_idx, x_idx, t, n, g10, g11, g12);
+        return;
     }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    // SAFETY: `isa::avx_fma()` confirmed AVX+FMA, exactly the kernel's
+    // `#[target_feature(enable = "avx,fma")]`. The kernel's memory contract
+    // (`t >= 2`, `x_idx >= t + 2`, `x_idx + n <= x.len()`,
+    // `y_idx + n <= y.len()`) is this private helper's caller invariant:
+    // `comb_filter`, the only non-test caller, clamps `t >= 15` and has
+    // already indexed `x[x_idx - t - 2]` (a panic, not UB, if `x_idx < t + 2`);
+    // the lengths hold at its call sites (encoder `run_prefilter`:
+    // `y_idx + n == (c + 1) * buf_stride` and `x_idx + n == pre_size` on a
+    // `pre[c * pre_size..]` slice, both lengths already proven by the
+    // bounds-checked `copy_from_slice` calls at the top of `run_prefilter`;
+    // decoder `fold_overlap_mem`: `y = etmp` of length `overlap` with
+    // `n == overlap`, and `x_idx + n <= (ch + 1) * (DECODE_BUFFER_SIZE + overlap)
+    // <= decode_mem.len()` since `ch < channels`). `comb_filter` forwards
+    // `(y_idx + i, x_idx + i, n - i)`, which preserves all of the above.
+    // These lengths are NOT re-checked here.
     unsafe {
-        if std::arch::is_x86_feature_detected!("avx") {
+        if crate::isa::avx_fma() {
             comb_filter_const_avx(y, x, y_idx, x_idx, t, n, g10, g11, g12);
             return;
         }
     }
     #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
-    unsafe {
-        comb_filter_const_sse(y, x, y_idx, x_idx, t, n, g10, g11, g12);
-        #[allow(clippy::needless_return)]
+    if crate::isa::sse2() {
+        // SAFETY: SSE/SSE2 are compile-time enabled (cfg above) and confirmed by
+        // `isa::sse2()`. Same memory contract as the AVX arm above (`t >= 2`,
+        // `x_idx >= t + 2`, `x_idx + n <= x.len()`, `y_idx + n <= y.len()`),
+        // upheld by `comb_filter` as described there.
+        unsafe { comb_filter_const_sse(y, x, y_idx, x_idx, t, n, g10, g11, g12) };
         return;
     }
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "sse")
-    )))]
-    {
-        comb_filter_const_scalar(y, x, y_idx, x_idx, t, n, g10, g11, g12);
-    }
+    comb_filter_const_scalar(y, x, y_idx, x_idx, t, n, g10, g11, g12);
 }
 
 #[inline]
@@ -688,9 +669,23 @@ fn comb_filter_const_neon(
     g11: f32,
     g12: f32,
 ) {
+    // SAFETY: NEON is baseline on aarch64 and the only caller,
+    // `comb_filter_const`, checked `isa::neon()` first. The memory contract
+    // (`t >= 2`, `x_idx >= t + 2`, `x_idx + n <= x.len()`,
+    // `y_idx + n <= y.len()`) is passed through from `comb_filter_const`,
+    // whose caller `comb_filter` upholds it (see the SAFETY note on the x86
+    // dispatch there). It is NOT re-checked here.
     unsafe { comb_filter_const_neon_impl(y, x, y_idx, x_idx, t, n, g10, g11, g12) }
 }
 
+/// NEON constant-gain comb filter (same math as `comb_filter_const_scalar`).
+///
+/// # Safety
+///
+/// - The CPU must support NEON (baseline on aarch64; gate on `isa::neon()`).
+/// - `t >= 2` and `x_idx >= t + 2` (the first load reads `x[x_idx - t - 2..]`).
+/// - `x_idx + n <= x.len()` and `y_idx + n <= y.len()`: 4-wide loads/stores
+///   touch `x[x_idx - t - 2..x_idx + n]` and `y[y_idx..y_idx + n]` unchecked.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -755,6 +750,15 @@ unsafe fn comb_filter_const_neon_impl(
     }
 }
 
+/// SSE constant-gain comb filter (same math as `comb_filter_const_scalar`).
+///
+/// # Safety
+///
+/// - The CPU must support SSE (compile-time enabled via the `cfg`; callers
+///   also gate on `isa::sse2()`).
+/// - `t >= 2` and `x_idx >= t + 2` (the first load reads `x[x_idx - t - 2..]`).
+/// - `x_idx + n <= x.len()` and `y_idx + n <= y.len()`: 4-wide loads/stores
+///   touch `x[x_idx - t - 2..x_idx + n]` and `y[y_idx..y_idx + n]` unchecked.
 #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -769,6 +773,9 @@ unsafe fn comb_filter_const_sse(
     g11: f32,
     g12: f32,
 ) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let g10v = _mm_set1_ps(g10);
@@ -821,6 +828,14 @@ unsafe fn comb_filter_const_sse(
     }
 }
 
+/// AVX+FMA constant-gain comb filter (same math as `comb_filter_const_scalar`).
+///
+/// # Safety
+///
+/// - The CPU must support AVX and FMA (gate on `isa::avx_fma()`).
+/// - `t >= 2` and `x_idx >= t + 2` (the loads read from `x[x_idx + i - t - 2]`).
+/// - `x_idx + n <= x.len()` and `y_idx + n <= y.len()`: 8-wide loads/stores
+///   touch `x[x_idx - t - 2..x_idx + n]` and `y[y_idx..y_idx + n]` unchecked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -835,6 +850,9 @@ unsafe fn comb_filter_const_avx(
     g11: f32,
     g12: f32,
 ) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let g10v = _mm256_set1_ps(g10);
@@ -924,6 +942,15 @@ unsafe fn comb_filter_const_avx(
     }
 }
 
+/// 4-wide FMA tail of `comb_filter_const_avx`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX and FMA (only called from
+///   `comb_filter_const_avx`, itself gated on `isa::avx_fma()`).
+/// - `t >= 2` and `x_idx >= t + 2` (the first load reads `x[x_idx - t - 2..]`).
+/// - `x_idx + n <= x.len()` and `y_idx + n <= y.len()`: 4-wide loads/stores
+///   touch `x[x_idx - t - 2..x_idx + n]` and `y[y_idx..y_idx + n]` unchecked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -938,6 +965,9 @@ unsafe fn comb_filter_const_sse_fma(
     g11: f32,
     g12: f32,
 ) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let g10v = _mm_set1_ps(g10);
@@ -1124,7 +1154,19 @@ fn comb_filter_inplace(
     // already finalized, exactly as the scalar loop sees them.
     #[cfg(target_arch = "x86_64")]
     {
-        if i + 8 <= n && t1 >= 10 && std::arch::is_x86_feature_detected!("avx2") {
+        if i + 8 <= n && t1 >= 10 && crate::isa::avx2() {
+            // SAFETY: `isa::avx2()` confirmed AVX2, the kernel's only
+            // `#[target_feature]`. `t1 >= 10` is checked in this condition.
+            // `y_idx >= t1 + 2` because `t1` was clamped to `y_idx - 2` above
+            // (`clamp` panics if `y_idx - 2 < 15`; every caller passes
+            // `y_idx >= COMBFILTER_MAXPERIOD`), so the lowest read
+            // `y_idx + i - t1 - 2` is in bounds. `y_idx + n <= buf.len()` is a
+            // caller invariant of this private fn, NOT re-checked here: decoder
+            // `w_post` is `DECODE_BUFFER_SIZE + COMBFILTER_MAXPERIOD` long with
+            // `y_idx + n == COMBFILTER_MAXPERIOD + frame_size`, and the test
+            // callers size their buffers as `y_idx + n` (or `max_period + n`
+            // with matching `y_idx + n`). All accesses go through one `as_mut_ptr()` of the
+            // exclusive `buf` borrow, so there is no aliasing violation.
             unsafe {
                 i = comb_filter_const_avx2(buf, y_idx, i, n, t1, g10, g11, g12);
             }
@@ -1148,6 +1190,16 @@ fn comb_filter_inplace(
 /// `s + g10*r1 + g11*(r1p1+r1m1) + g12*(r1p2+r1m2)` so every rounding matches.
 /// Requires `t1 >= 10` (the batch reads [idx-t1-2, idx-t1+9] stay clear of the
 /// [idx, idx+8) writes). Returns the index `i` where the scalar tail resumes.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 (gate on `isa::avx2()`).
+/// - `y_idx >= t1 + 2`: the lowest load reads `buf[y_idx + i - t1 - 2]`.
+/// - `y_idx + n <= buf.len()`: 8-wide loads/stores touch `buf[y_idx + i..]`
+///   up to `buf[y_idx + n - 1]` without bounds checks.
+/// - `t1 >= 10` is required for bit-exactness with the scalar loop (reads
+///   never overlap the same batch's writes); it is not a memory-safety
+///   requirement, since every access derives from one `buf.as_mut_ptr()`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn comb_filter_const_avx2(
@@ -1160,6 +1212,9 @@ unsafe fn comb_filter_const_avx2(
     g11: f32,
     g12: f32,
 ) -> usize {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
     let vg10 = _mm256_set1_ps(g10);
     let vg11 = _mm256_set1_ps(g11);
@@ -1221,10 +1276,17 @@ fn run_prefilter(
 
     let pitch_buf_len = (max_period + frame_size) >> 1;
     {
-        let pre_slices: Vec<&[f32]> = (0..channels)
-            .map(|c| &pre[c * pre_size..c * pre_size + pre_size])
-            .collect();
-        crate::pitch::pitch_downsample(&pre_slices, pitch_buf, pitch_buf_len, channels, 2);
+        let pre_slices: [&[f32]; 2] = [
+            &pre[..pre_size],
+            &pre[(channels - 1) * pre_size..channels * pre_size],
+        ];
+        crate::pitch::pitch_downsample(
+            &pre_slices[..channels],
+            pitch_buf,
+            pitch_buf_len,
+            channels,
+            2,
+        );
     }
 
     let search_max = max_period - 3 * min_period;
@@ -1245,6 +1307,12 @@ fn run_prefilter(
         prefilter_period,
         prefilter_gain,
     );
+    // libopus clamps AFTER remove_doubling (celt_encoder.c run_prefilter):
+    // doubling can return max_period-1, and then pi = 1024 makes the coded
+    // octave 6 -- outside enc_uint(octave, 6)'s alphabet, so the decoder read
+    // a different symbol (one range-coder desync per affected packet; seen on
+    // 2.5 ms CELT frames).
+    pitch_index = pitch_index.min(max_period - 2);
     let mut gain1 = gain1_raw * 0.7;
 
     // Loss-rate ladder (matches celt_encoder.c: halve >2%, halve again >4%,
@@ -1386,7 +1454,11 @@ fn compute_vbr_target(
 ) -> i32 {
     let nb_ebands = mode.nb_ebands as i32;
     let e_bands = mode.e_bands;
-    let coded_bands = if last_coded_bands != 0 { last_coded_bands } else { nb_ebands };
+    let coded_bands = if last_coded_bands != 0 {
+        last_coded_bands
+    } else {
+        nb_ebands
+    };
     let mut coded_bins = (e_bands[coded_bands as usize] as i32) << lm;
     if channels == 2 {
         coded_bins += (e_bands[intensity.min(coded_bands) as usize] as i32) << lm;
@@ -1403,7 +1475,7 @@ fn compute_vbr_target(
         let max_frac = 0.8f32 * coded_stereo_dof as f32 / coded_bins as f32;
         let ss = stereo_saving.min(1.0);
         target -= ((max_frac * target as f32) as i32)
-            .min((((ss - 0.1) * ((coded_stereo_dof << BITRES) as f32)) as i32).max(i32::MIN));
+            .min(((ss - 0.1) * ((coded_stereo_dof << BITRES) as f32)) as i32);
     }
     // Boost according to dynalloc (minus the average for calibration).
     target += tot_boost - (19 << lm);
@@ -1433,7 +1505,7 @@ fn compute_vbr_target(
     // Don't allocate more than 8 bits above the "depth" of the signal.
     {
         let bins = (e_bands[nb_ebands as usize - 2] as i32) << lm;
-        let mut floor_depth = ((channels * bins << BITRES) as f32 * max_depth) as i32;
+        let mut floor_depth = (((channels * bins) << BITRES) as f32 * max_depth) as i32;
         floor_depth = floor_depth.max(target >> 2);
         target = target.min(floor_depth);
     }
@@ -1447,10 +1519,16 @@ fn compute_vbr_target(
     target.min(2 * base_target)
 }
 
+#[derive(Clone)]
 pub struct CeltEncoder {
     mode: &'static CeltMode,
     channels: usize,
     pub complexity: i32,
+    /// libopus `st->upsample` = 48000 / API rate. CELT always codes a 48 kHz
+    /// frame; input at 8/12/16/24 kHz is zero-stuffed by this factor in the
+    /// preemphasis and the MDCT bins above the input's Nyquist are cleared
+    /// (celt_encoder.c celt_preemphasis + compute_mdcts). 1 = 48 kHz input.
+    pub upsample: usize,
     syn_mem: Vec<f32>,
     enc_decode_mem: Vec<f32>,
     old_band_e: Vec<f32>,
@@ -1522,6 +1600,10 @@ pub struct CeltEncoder {
     /// +0.000**, silence_dtx +1.647), an independent libopus decode at equal
     /// quality for 28% fewer bits, and a CBR run that keeps packet length exact.
     pub(crate) silence_flag: bool,
+    /// libopus CELT_SET_PREDICTION(0): force intra energy and no prefilter.
+    /// Set for the first frame after a mode-change reset and for transition
+    /// redundancy frames.
+    pub(crate) prediction_off: bool,
     /// Peak |sample| of the previous frame's overlap tail — the `st->overlap_max`
     /// of celt_encoder.c, needed so silence is only declared once the region the
     /// MDCT folds is silent as well.
@@ -1643,7 +1725,7 @@ fn alloc_trim_analysis(
     // stage — Great Gate census 2026-08-07 hygiene batch).
     static STEREO_TRIM_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if channels == 2
-        && !*STEREO_TRIM_OFF.get_or_init(|| std::env::var_os("NO_STEREO_TRIM").is_some())
+        && !*STEREO_TRIM_OFF.get_or_init(|| crate::research_env("NO_STEREO_TRIM").is_some())
     {
         trim += 1.0;
     }
@@ -1748,8 +1830,7 @@ fn dynalloc_analysis(
                 if band_log_e2[base + i] > band_log_e2[base + i - 1] + 0.5 {
                     last = i;
                 }
-                follower[base + i] =
-                    (follower[base + i - 1] + 1.5).min(band_log_e2[base + i]);
+                follower[base + i] = (follower[base + i - 1] + 1.5).min(band_log_e2[base + i]);
             }
             for i in (0..last).rev() {
                 follower[base + i] = follower[base + i]
@@ -1845,10 +1926,9 @@ fn dynalloc_analysis(
                 let cap = (2 * effective_bytes as i32 / 3) << BITRES << 3;
                 offsets[i] = cap - tot_boost;
                 break;
-            } else {
-                offsets[i] = boost;
-                tot_boost += boost_bits;
             }
+            offsets[i] = boost;
+            tot_boost += boost_bits;
         }
     } else {
         for i in start..end {
@@ -1856,6 +1936,27 @@ fn dynalloc_analysis(
         }
     }
     max_depth
+}
+
+/// celt_encoder.c compute_mdcts, upsample tail: a zero-stuffed input's MDCT
+/// carries the input band scaled down by `up` plus spectral images above the
+/// input's Nyquist. Restore the scale on the first `n/up` bins (per channel,
+/// in the interleaved short-block layout, exactly as C indexes it) and clear
+/// the rest. No-op at `up == 1`.
+#[inline]
+fn upsample_bound(freq: &mut [f32], channels: usize, n: usize, up: usize) {
+    if up == 1 {
+        return;
+    }
+    let bound = n / up;
+    let scale = up as f32;
+    for c in 0..channels {
+        let ch = &mut freq[c * n..(c + 1) * n];
+        for v in &mut ch[..bound] {
+            *v *= scale;
+        }
+        ch[bound..].fill(0.0);
+    }
 }
 
 impl CeltEncoder {
@@ -1871,6 +1972,7 @@ impl CeltEncoder {
             mode,
             channels,
             complexity: 9,
+            upsample: 1,
             syn_mem: vec![0.0; syn_mem_size],
             enc_decode_mem: vec![0.0; syn_mem_size],
             old_band_e: vec![0.0; nb_x_ch],
@@ -1923,16 +2025,15 @@ impl CeltEncoder {
 
             analysis: AnalysisInfo::default(),
             loss_rate: 0,
-            tonal_vbr: std::env::var_os("RUSTY_OPUS_TONAL_VBR").is_some(),
-            silence_flag: std::env::var("RUSTY_OPUS_SILENCE_FLAG")
-                .map(|v| v != "0")
-                .unwrap_or(true),
+            tonal_vbr: crate::research_env("RUSTY_OPUS_TONAL_VBR").is_some(),
+            silence_flag: crate::research_env("RUSTY_OPUS_SILENCE_FLAG").is_none_or(|v| v != "0"),
+            prediction_off: false,
             overlap_max: 0.0,
         }
     }
 
     pub fn encode(&mut self, pcm: &[f32], frame_size: usize, rc: &mut RangeCoder) {
-        self.encode_impl(pcm, frame_size, rc, 0, self.mode.nb_ebands, None)
+        self.encode_impl(pcm, frame_size, rc, 0, self.mode.nb_ebands, None);
     }
 
     pub fn encode_with_start_band(
@@ -1942,7 +2043,7 @@ impl CeltEncoder {
         rc: &mut RangeCoder,
         start_band: usize,
     ) {
-        self.encode_impl(pcm, frame_size, rc, start_band, self.mode.nb_ebands, None)
+        self.encode_impl(pcm, frame_size, rc, start_band, self.mode.nb_ebands, None);
     }
 
     pub fn encode_with_budget(
@@ -1954,7 +2055,7 @@ impl CeltEncoder {
         end_band: usize,
         total_bits: i32,
     ) {
-        self.encode_impl(pcm, frame_size, rc, start_band, end_band, Some(total_bits))
+        self.encode_impl(pcm, frame_size, rc, start_band, end_band, Some(total_bits));
     }
 
     fn encode_impl(
@@ -1970,6 +2071,11 @@ impl CeltEncoder {
         let mode = self.mode;
         let channels = self.channels;
         let nb_ebands = mode.nb_ebands;
+        // `pcm` holds `nu` samples/channel at the API rate; CELT codes the
+        // 48 kHz-equivalent frame (celt_encoder.c: frame_size *= upsample).
+        let up = self.upsample.max(1);
+        let nu = frame_size;
+        let frame_size = nu * up;
 
         // ---- Digital-silence detection (celt_encoder.c) ----
         // sample_max spans this frame's non-overlap part PLUS the previous
@@ -1978,9 +2084,10 @@ impl CeltEncoder {
         // the per-class ladder clears it; off = byte-identical.
         let silence = if self.silence_flag {
             let ovl = mode.overlap.min(frame_size);
-            let head = (frame_size - ovl) * channels;
+            // In API-rate samples (C: CC*(N-overlap)/upsample).
+            let head = (frame_size - ovl) / up * channels;
             let maxabs = |s: &[f32]| s.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
-            let n = (frame_size * channels).min(pcm.len());
+            let n = (nu * channels).min(pcm.len());
             let head_max = maxabs(&pcm[..head.min(n)]);
             let tail_max = maxabs(&pcm[head.min(n)..n]);
             let sample_max = self.overlap_max.max(head_max).max(tail_max);
@@ -2005,7 +2112,7 @@ impl CeltEncoder {
             lm = 0;
         }
 
-        let _prof_pre = crate::prof::scope(crate::prof::Stage::CeltPreemph);
+        let prof_pre = crate::prof::scope(crate::prof::Stage::CeltPreemph);
         let syn_mem_size = 2048 + overlap;
         for c in 0..channels {
             let channel_offset = c * syn_mem_size;
@@ -2017,11 +2124,27 @@ impl CeltEncoder {
 
             let mut m = self.preemph_mem[c];
             let coef = mode.preemph[0];
-            for i in 0..frame_size {
-                let x = pcm[c * frame_size + i] * 32768.0;
-                let val = x - m;
-                self.syn_mem[channel_offset + syn_mem_size - frame_size + i] = val;
-                m = x * coef;
+            if up == 1 {
+                for i in 0..frame_size {
+                    let x = pcm[c * frame_size + i] * 32768.0;
+                    let val = x - m;
+                    self.syn_mem[channel_offset + syn_mem_size - frame_size + i] = val;
+                    m = x * coef;
+                }
+            } else {
+                // celt_preemphasis with upsample: one input sample every `up`
+                // positions, zeros between (the spectral images this creates
+                // above the input's Nyquist are cleared after the MDCT).
+                for i in 0..frame_size {
+                    let x = if i % up == 0 {
+                        pcm[c * nu + i / up] * 32768.0
+                    } else {
+                        0.0
+                    };
+                    let val = x - m;
+                    self.syn_mem[channel_offset + syn_mem_size - frame_size + i] = val;
+                    m = x * coef;
+                }
             }
             self.preemph_mem[c] = m;
         }
@@ -2038,7 +2161,7 @@ impl CeltEncoder {
             );
         }
 
-        drop(_prof_pre);
+        drop(prof_pre);
 
         // Encoder pitch prefilter (the inverse of the decoder postfilter).
         // Enable gate matches celt_encoder.c: enough bytes to be worth the ~7
@@ -2053,8 +2176,9 @@ impl CeltEncoder {
         static PF_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let pf_enabled = start_band == 0
             && self.complexity >= 5
+            && !self.prediction_off
             && nb_available_bytes > 12 * channels as i32
-            && !*PF_OFF.get_or_init(|| std::env::var_os("CELT_PF_OFF").is_some());
+            && !*PF_OFF.get_or_init(|| crate::research_env("CELT_PF_OFF").is_some());
         // Capture the tapset used for THIS frame's comb (C's `prefilter_tapset`
         // local): spreading_decision mutates self.tapset_decision later in the
         // frame, and the value applied+signalled here — not the mutated one —
@@ -2100,7 +2224,7 @@ impl CeltEncoder {
         let mut tf_estimate = 0.0f32;
         let mut tf_chan = 0;
         let mut weak_transient = false;
-        let is_transient = if self.complexity >= 1 {
+        let mut is_transient = if self.complexity >= 1 {
             transient_analysis(
                 in_buf,
                 buf_stride,
@@ -2149,6 +2273,8 @@ impl CeltEncoder {
             }
         }
 
+        upsample_bound(freq, channels, frame_size, up);
+
         let band_e = &mut self.w_band_e[..nb_ebands * channels];
         band_e.fill(0.0);
         compute_band_energies(mode, freq, band_e, end_band, channels, lm);
@@ -2174,9 +2300,15 @@ impl CeltEncoder {
         let error = &mut self.w_error[..nb_ebands * channels];
 
         let tell = rc.tell();
-        if tell == 1 {
+        // celt_encoder.c: the flag is only coded at tell==1; otherwise (hybrid —
+        // SILK already wrote bits) silence=0, matching the decoder, which never
+        // reads the flag there.
+        let silence = if tell == 1 {
             rc.encode_bit_logp(silence, 15);
-        }
+            silence
+        } else {
+            false
+        };
         if silence {
             // celt_encoder.c: on a silent frame send only the minimum. Clamp the
             // coder to the bytes already filled + 2, then tell the range coder
@@ -2222,6 +2354,12 @@ impl CeltEncoder {
             if is_transient {
                 short_blocks = true;
             }
+        } else {
+            // Not signalled (2.5 ms frames, or no room): the decoder takes
+            // isTransient = 0, so the encoder must too (celt_encoder.c). Keeping
+            // the analysis verdict coded tf_res with transient probabilities the
+            // decoder never used -- a range desync from TF onward.
+            is_transient = false;
         }
 
         // bandLogE2: the long-MDCT logs + 0.5*LM when we re-MDCT short
@@ -2253,6 +2391,7 @@ impl CeltEncoder {
                     );
                 }
             }
+            upsample_bound(freq, channels, frame_size, up);
 
             compute_band_energies(mode, freq, band_e, end_band, channels, lm);
             normalise_bands(
@@ -2297,7 +2436,11 @@ impl CeltEncoder {
             channels,
             lm,
             (total_bits / 8) as usize,
-            is_transient || intra_ener,
+            // Deliberate deviation: libopus passes only st->force_intra here.
+            // Forcing intra energy on transients measured better on transient
+            // content (PEAQ 2026-10-04, percussive 64k/128k: +0.17/+0.34 ODG
+            // vs the libopus rule; neutral on 16 other music/speech points).
+            is_transient || intra_ener || self.prediction_off,
             &mut self.delayed_intra,
             self.complexity >= 4,
             0,
@@ -2691,11 +2834,7 @@ impl CeltEncoder {
         );
 
         if anti_collapse_rsv > 0 {
-            let anti_collapse_on = if self.consec_transient < 2 {
-                1u32
-            } else {
-                0u32
-            };
+            let anti_collapse_on = u32::from(self.consec_transient < 2);
             rc.enc_bits(anti_collapse_on, 1);
         }
 
@@ -2810,9 +2949,53 @@ impl CeltEncoder {
     }
 }
 
+/// libopus `prefilter_and_fold` body for channel `ch` (see CeltDecoder::fold_overlap).
+fn fold_overlap_mem(
+    decode_mem: &mut [f32],
+    mode: &CeltMode,
+    pf: (usize, usize, f32, f32, i32, i32),
+    ch: usize,
+    n: usize,
+) {
+    let overlap = mode.overlap;
+    let window = mode.window;
+    let base = ch * (DECODE_BUFFER_SIZE + overlap);
+    // The one Opus mode has a 120-sample overlap; the checked slice enforces it.
+    let mut etmp_buf = [0.0f32; 120];
+    let etmp = &mut etmp_buf[..overlap];
+    comb_filter(
+        etmp,
+        decode_mem,
+        0,
+        base + DECODE_BUFFER_SIZE - n,
+        pf.0,
+        pf.1,
+        overlap,
+        -pf.2,
+        -pf.3,
+        pf.4,
+        pf.5,
+        window,
+        0,
+    );
+    for i in 0..overlap / 2 {
+        decode_mem[base + DECODE_BUFFER_SIZE - n + i] =
+            window[i] * etmp[overlap - 1 - i] + window[overlap - 1 - i] * etmp[i];
+    }
+}
+
 pub struct CeltDecoder {
     mode: &'static CeltMode,
     channels: usize,
+    /// libopus `st->downsample` = 48000 / API rate. CELT always decodes the
+    /// 48 kHz frame; for 8/12/16/24 kHz output the bins above the output's
+    /// Nyquist are cleared and deemphasis keeps every `downsample`-th sample
+    /// (celt_decoder.c celt_synthesis + deemphasis). 1 = 48 kHz output.
+    pub downsample: usize,
+    /// libopus `disable_inv = channels == 1`: a decoder whose output is mono
+    /// ignores the intensity-stereo inversion flag so the downmix cannot cancel.
+    /// Set on the stereo aux decoder that feeds a mono output.
+    pub disable_inv: bool,
     // Bitstream (coded) channels C; normally == channels (CC). A mono packet in a
     // stereo decoder sets this to 1 (C=1, CC=2) so the CELT inter-frame state stays
     // one continuous chain across mono<->stereo switches, matching libopus.
@@ -2830,8 +3013,24 @@ pub struct CeltDecoder {
     old_band_e2: Vec<f32>,
     old_band_e3: Vec<f32>,
     rng: u32,
-    /// Consecutive-loss counter for packet-loss concealment (celt_decode_lost).
-    loss_count: u32,
+    /// libopus `loss_duration` / `plc_duration` (units of 2.5 ms, saturating
+    /// at 10000): time since the last good frame / spent in concealment.
+    loss_duration: i32,
+    plc_duration: i32,
+    /// libopus `skip_plc`: use noise PLC until two consecutive good frames.
+    skip_plc: bool,
+    /// libopus `last_frame_type == FRAME_PLC_PERIODIC`.
+    last_frame_periodic: bool,
+    /// libopus `prefilter_and_fold`: a periodic PLC frame owes the next frame
+    /// its TDAC fold (done after that frame's memory shift).
+    prefilter_and_fold: bool,
+    /// libopus `backgroundLogE`: noise-PLC energy floor.
+    background_log_e: Vec<f32>,
+    /// libopus `st->start` for concealment (17 when the opus layer conceals a
+    /// hybrid frame -> noise PLC of the high band only).
+    pub plc_start: usize,
+    /// libopus `st->end`: the last decoded frame's end band.
+    last_end_band: usize,
     /// Pitch lag from the first lost frame, reused across a loss burst.
     last_pitch_index: i32,
     /// LPC coefficients (per channel, PLC_LPC_ORDER) computed at the first loss
@@ -2857,16 +3056,22 @@ impl CeltDecoder {
         let overlap = mode.overlap;
         let nb_ebands = mode.nb_ebands;
         let nb_x_ch = nb_ebands * channels;
+        // libopus keeps 2*nbEBands of energy state even in a mono decoder: the
+        // hidden channel-1 copy feeds `oldBandE = max(ch0, ch1)` for mono packets,
+        // which matters after concealment (only ch0 decays during PLC).
+        let nb_state = 2 * nb_ebands;
         let dec_frame_x_ch = DECODE_BUFFER_SIZE * channels;
         Self {
             mode,
             channels,
+            downsample: 1,
+            disable_inv: channels == 1,
             stream_channels: channels,
             decode_mem: vec![0.0; channels * (DECODE_BUFFER_SIZE + overlap)],
             // libopus: oldBandE inits to 0 (OPUS_CLEAR); only oldLogE/oldLogE2 get
             // the -28 "very quiet" floor. Do NOT init old_band_e to -28 (it is the
             // coarse-energy prediction state; -28 makes the first frames too quiet).
-            old_band_e: vec![0.0; nb_x_ch],
+            old_band_e: vec![0.0; nb_state],
             preemph_mem: vec![0.0; channels],
             prefilter_mem: vec![0.0; channels * COMBFILTER_MAXPERIOD],
             prefilter_period: COMBFILTER_MINPERIOD,
@@ -2876,10 +3081,17 @@ impl CeltDecoder {
             prefilter_tapset: 0,
             prefilter_tapset_old: 0,
             // oldLogE / oldLogE2 in libopus: init -QCONST16(28,DB_SHIFT).
-            old_band_e2: vec![-28.0; nb_x_ch],
-            old_band_e3: vec![-28.0; nb_x_ch],
+            old_band_e2: vec![-28.0; nb_state],
+            old_band_e3: vec![-28.0; nb_state],
             rng: 0,
-            loss_count: 0,
+            loss_duration: 0,
+            plc_duration: 0,
+            skip_plc: true,
+            last_frame_periodic: false,
+            prefilter_and_fold: false,
+            background_log_e: vec![0.0; nb_state],
+            plc_start: 0,
+            last_end_band: nb_ebands,
             last_pitch_index: 0,
             plc_lpc: vec![0.0; channels * PLC_LPC_ORDER],
 
@@ -2905,7 +3117,7 @@ impl CeltDecoder {
     /// overlap/energy/prefilter state is continuous with the preceding mono
     /// packets (which libopus keeps in one continuous decoder) — without this the
     /// first stereo frame's MDCT overlap-add starts from silence.
-    pub fn seed_from(&mut self, src: &CeltDecoder) {
+    pub fn seed_from(&mut self, src: &Self) {
         let overlap = self.mode.overlap;
         let nb = self.mode.nb_ebands;
         let per_dm = DECODE_BUFFER_SIZE + overlap;
@@ -2921,10 +3133,24 @@ impl CeltDecoder {
             self.old_band_e3[c * nb..(c + 1) * nb]
                 .copy_from_slice(&src.old_band_e3[sc * nb..(sc + 1) * nb]);
             self.preemph_mem[c] = src.preemph_mem[sc];
+            self.background_log_e[c * nb..(c + 1) * nb]
+                .copy_from_slice(&src.background_log_e[sc * nb..(sc + 1) * nb]);
             self.prefilter_mem[c * COMBFILTER_MAXPERIOD..(c + 1) * COMBFILTER_MAXPERIOD]
                 .copy_from_slice(
                     &src.prefilter_mem[sc * COMBFILTER_MAXPERIOD..(sc + 1) * COMBFILTER_MAXPERIOD],
                 );
+        }
+        if self.channels == 1 {
+            // Hidden channel-1 energy state (2*nbEBands, as libopus).
+            let sc = 1.min(src_ch - 1);
+            for (dst, srcv) in [
+                (&mut self.old_band_e, &src.old_band_e),
+                (&mut self.old_band_e2, &src.old_band_e2),
+                (&mut self.old_band_e3, &src.old_band_e3),
+                (&mut self.background_log_e, &src.background_log_e),
+            ] {
+                dst[nb..2 * nb].copy_from_slice(&srcv[sc * nb..(sc + 1) * nb]);
+            }
         }
         self.prefilter_period = src.prefilter_period;
         self.prefilter_period_old = src.prefilter_period_old;
@@ -2957,6 +3183,14 @@ impl CeltDecoder {
         self.prefilter_tapset = 0;
         self.prefilter_tapset_old = 0;
         self.rng = 0;
+        self.loss_duration = 0;
+        self.plc_duration = 0;
+        self.skip_plc = true;
+        self.last_frame_periodic = false;
+        self.prefilter_and_fold = false;
+        self.background_log_e.fill(0.0);
+        self.last_pitch_index = 0;
+        self.plc_lpc.fill(0.0);
     }
 
     pub fn decode(&mut self, compressed: &[u8], frame_size: usize, pcm: &mut [f32]) -> usize {
@@ -3026,6 +3260,11 @@ impl CeltDecoder {
         end_band: usize,
     ) -> usize {
         let mode = self.mode;
+        // "Check if there are at least two packets received consecutively before
+        // turning on the pitch-based PLC" (celt_decoder.c).
+        if self.loss_duration == 0 {
+            self.skip_plc = false;
+        }
         // CC = state/output channels; C (=`channels`) = channels coded in the
         // bitstream. Mono packet in a stereo decoder: C=1, CC=2 — energy/allocation/
         // bands/denormalise all use C; synthesis writes CC output channels reading
@@ -3035,6 +3274,13 @@ impl CeltDecoder {
         let nb_ebands = mode.nb_ebands;
         let end_band = end_band.min(nb_ebands).max(start_band);
         let overlap = mode.overlap;
+        // `pcm` takes `nu` samples/channel at the API rate; the bitstream always
+        // describes the 48 kHz frame (celt_decoder.c: frame_size *= downsample).
+        // Deriving LM from the API-rate size picked a wrong LM at 8-24 kHz output
+        // and misread every bit after it.
+        let ds = self.downsample.max(1);
+        let nu = frame_size;
+        let frame_size = nu * ds;
 
         let mut lm = 0;
         while (mode.short_mdct_size << lm) != frame_size {
@@ -3052,7 +3298,7 @@ impl CeltDecoder {
         // a stereo decoder predicts its single channel from the MAX of both
         // channels' previous energy. (Only meaningful on the first mono frame after
         // stereo; after every mono frame ch0 is replicated to ch1 at frame end.)
-        if channels == 1 && cc == 2 {
+        if channels == 1 {
             for i in 0..nb_ebands {
                 self.old_band_e[i] = self.old_band_e[i].max(self.old_band_e[nb_ebands + i]);
             }
@@ -3108,6 +3354,32 @@ impl CeltDecoder {
         } else {
             false
         };
+        // "If recovering from packet loss, make sure we make the energy
+        // prediction safe to reduce the risk of getting loud artifacts"
+        // (celt_decoder.c): continue a falling trend, else take the min of the
+        // last frames; shorter frames get an extra safety margin.
+        if !intra_ener && self.loss_duration != 0 {
+            let missing = (self.loss_duration >> lm).min(10) as f32;
+            let safety = match lm {
+                0 => 1.5f32,
+                1 => 0.5,
+                _ => 0.0,
+            };
+            for c in 0..2 {
+                for i in start_band..end_band {
+                    let k = c * nb_ebands + i;
+                    let (e0, e1, e2) =
+                        (self.old_band_e[k], self.old_band_e2[k], self.old_band_e3[k]);
+                    self.old_band_e[k] = if e0 < e1.max(e2) {
+                        let slope = (e1 - e0).max(0.5 * (e2 - e0)).min(2.0);
+                        (e0 - (0.0f32).max((1.0 + missing) * slope)).max(-20.0)
+                    } else {
+                        e0.min(e1).min(e2)
+                    };
+                    self.old_band_e[k] -= safety;
+                }
+            }
+        }
 
         unquant_coarse_energy(
             mode,
@@ -3184,7 +3456,7 @@ impl CeltDecoder {
         };
 
         let mut intensity = 0;
-        let mut dual_stereo_val = if channels == 2 { 1 } else { 0 };
+        let mut dual_stereo_val = i32::from(channels == 2);
         let mut balance = 0;
         self.w_pulses[..nb_ebands].fill(0);
         let pulses = &mut self.w_pulses[..nb_ebands];
@@ -3271,7 +3543,7 @@ impl CeltDecoder {
             lm as i32,
             coded_bands,
             true,
-            false,
+            self.disable_inv,
             &mut self.rng,
         );
         // Trace X values for comparison with C decoder
@@ -3339,6 +3611,14 @@ impl CeltDecoder {
                 (1 << lm) as usize,
             );
         }
+        // celt_synthesis: nothing above the output's Nyquist is synthesised
+        // (bound = min(bound, N / downsample)). No-op at 48 kHz.
+        if ds > 1 {
+            let bound = frame_size / ds;
+            for c in 0..channels {
+                freq[c * frame_size + bound..(c + 1) * frame_size].fill(0.0);
+            }
+        }
         // Always trace freq and band_amp for comparison
 
         let (shift, b) = if short_blocks {
@@ -3362,6 +3642,17 @@ impl CeltDecoder {
                 channel_mem_offset + frame_size..channel_mem_offset + mem_size,
                 channel_mem_offset,
             );
+            if self.prefilter_and_fold {
+                let pf = (
+                    self.prefilter_period_old,
+                    self.prefilter_period,
+                    self.prefilter_gain_old,
+                    self.prefilter_gain,
+                    self.prefilter_tapset_old,
+                    self.prefilter_tapset,
+                );
+                fold_overlap_mem(&mut self.decode_mem, mode, pf, c, frame_size);
+            }
 
             let out_syn_idx = DECODE_BUFFER_SIZE - frame_size;
 
@@ -3377,15 +3668,16 @@ impl CeltDecoder {
                 };
                 let block_out_idx = channel_mem_offset + out_syn_idx + i * block_stride;
                 let available_len = self.decode_mem.len() - block_out_idx;
+                // Unreachable for validated frame sizes (frame_size is capped at
+                // DECODE_BUFFER_SIZE + overlap above). Fail closed like that guard:
+                // no output rather than a panic on a hostile packet.
+                debug_assert!(
+                    available_len >= n + overlap,
+                    "MDCT backward buffer too small: need {}, have {available_len}",
+                    n + overlap
+                );
                 if available_len < n + overlap {
-                    panic!(
-                        "MDCT backward buffer too small: need {}, have {} (out_syn_idx={}, n={}, overlap={})",
-                        n + overlap,
-                        available_len,
-                        out_syn_idx,
-                        n,
-                        overlap
-                    );
+                    return 0;
                 }
                 self.mode.mdct.backward(
                     &freq[block_freq_idx..],
@@ -3411,13 +3703,14 @@ impl CeltDecoder {
                     ..channel_mem_offset + out_syn_idx + frame_size],
             );
             if pf_on || self.prefilter_gain > 0.0 || self.prefilter_gain_old > 0.0 {
-                // Set up w_post = [prefilter_mem | pcm_frame] for history access.
-                // We apply combfilter in-place on w_post[COMBFILTER_MAXPERIOD..] so that
-                // later samples can reference already-filtered earlier samples, matching C's
-                // in-place comb_filter behavior.
-                self.w_post[..COMBFILTER_MAXPERIOD].copy_from_slice(
-                    &self.prefilter_mem[c * COMBFILTER_MAXPERIOD..(c + 1) * COMBFILTER_MAXPERIOD],
-                );
+                // Set up w_post = [history | pcm_frame]. We apply combfilter in-place on
+                // w_post[COMBFILTER_MAXPERIOD..] so that later samples can reference
+                // already-filtered earlier samples, matching C's in-place comb_filter.
+                // History comes from decode_mem, as in C (out_syn[c][-T]): it then
+                // includes concealed frames, which the separate prefilter_mem never saw.
+                let hist = channel_mem_offset + out_syn_idx - COMBFILTER_MAXPERIOD;
+                self.w_post[..COMBFILTER_MAXPERIOD]
+                    .copy_from_slice(&self.decode_mem[hist..hist + COMBFILTER_MAXPERIOD]);
                 self.w_post[COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + frame_size]
                     .copy_from_slice(pcm_frame);
 
@@ -3478,11 +3771,24 @@ impl CeltDecoder {
             let coef = mode.preemph[0];
             let mut m = self.preemph_mem[c];
             const VERY_SMALL: f32 = 1e-30f32;
-            for i in 0..frame_size {
-                let x = pcm_frame[i];
-                let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
-                pcm[c * frame_size + i] = val * (1.0 / 32768.0);
-                m = val * coef;
+            if ds == 1 {
+                for i in 0..frame_size {
+                    let x = pcm_frame[i];
+                    let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
+                    pcm[c * frame_size + i] = val * (1.0 / 32768.0);
+                    m = val * coef;
+                }
+            } else {
+                // deemphasis with downsample: run the filter at the full rate,
+                // keep every ds-th sample (celt_decoder.c deemphasis).
+                for i in 0..frame_size {
+                    let x = pcm_frame[i];
+                    let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
+                    if i % ds == 0 {
+                        pcm[c * nu + i / ds] = val * (1.0 / 32768.0);
+                    }
+                    m = val * coef;
+                }
             }
             self.preemph_mem[c] = m;
         }
@@ -3511,7 +3817,7 @@ impl CeltDecoder {
         // replicate channel 0's coarse energy to channel 1 — this keeps ch1's
         // prediction state current through mono runs (and is what makes the
         // pre-decode MAX-merge a first-frame-only event).
-        if channels == 1 && cc == 2 {
+        if channels == 1 {
             let (ch0, ch1) = self.old_band_e.split_at_mut(nb_ebands);
             ch1[..nb_ebands].copy_from_slice(&ch0[..nb_ebands]);
         }
@@ -3522,16 +3828,23 @@ impl CeltDecoder {
             self.old_band_e3.copy_from_slice(&self.old_band_e2);
             self.old_band_e2.copy_from_slice(&self.old_band_e);
         } else {
-            for i in 0..cc * nb_ebands {
+            for i in 0..2 * nb_ebands {
                 self.old_band_e2[i] = self.old_band_e2[i].min(self.old_band_e[i]);
             }
+        }
+        // backgroundLogE (the noise-PLC floor) may rise only 2.4 dB/s; after DTX
+        // the missing packets all count (celt_decoder.c).
+        let max_bg_inc = (self.loss_duration + (1i32 << lm as i32)).min(160) as f32 * 0.001;
+        for i in 0..2 * nb_ebands {
+            self.background_log_e[i] =
+                (self.background_log_e[i] + max_bg_inc).min(self.old_band_e[i]);
         }
 
         // "In case start or end were to change" (celt_decoder.c:1162-1174): zero
         // the coarse energy outside [start, end) and floor the log history, for
         // BOTH state channels. Matters for hybrid (start=17) and narrower
         // bandwidths (end<21) mixing with full-band frames in one stream.
-        for c in 0..cc {
+        for c in 0..2 {
             for i in 0..start_band {
                 self.old_band_e[c * nb_ebands + i] = 0.0;
                 self.old_band_e2[c * nb_ebands + i] = -28.0;
@@ -3545,9 +3858,14 @@ impl CeltDecoder {
         }
 
         self.rng = rc.rng;
-        self.loss_count = 0;
+        self.prefilter_and_fold = false;
+        self.loss_duration = 0;
+        self.plc_duration = 0;
+        self.last_frame_periodic = false;
+        self.last_end_band = end_band;
 
-        frame_size
+        // Samples/channel written to `pcm`, at the API rate.
+        nu
     }
 
     /// Packet-loss concealment for a lost CELT frame — a port of libopus
@@ -3559,9 +3877,18 @@ impl CeltDecoder {
     /// random excitation). Both fill the decode buffer, then this deemphasises
     /// to `pcm` (interleaved, /32768). Real attenuating audio instead of silence.
     pub fn conceal_lost(&mut self, frame_size: usize, pcm: &mut [f32]) {
-        let n = frame_size;
-        // start==0 for CELT-only; noise-based only once the burst is long.
-        if self.loss_count >= 5 {
+        // Conceal the 48 kHz frame; deemphasis below decimates by `ds`.
+        let ds = self.downsample.max(1);
+        let n = frame_size * ds;
+        let mut lm = 0i32;
+        while (self.mode.short_mdct_size << lm) < n && lm < self.mode.max_lm as i32 {
+            lm += 1;
+        }
+        // celt_decode_lost frame type: noise once concealment has run 100 ms,
+        // for a hybrid high band (start != 0), or until two good frames have
+        // followed a noise frame / reset (skip_plc); else pitch-periodic.
+        let noise = self.plc_duration >= 40 || self.plc_start != 0 || self.skip_plc;
+        if noise {
             self.conceal_fill_noise(n);
         } else {
             self.conceal_fill_pitch(n);
@@ -3582,17 +3909,35 @@ impl CeltDecoder {
             for i in 0..n {
                 let x = self.decode_mem[out + i];
                 let val = (x + VERY_SMALL + m).clamp(-SIG_SAT, SIG_SAT);
-                pcm[i * c + ch] = val * (1.0 / 32768.0);
+                if i % ds == 0 {
+                    pcm[(i / ds) * c + ch] = val * (1.0 / 32768.0);
+                }
                 m = val * coef;
             }
             self.preemph_mem[ch] = m;
         }
 
-        self.prefilter_period_old = self.prefilter_period;
-        self.prefilter_gain_old = self.prefilter_gain;
-        self.prefilter_period = COMBFILTER_MINPERIOD;
-        self.prefilter_gain = 0.0;
-        self.loss_count += 1;
+        // The postfilter parameters carry over (the noise branch already moved
+        // `_old` up to the current values); "saturate to avoid wrap-around".
+        self.loss_duration = (self.loss_duration + (1 << lm)).min(10000);
+        self.plc_duration = (self.plc_duration + (1 << lm)).min(10000);
+        self.last_frame_periodic = !noise;
+    }
+
+    /// libopus `prefilter_and_fold` for one channel: pre-filter the concealed
+    /// MDCT overlap (the post-filter is re-applied after the next frame's
+    /// overlap-add) and simulate TDAC so it blends with the next frame's MDCT.
+    /// Runs after that frame's memory shift by `n`.
+    fn fold_overlap(&mut self, ch: usize, n: usize) {
+        let pf = (
+            self.prefilter_period_old,
+            self.prefilter_period,
+            self.prefilter_gain_old,
+            self.prefilter_gain,
+            self.prefilter_tapset_old,
+            self.prefilter_tapset,
+        );
+        fold_overlap_mem(&mut self.decode_mem, self.mode, pf, ch, n);
     }
 
     /// Noise-based concealment branch (celt_decode_lost, `noise_based`): fill the
@@ -3601,22 +3946,37 @@ impl CeltDecoder {
         let mode = self.mode;
         let nb_ebands = mode.nb_ebands;
         let overlap = mode.overlap;
+        let window = mode.window;
         let c = self.channels;
-        let start = 0usize;
-        let end = nb_ebands;
-        let eff_end = end.min(mode.eff_ebands);
+        let start = self.plc_start.min(nb_ebands);
+        let end = self.last_end_band.max(start).min(nb_ebands);
+        let eff_end = start.max(end.min(mode.eff_ebands));
         let mem_size = DECODE_BUFFER_SIZE + overlap;
+        let ds = self.downsample.max(1);
 
         let mut lm = 0usize;
         while (mode.short_mdct_size << lm) != n && lm < mode.max_lm {
             lm += 1;
         }
 
-        let decay = if self.loss_count == 0 { 1.5f32 } else { 0.5f32 };
+        for ch in 0..c {
+            let base = ch * mem_size;
+            self.decode_mem.copy_within(base + n..base + mem_size, base);
+            if self.prefilter_and_fold {
+                self.fold_overlap(ch, n);
+            }
+        }
+
+        // Energy decay toward the background-noise floor.
+        let decay = if self.loss_duration == 0 {
+            1.5f32
+        } else {
+            0.5f32
+        };
         for ch in 0..c {
             for i in start..end {
-                let e = &mut self.old_band_e[ch * nb_ebands + i];
-                *e = (*e - decay).max(-28.0);
+                let k = ch * nb_ebands + i;
+                self.old_band_e[k] = self.background_log_e[k].max(self.old_band_e[k] - decay);
             }
         }
 
@@ -3635,37 +3995,89 @@ impl CeltDecoder {
         }
         self.rng = seed;
 
-        for ch in 0..c {
-            let base = ch * mem_size;
-            self.decode_mem
-                .copy_within(base + n..base + DECODE_BUFFER_SIZE + overlap / 2, base);
-        }
-
+        // celt_synthesis (C == CC, long block).
         self.w_band_amp[..nb_ebands * c].fill(0.0);
         let band_amp = &mut self.w_band_amp[..nb_ebands * c];
         log2amp(mode, nb_ebands, band_amp, &self.old_band_e, c);
         self.w_freq[..n * c].fill(0.0);
         let freq = &mut self.w_freq[..n * c];
-        denormalise_bands(mode, &self.w_x, freq, band_amp, start, end, c, 1usize << lm);
-
+        denormalise_bands(
+            mode,
+            &self.w_x,
+            freq,
+            band_amp,
+            start,
+            eff_end,
+            c,
+            1usize << lm,
+        );
+        if ds > 1 {
+            let bound = n / ds;
+            for ch in 0..c {
+                freq[ch * n + bound..(ch + 1) * n].fill(0.0);
+            }
+        }
         let shift = mode.max_lm - lm;
         let out_syn_idx = DECODE_BUFFER_SIZE - n;
-        const SIG_SAT: f32 = 536870911.0;
         for ch in 0..c {
             let out = ch * mem_size + out_syn_idx;
             self.mode.mdct.backward(
                 &freq[ch * n..],
                 &mut self.decode_mem[out..],
-                mode.window,
+                window,
                 overlap,
                 shift,
                 1,
             );
-            for i in 0..n {
-                let v = &mut self.decode_mem[out + i];
-                *v = v.clamp(-SIG_SAT, SIG_SAT);
-            }
         }
+
+        // Run the postfilter with the last parameters (history from decode_mem).
+        self.prefilter_period = self.prefilter_period.max(COMBFILTER_MINPERIOD);
+        self.prefilter_period_old = self.prefilter_period_old.max(COMBFILTER_MINPERIOD);
+        let short_n = mode.short_mdct_size;
+        for ch in 0..c {
+            let out = ch * mem_size + out_syn_idx;
+            let hist = out - COMBFILTER_MAXPERIOD;
+            self.w_post[..COMBFILTER_MAXPERIOD + n]
+                .copy_from_slice(&self.decode_mem[hist..out + n]);
+            comb_filter_inplace(
+                &mut self.w_post,
+                COMBFILTER_MAXPERIOD,
+                self.prefilter_period_old,
+                self.prefilter_period,
+                short_n,
+                self.prefilter_gain_old,
+                self.prefilter_gain,
+                self.prefilter_tapset_old,
+                self.prefilter_tapset,
+                window,
+                overlap,
+            );
+            if lm != 0 {
+                comb_filter_inplace(
+                    &mut self.w_post,
+                    COMBFILTER_MAXPERIOD + short_n,
+                    self.prefilter_period,
+                    self.prefilter_period,
+                    n - short_n,
+                    self.prefilter_gain,
+                    self.prefilter_gain,
+                    self.prefilter_tapset,
+                    self.prefilter_tapset,
+                    window,
+                    overlap,
+                );
+            }
+            self.decode_mem[out..out + n]
+                .copy_from_slice(&self.w_post[COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
+        }
+        self.prefilter_period_old = self.prefilter_period;
+        self.prefilter_gain_old = self.prefilter_gain;
+        self.prefilter_tapset_old = self.prefilter_tapset;
+
+        self.prefilter_and_fold = false;
+        // Skip regular PLC until we get two consecutive packets.
+        self.skip_plc = true;
     }
 
     /// Pitch-based concealment branch (celt_decode_lost, pitch-based): extrapolate
@@ -3684,12 +4096,14 @@ impl CeltDecoder {
 
         // Pitch lag: search on the first loss, reuse across the burst.
         let mut fade = 1.0f32;
-        if self.loss_count == 0 {
-            let mut lp = vec![0.0f32; DECODE_BUFFER_SIZE >> 1];
-            let slices: Vec<&[f32]> = (0..c)
-                .map(|ch| &self.decode_mem[ch * mem_size..ch * mem_size + DECODE_BUFFER_SIZE])
-                .collect();
-            crate::pitch::pitch_downsample(&slices, &mut lp, DECODE_BUFFER_SIZE >> 1, c, 2);
+        if !self.last_frame_periodic {
+            let mut lp = [0.0f32; DECODE_BUFFER_SIZE >> 1];
+            let last = (c - 1) * mem_size;
+            let slices: [&[f32]; 2] = [
+                &self.decode_mem[..DECODE_BUFFER_SIZE],
+                &self.decode_mem[last..last + DECODE_BUFFER_SIZE],
+            ];
+            crate::pitch::pitch_downsample(&slices[..c], &mut lp, DECODE_BUFFER_SIZE >> 1, c, 2);
             let pr = crate::pitch::pitch_search(
                 &lp[PLC_PITCH_LAG_MAX >> 1..],
                 &lp,
@@ -3703,43 +4117,43 @@ impl CeltDecoder {
         let pitch_index = (self.last_pitch_index.max(1) as usize).min(MAX_PERIOD - 1);
         let exc_length = (2 * pitch_index).min(MAX_PERIOD);
 
-        let mut etmp = vec![0.0f32; overlap];
         for ch in 0..c {
             let base = ch * mem_size;
             // exc[k] = exc_buf[ord + k] for k in -ord..MAX_PERIOD.
-            let mut exc_buf = vec![0.0f32; MAX_PERIOD + ord];
+            let mut exc_buf = [0.0f32; MAX_PERIOD + PLC_LPC_ORDER];
             for (i, v) in exc_buf.iter_mut().enumerate() {
                 *v = self.decode_mem[base + DECODE_BUFFER_SIZE - MAX_PERIOD - ord + i];
             }
-            if self.loss_count == 0 {
-                let mut ac = vec![0.0f32; ord + 1];
-                crate::celt_lpc::autocorr(
+            if !self.last_frame_periodic {
+                let mut ac = [0.0f32; PLC_LPC_ORDER + 1];
+                crate::celt_lpc::autocorr_c_order(
                     &exc_buf[ord..ord + MAX_PERIOD],
                     &mut ac,
-                    Some(window),
+                    window,
                     overlap,
                     ord,
                     MAX_PERIOD,
                 );
                 ac[0] *= 1.0001; // -40 dB noise floor
                 for i in 1..=ord {
-                    ac[i] -= ac[i] * (0.008 * 0.008) * (i * i) as f32; // lag windowing
+                    // lag windowing, in C's evaluation order: ((ac*c)*i)*i
+                    ac[i] -= ac[i] * (0.008f32 * 0.008f32) * i as f32 * i as f32;
                 }
-                let mut lc = vec![0.0f32; ord];
+                let mut lc = [0.0f32; PLC_LPC_ORDER];
                 crate::celt_lpc::lpc(&mut lc, &ac, ord);
                 self.plc_lpc[ch * ord..ch * ord + ord].copy_from_slice(&lc);
             }
-            let lc: Vec<f32> = self.plc_lpc[ch * ord..ch * ord + ord].to_vec();
+            let mut lc = [0.0f32; PLC_LPC_ORDER];
+            lc.copy_from_slice(&self.plc_lpc[ch * ord..ch * ord + ord]);
 
             // Whiten the last exc_length excitation samples (celt_fir with history
             // — pass the ord preceding samples and read outputs at [ord..]).
             {
                 let x = &exc_buf[MAX_PERIOD - exc_length..];
-                let mut y = vec![0.0f32; ord + exc_length];
-                crate::celt_lpc::celt_fir(x, &lc, &mut y, ord + exc_length, ord);
-                for i in 0..exc_length {
-                    exc_buf[ord + MAX_PERIOD - exc_length + i] = y[ord + i];
-                }
+                let mut y_buf = [0.0f32; MAX_PERIOD];
+                let y = &mut y_buf[..exc_length];
+                crate::celt_lpc::celt_fir_c_order(x, &lc, y, exc_length, ord);
+                exc_buf[ord + MAX_PERIOD - exc_length..ord + MAX_PERIOD].copy_from_slice(y);
             }
 
             // Decay factor from the excitation energy ratio (avoid adding energy).
@@ -3783,11 +4197,15 @@ impl CeltDecoder {
             for (i, v) in lpc_mem.iter_mut().enumerate().take(ord) {
                 *v = self.decode_mem[base + DECODE_BUFFER_SIZE - n - 1 - i];
             }
-            let extrap: Vec<f32> = self.decode_mem
-                [base + out_syn_idx..base + out_syn_idx + extrapolation_len]
-                .to_vec();
-            crate::celt_lpc::celt_iir(
-                &extrap,
+            // celt_iir runs in place in libopus; our helper takes x and y apart,
+            // so stage the input on the stack (was a Vec per lost frame).
+            let mut extrap_buf = [0.0f32; DECODE_BUFFER_SIZE];
+            let extrap = &mut extrap_buf[..extrapolation_len];
+            extrap.copy_from_slice(
+                &self.decode_mem[base + out_syn_idx..base + out_syn_idx + extrapolation_len],
+            );
+            crate::celt_lpc::celt_iir_c_order(
+                extrap,
                 &lc,
                 &mut self.decode_mem[base + out_syn_idx..base + out_syn_idx + extrapolation_len],
                 extrapolation_len,
@@ -3819,29 +4237,10 @@ impl CeltDecoder {
                     self.decode_mem[base + out_syn_idx + i] *= ratio;
                 }
             }
-
-            // Re-apply the postfilter to the overlap, then TDAC-fold so the
-            // concealed audio blends with the next frame's MDCT.
-            comb_filter(
-                &mut etmp,
-                &self.decode_mem,
-                0,
-                base + DECODE_BUFFER_SIZE,
-                self.prefilter_period,
-                self.prefilter_period,
-                overlap,
-                -self.prefilter_gain,
-                -self.prefilter_gain,
-                self.prefilter_tapset,
-                self.prefilter_tapset,
-                window,
-                0,
-            );
-            for i in 0..overlap / 2 {
-                self.decode_mem[base + DECODE_BUFFER_SIZE + i] =
-                    window[i] * etmp[overlap - 1 - i] + window[overlap - 1 - i] * etmp[i];
-            }
         }
+        // The TDAC fold is owed to the next frame (libopus prefilter_and_fold),
+        // applied after its memory shift.
+        self.prefilter_and_fold = true;
     }
 }
 
@@ -3868,7 +4267,7 @@ mod tests {
     // Either way: the call panics, confirming the crash path is real.
     // The fix in OpusEncoder::encode() returns Err before reaching CeltEncoder.
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "input.len() >= n2 + overlap2")]
     fn test_celt_frame_size_48_panics_confirms_crash_path() {
         let mode = modes::default_mode();
         let mut enc = CeltEncoder::new(mode, 1);
@@ -3976,7 +4375,16 @@ mod tests {
             w[max_period..].copy_from_slice(&delayed[k * n..(k + 1) * n]);
             if pf_on || d_g > 0.0 || d_g_old > 0.0 {
                 comb_filter_inplace(
-                    &mut w, max_period, d_t_old, d_t, short_n, d_g_old, d_g, 0, 0, mode.window,
+                    &mut w,
+                    max_period,
+                    d_t_old,
+                    d_t,
+                    short_n,
+                    d_g_old,
+                    d_g,
+                    0,
+                    0,
+                    mode.window,
                     overlap,
                 );
                 comb_filter_inplace(
@@ -4026,5 +4434,92 @@ mod tests {
             snr > 90.0,
             "prefilter/postfilter round trip not transparent: SNR={snr:.1} dB (engaged {engaged}/{frames})"
         );
+    }
+}
+
+/// SIMD-vs-scalar oracle for the CELT comb filter and L1 metric dispatchers.
+#[cfg(test)]
+mod isa_oracle {
+    use super::*;
+    use crate::isa::oracle::{Rng, both, close, close_slices};
+
+    #[test]
+    fn comb_filter_const_matches_scalar() {
+        let mut r = Rng(0x0123_4567_89ab_cdef);
+        for _ in 0..crate::isa::oracle::iters(3000) {
+            let t = COMBFILTER_MINPERIOD + r.below(COMBFILTER_MAXPERIOD - COMBFILTER_MINPERIOD - 2);
+            let n = 1 + r.below(960);
+            let x_idx = t + 2;
+            let x = r.vec(x_idx + n + 2, 20000.0);
+            let (g10, g11, g12) = (r.f32(0.8), r.f32(0.8), r.f32(0.8));
+            let (s, c) = both(|| {
+                let mut y = vec![0.0f32; n];
+                comb_filter_const(&mut y, &x, 0, x_idx, t, n, g10, g11, g12);
+                y
+            });
+            let scale = 5.0 * x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            for i in 0..n {
+                close(
+                    s[i],
+                    c[i],
+                    scale,
+                    &format!("comb_filter_const t={t} n={n} [{i}]"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn comb_filter_inplace_matches_scalar() {
+        let mode = crate::modes::default_mode();
+        let mut r = Rng(0xfeed_face_cafe_beef);
+        for _ in 0..crate::isa::oracle::iters(1500) {
+            let n = 1 + r.below(960);
+            let (t0, t1) = (
+                COMBFILTER_MINPERIOD + r.below(600),
+                COMBFILTER_MINPERIOD + r.below(600),
+            );
+            let (g0, g1) = (r.f32(0.7), r.f32(0.7));
+            let (tap0, tap1) = (r.below(3) as i32, r.below(3) as i32);
+            let y_idx = COMBFILTER_MAXPERIOD;
+            let buf0 = r.vec(y_idx + n, 20000.0);
+            let (s, c) = both(|| {
+                let mut b = buf0.clone();
+                comb_filter_inplace(
+                    &mut b,
+                    y_idx,
+                    t0,
+                    t1,
+                    n,
+                    g0,
+                    g1,
+                    tap0,
+                    tap1,
+                    mode.window,
+                    mode.overlap.min(n),
+                );
+                b
+            });
+            close_slices(
+                &s,
+                &c,
+                &format!("comb_filter_inplace n={n} t0={t0} t1={t1}"),
+            );
+        }
+    }
+
+    #[test]
+    fn l1_metric_matches_scalar() {
+        let mut r = Rng(0x7777_0000_1111_2222);
+        for _ in 0..crate::isa::oracle::iters(2000) {
+            let n = 1 + r.below(800);
+            let tmp = r.vec(n, 500.0);
+            let lm = r.below(4) as i32;
+            let bias = r.f32(0.5);
+            let (s, c) = both(|| l1_metric(&tmp, n, lm, bias));
+            let scale: f32 =
+                tmp.iter().map(|v| v.abs()).sum::<f32>() * (1.0 + bias.abs() * lm as f32);
+            close(s, c, scale, &format!("l1_metric n={n}"));
+        }
     }
 }

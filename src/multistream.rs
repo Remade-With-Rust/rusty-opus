@@ -10,7 +10,8 @@
 //! requirement. The bitstream layout, mapping, and per-stream Opus coding are
 //! standard, so streams interoperate with libopus.
 
-use crate::repacketizer::{parse_packet, Repacketizer};
+use crate::Error;
+use crate::repacketizer::{Repacketizer, parse_frames};
 use crate::{Application, Bandwidth, OpusDecoder, OpusEncoder};
 
 /// Vorbis channel layout for mapping family 1, channels 1..=8:
@@ -26,51 +27,62 @@ const VORBIS_MAPPINGS: [(usize, usize, &[u8]); 8] = [
     (5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]), // 7.1
 ];
 
+/// How the channels of a multistream signal map onto mono and stereo
+/// (coupled) Opus streams (RFC 7845 channel mapping).
 #[derive(Clone)]
 pub struct ChannelLayout {
+    /// Total output channels.
     pub nb_channels: usize,
+    /// Number of Opus streams in each packet.
     pub nb_streams: usize,
+    /// How many of those streams are stereo (coupled); they come first.
     pub nb_coupled_streams: usize,
+    /// For each output channel, the decoded channel index it takes.
     pub mapping: Vec<u8>,
 }
 
 impl ChannelLayout {
     /// Standard layout for a channel count + mapping family (0 = mono/stereo,
     /// 1 = Vorbis surround for 1..=8 channels).
-    pub fn surround(channels: usize, mapping_family: i32) -> Result<Self, &'static str> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadArg`] if `mapping_family` is not 0 or 1, or `channels` is out
+    /// of range for it (1–2 for family 0, 1–8 for family 1).
+    pub fn surround(channels: usize, mapping_family: i32) -> Result<Self, Error> {
         match mapping_family {
             0 => {
                 if channels == 1 {
-                    Ok(ChannelLayout {
+                    Ok(Self {
                         nb_channels: 1,
                         nb_streams: 1,
                         nb_coupled_streams: 0,
                         mapping: vec![0],
                     })
                 } else if channels == 2 {
-                    Ok(ChannelLayout {
+                    Ok(Self {
                         nb_channels: 2,
                         nb_streams: 1,
                         nb_coupled_streams: 1,
                         mapping: vec![0, 1],
                     })
                 } else {
-                    Err("family 0 supports only 1-2 channels")
+                    Err(Error::BadArg("family 0 supports only 1-2 channels"))
                 }
             }
             1 => {
                 if !(1..=8).contains(&channels) {
-                    return Err("family 1 supports 1-8 channels");
+                    return Err(Error::BadArg("family 1 supports 1-8 channels"));
                 }
                 let (ns, nc, m) = VORBIS_MAPPINGS[channels - 1];
-                Ok(ChannelLayout {
+                Ok(Self {
                     nb_channels: channels,
                     nb_streams: ns,
                     nb_coupled_streams: nc,
                     mapping: m.to_vec(),
                 })
             }
-            _ => Err("unsupported mapping family"),
+            _ => Err(Error::BadArg("unsupported mapping family")),
         }
     }
 
@@ -114,19 +126,26 @@ pub struct OpusMSEncoder {
 }
 
 impl OpusMSEncoder {
+    /// A surround encoder for `channels` channels with the standard layout of
+    /// `mapping_family` (see [`ChannelLayout::surround`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadArg`] for an unsupported channel count / mapping family, or any
+    /// error from creating the per-stream encoders.
     pub fn new(
         sample_rate: i32,
         channels: usize,
         mapping_family: i32,
         application: Application,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self, Error> {
         let layout = ChannelLayout::surround(channels, mapping_family)?;
         let mut encoders = Vec::with_capacity(layout.nb_streams);
         for s in 0..layout.nb_streams {
             let ch = if s < layout.nb_coupled_streams { 2 } else { 1 };
             encoders.push(OpusEncoder::new(sample_rate, ch, application)?);
         }
-        let mut enc = OpusMSEncoder {
+        let mut enc = Self {
             layout,
             encoders,
             sample_rate,
@@ -142,7 +161,11 @@ impl OpusMSEncoder {
         self.bitrate_bps = total;
         let units = self.layout.nb_coupled_streams * 2
             + (self.layout.nb_streams - self.layout.nb_coupled_streams);
-        let per_unit = if units > 0 { total / units as i32 } else { total };
+        let per_unit = if units > 0 {
+            total / units as i32
+        } else {
+            total
+        };
         for (s, e) in self.encoders.iter_mut().enumerate() {
             e.bitrate_bps = if s < self.layout.nb_coupled_streams {
                 per_unit * 2
@@ -152,13 +175,19 @@ impl OpusMSEncoder {
         }
     }
 
+    /// Number of Opus streams in each multistream packet.
     pub fn nb_streams(&self) -> usize {
         self.layout.nb_streams
     }
 
     /// Encode one frame of interleaved `input` (nb_channels per sample) into a
     /// multistream packet. `scratch` output is returned as a Vec.
-    pub fn encode(&mut self, input: &[f32], frame_size: usize) -> Result<Vec<u8>, &'static str> {
+    ///
+    /// # Errors
+    ///
+    /// Any error from the per-stream [`crate::OpusEncoder::encode`] calls or from
+    /// assembling the self-delimited multistream packet.
+    pub fn encode(&mut self, input: &[f32], frame_size: usize) -> Result<Vec<u8>, Error> {
         let nch = self.layout.nb_channels;
         let mut out: Vec<u8> = Vec::new();
         let mut stream_buf = vec![0f32; frame_size * 2];
@@ -172,17 +201,29 @@ impl OpusMSEncoder {
                 let l = self.layout.left_channel(s, -1);
                 let r = self.layout.right_channel(s, -1);
                 for i in 0..frame_size {
-                    stream_buf[i * 2] = if l >= 0 { input[i * nch + l as usize] } else { 0.0 };
-                    stream_buf[i * 2 + 1] =
-                        if r >= 0 { input[i * nch + r as usize] } else { 0.0 };
+                    stream_buf[i * 2] = if l >= 0 {
+                        input[i * nch + l as usize]
+                    } else {
+                        0.0
+                    };
+                    stream_buf[i * 2 + 1] = if r >= 0 {
+                        input[i * nch + r as usize]
+                    } else {
+                        0.0
+                    };
                 }
             } else {
                 let m = self.layout.mono_channel(s, -1);
                 for i in 0..frame_size {
-                    stream_buf[i] = if m >= 0 { input[i * nch + m as usize] } else { 0.0 };
+                    stream_buf[i] = if m >= 0 {
+                        input[i * nch + m as usize]
+                    } else {
+                        0.0
+                    };
                 }
             }
-            let n = self.encoders[s].encode(&stream_buf[..frame_size * sch], frame_size, &mut pkt)?;
+            let n =
+                self.encoders[s].encode(&stream_buf[..frame_size * sch], frame_size, &mut pkt)?;
             // All streams but the last are self-delimited so the decoder can
             // find each stream's boundary.
             if s != self.layout.nb_streams - 1 {
@@ -196,6 +237,7 @@ impl OpusMSEncoder {
         Ok(out)
     }
 
+    /// Input sampling rate in Hz.
     pub fn sample_rate(&self) -> i32 {
         self.sample_rate
     }
@@ -208,28 +250,36 @@ pub struct OpusMSDecoder {
 }
 
 impl OpusMSDecoder {
-    pub fn new(
-        sample_rate: i32,
-        channels: usize,
-        mapping_family: i32,
-    ) -> Result<Self, &'static str> {
+    /// A surround decoder for `channels` channels with the standard layout of
+    /// `mapping_family` (see [`ChannelLayout::surround`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadArg`] for an unsupported channel count / mapping family, or any
+    /// error from creating the per-stream decoders.
+    pub fn new(sample_rate: i32, channels: usize, mapping_family: i32) -> Result<Self, Error> {
         let layout = ChannelLayout::surround(channels, mapping_family)?;
         let mut decoders = Vec::with_capacity(layout.nb_streams);
         for s in 0..layout.nb_streams {
             let ch = if s < layout.nb_coupled_streams { 2 } else { 1 };
             decoders.push(OpusDecoder::new(sample_rate, ch)?);
         }
-        Ok(OpusMSDecoder { layout, decoders })
+        Ok(Self { layout, decoders })
     }
 
     /// Decode a multistream packet into interleaved `output` (nb_channels per
     /// sample). Returns the number of samples per channel.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPacket`] if the multistream framing is malformed, or any
+    /// error from the per-stream [`crate::OpusDecoder::decode`] calls.
     pub fn decode(
         &mut self,
         packet: &[u8],
         frame_size: usize,
         output: &mut [f32],
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, Error> {
         let nch = self.layout.nb_channels;
         let mut buf = vec![0f32; frame_size * 2];
         let mut data = packet;
@@ -242,7 +292,7 @@ impl OpusMSDecoder {
             let (stream_slice, advance) = if last {
                 (data, data.len())
             } else {
-                let (_toc, _frames, off) = parse_packet(data, true)?;
+                let off = parse_frames(data, true)?.end;
                 (&data[..off], off)
             };
             let n = self.decoders[s].decode(stream_slice, frame_size, &mut buf)?;
@@ -300,8 +350,8 @@ impl OpusMSDecoder {
     }
 }
 
-/// Bandwidth passthrough helper (so callers can cap all streams at once).
 impl OpusMSEncoder {
+    /// Cap the audio bandwidth of every stream at once.
     pub fn set_max_bandwidth(&mut self, bw: Bandwidth) {
         for e in &mut self.encoders {
             e.max_bandwidth = bw;

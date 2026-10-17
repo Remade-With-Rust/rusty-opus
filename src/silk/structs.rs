@@ -184,6 +184,8 @@ pub struct SilkEncoderStateCommon {
     pub use_in_band_fec: i32,
     pub lbrr_gain_increases: i32,
     pub lbrr_flags: [i32; MAX_FRAMES_PER_PACKET],
+    /// libopus `LBRRprevLastGainIndex`: gain-index history of the LBRR stream.
+    pub lbrr_prev_last_gain_index: i8,
     pub prefill_flag: i32,
 
     pub n_channels: i32,
@@ -252,6 +254,7 @@ impl Default for SilkEncoderStateCommon {
             use_in_band_fec: 0,
             lbrr_gain_increases: 0,
             lbrr_flags: [0; MAX_FRAMES_PER_PACKET],
+            lbrr_prev_last_gain_index: 0,
             prefill_flag: 0,
             n_channels: 1,
         }
@@ -278,6 +281,9 @@ pub struct SilkEncoderState {
     /// When set, the encoder runs the float SILK analysis (`silk::flp`) in
     /// place of the fixed-point analysis. The NSQ stays fixed-point.
     pub use_flp: bool,
+    /// libopus `nBitsUsedLBRR`: moving average of the bits the LBRR section
+    /// takes at the head of each packet, subtracted from the frames' target.
+    pub n_bits_used_lbrr: i32,
 }
 
 impl Default for SilkEncoderState {
@@ -295,6 +301,7 @@ impl Default for SilkEncoderState {
             resampler_delay_buf: [0; 48],
             flp_ltp_corr: 0.0,
             use_flp: false,
+            n_bits_used_lbrr: 0,
         }
     }
 }

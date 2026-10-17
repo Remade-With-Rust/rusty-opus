@@ -51,6 +51,10 @@ pub fn silk_decode_frame(
 
         silk_decode_core(ps_dec, &ps_dec_ctrl, p_out, &pulses);
 
+        // Update output buffer BEFORE silk_PLC/CNG (decode_frame.c): the LTP
+        // history must never contain comfort noise.
+        update_out_buf(ps_dec, p_out, l);
+
         // Update PLC state from this good frame (silk_PLC lost=0).
         silk_plc(ps_dec, &mut ps_dec_ctrl, p_out, 0);
 
@@ -62,16 +66,12 @@ pub fn silk_decode_frame(
         // Handle packet loss by extrapolation (silk_PLC lost=1 writes p_out and
         // bumps loss_cnt). Previously we just zeroed the frame — hard silence.
         silk_plc(ps_dec, &mut ps_dec_ctrl, p_out, 1);
+        update_out_buf(ps_dec, p_out, l);
     }
 
     // Comfort-noise generation: tracks background noise on active silence frames
     // and overlays it on the PLC output during loss/DTX (silk_CNG).
     crate::silk::cng::silk_cng(ps_dec, &ps_dec_ctrl, p_out, l);
-
-    // Update output buffer (both paths).
-    let mv_len = ps_dec.ltp_mem_length - ps_dec.frame_length;
-    ps_dec.out_buf.rotate_left(ps_dec.frame_length as usize);
-    ps_dec.out_buf[mv_len as usize..mv_len as usize + l].copy_from_slice(&p_out[..l]);
 
     // Ensure smooth connection of extrapolated and good frames.
     silk_plc_glue_frames(ps_dec, p_out, l);
@@ -81,4 +81,11 @@ pub fn silk_decode_frame(
     *p_n = l as i32;
 
     0
+}
+
+/// Shift outBuf one frame and append this frame's (pre-CNG) output.
+fn update_out_buf(ps_dec: &mut SilkDecoderState, p_out: &[i16], l: usize) {
+    let mv_len = ps_dec.ltp_mem_length - ps_dec.frame_length;
+    ps_dec.out_buf.rotate_left(ps_dec.frame_length as usize);
+    ps_dec.out_buf[mv_len as usize..mv_len as usize + l].copy_from_slice(&p_out[..l]);
 }

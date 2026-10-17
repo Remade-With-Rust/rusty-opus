@@ -232,7 +232,7 @@ pub fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], n_delta_min_q15: &[i16], l: usi
     }
 
     if loops == MAX_LOOPS {
-        nlsf_q15[..l].sort();
+        nlsf_q15[..l].sort_unstable();
 
         nlsf_q15[0] = nlsf_q15[0].max(n_delta_min_q15[0]);
 

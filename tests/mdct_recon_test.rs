@@ -49,10 +49,7 @@ fn test_mdct_recon_simple() {
                 freq[0]
             );
             // That print is confusing. Let's just print sums.
-            println!(
-                "Delay 0: In2={:.2e}, Err2={:.2e}",
-                local_sum_in2, local_sum_err2
-            );
+            println!("Delay 0: In2={local_sum_in2:.2e}, Err2={local_sum_err2:.2e}");
         }
         if snr > best_snr {
             best_snr = snr;
@@ -60,7 +57,7 @@ fn test_mdct_recon_simple() {
         }
     }
 
-    println!("Best SNR: {:.2} dB at delay {}", best_snr, best_delay);
+    println!("Best SNR: {best_snr:.2} dB at delay {best_delay}");
 
     // Compute Middle Region SNR
     let mid_start = overlap;
@@ -74,7 +71,7 @@ fn test_mdct_recon_simple() {
         mid_sum_err2 += (val_in - val_out) * (val_in - val_out);
     }
     let mid_snr = 10.0 * (mid_sum_in2 / (mid_sum_err2 + 1e-10)).log10();
-    println!("Middle Region SNR: {:.2} dB", mid_snr);
+    println!("Middle Region SNR: {mid_snr:.2} dB");
 
     for i in 0..50 {
         let idx = i;

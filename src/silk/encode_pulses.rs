@@ -166,7 +166,7 @@ pub fn silk_encode_pulses(
             for j in 0..SHELL_CODEC_FRAME_LENGTH {
                 let pulse = pulses[i * SHELL_CODEC_FRAME_LENGTH + j];
                 if pulse != 0 {
-                    let mapped = if pulse > 0 { 1i32 } else { 0i32 };
+                    let mapped = i32::from(pulse > 0);
                     ps_range_enc.encode_icdf(mapped, &icdf, 8);
                 }
             }

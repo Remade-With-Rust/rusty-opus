@@ -29,7 +29,7 @@ fn test_silk_toc_byte_structure() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    assert!(bytes >= 3, "Packet too short: {}", bytes);
+    assert!(bytes >= 3, "Packet too short: {bytes}");
 
     // TOC byte: SILK-only NB 20ms mono = 0x0b
     // bits[7:3] = config (NB 20ms = 0b00001)
@@ -73,18 +73,8 @@ fn test_silk_multi_frame_sizes() {
             .encode(&input, frame_size, &mut output)
             .expect("Encode failed");
 
-        assert!(
-            bytes >= 3,
-            "Frame {}: packet too short: {}",
-            frame_idx,
-            bytes
-        );
-        assert!(
-            bytes <= 25,
-            "Frame {}: packet too large: {}",
-            frame_idx,
-            bytes
-        );
+        assert!(bytes >= 3, "Frame {frame_idx}: packet too short: {bytes}");
+        assert!(bytes <= 25, "Frame {frame_idx}: packet too large: {bytes}");
         println!(
             "Frame {}: {} bytes, hex: {}",
             frame_idx,
@@ -99,7 +89,7 @@ mod hex {
     pub fn encode(data: &[u8]) -> String {
         let mut s = String::with_capacity(data.len() * 2);
         for &b in data {
-            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{:02x}", b));
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
         }
         s
     }

@@ -103,11 +103,21 @@ pub fn silk_biquad_alt_stride2(
     s: &mut [i32],
     len: usize,
 ) {
+    // The NEON kernel addresses these through raw pointers (stereo-interleaved).
+    assert!(
+        input_output.len() >= 2 * len && b_q28.len() >= 3 && a_q28.len() >= 2 && s.len() >= 4,
+        "silk_biquad_alt_stride2: buffers too short"
+    );
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        silk_biquad_alt_stride2_neon(input_output, b_q28, a_q28, s, len);
+    if crate::isa::neon() {
+        // SAFETY: `crate::isa::neon()` just returned true, so NEON is available.
+        // The kernel's raw loads/stores need `a_q28.len() >= 2`,
+        // `b_q28.len() >= 3`, `s.len() >= 4` and `input_output.len() >= 2 * len`
+        // (the same elements the scalar arm below indexes), all enforced by
+        // the `assert!` at the top of this function.
+        unsafe { silk_biquad_alt_stride2_neon(input_output, b_q28, a_q28, s, len) };
+        return;
     }
-    #[cfg(not(target_arch = "aarch64"))]
     {
         let a0_l_q28 = (-a_q28[0]) & 0x00003FFF;
         let a0_u_q28 = -a_q28[0] >> 14;
@@ -141,22 +151,32 @@ pub fn silk_biquad_alt_stride2(
 
 #[inline]
 fn xcorr_kernel_c(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize) {
+    // The SIMD kernels read whole vectors of `y` past `len + 3` (NEON: up to
+    // `y[..len + 7]`, AVX2: `y[..len + 4]` when `len % 4 == 0`). They are taken
+    // only when that slack exists; otherwise the bit-identical scalar twin runs.
+    // (The NEON kernel used to run unconditionally and read past `y` in the
+    // aarch64 oracle test; production callers had slack only by arithmetic.)
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let x_ok = x.len() >= len;
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            xcorr_kernel_neon_s16(x, y, sum, len);
-        }
+    if x_ok && y.len() >= len + 8 && crate::isa::neon() {
+        // SAFETY: NEON confirmed by `isa::neon()`; `x.len() >= len` and
+        // `y.len() >= len + 8` were just checked, covering the kernel's widest
+        // read (`y[..len + 7]`, see its `# Safety`).
+        unsafe { xcorr_kernel_neon_s16(x, y, sum, len) };
+        return;
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if x_ok && y.len() >= len + 4 && crate::isa::avx2() {
+        // SAFETY: `isa::avx2()` matches the kernel's `#[target_feature(enable =
+        // "avx2")]`; `x.len() >= len` and `y.len() >= len + 4` were just checked,
+        // covering its raw loads (`x[..4 * (len / 4)]`, `y[..4 * (len / 4) + 4]`).
         unsafe { xcorr_kernel_avx2(x, y, sum, len) };
         return;
     }
-    #[cfg(not(target_arch = "aarch64"))]
     xcorr_kernel_scalar(x, y, sum, len);
 }
 
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 #[inline]
 fn xcorr_kernel_scalar(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize) {
     let mut j = 0;
@@ -228,6 +248,18 @@ fn xcorr_kernel_scalar(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize) {
     let _ = (y_0, y_1, y_2, y_3);
 }
 
+/// NEON twin of `xcorr_kernel_scalar`: 4 lagged dot products of `x` against `y`.
+///
+/// # Safety
+///
+/// - The CPU must support NEON (`crate::isa::neon()`; baseline on aarch64).
+/// - `x.len() >= len`.
+/// - `y.len() >= len + 8 - r`, where `r = len - 4 * max(0, ceil((len - 4) / 4))`
+///   (`r` in 1..=4 for `len >= 1`): the kernel issues full 8-lane loads of `y`
+///   at offsets 0, 4, .., so it needs between `len + 4` and `len + 7` elements
+///   (and never fewer than 8). NOTE: this is stricter than the
+///   `y.len() >= len + 3` the `debug_assert!` below checks; all elements are
+///   accessed through raw pointers, so nothing is bounds-checked.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -377,7 +409,7 @@ pub fn silk_autocorr(
     }
     if results[0] > 0 && results[0] < 268435456 {
         let shift2 = 29 - ec_ilog(results[0] as u32);
-        for v in results[..correlation_count].iter_mut() {
+        for v in &mut results[..correlation_count] {
             *v <<= shift2;
         }
         shift -= shift2;
@@ -386,7 +418,7 @@ pub fn silk_autocorr(
         if results[0] >= 1073741824 {
             shift2 += 1;
         }
-        for v in results[..correlation_count].iter_mut() {
+        for v in &mut results[..correlation_count] {
             *v >>= shift2;
         }
         shift += shift2;
@@ -395,6 +427,7 @@ pub fn silk_autocorr(
     *scale = shift;
 }
 
+#[allow(unused_labels)] // i686/wasm have no early SIMD arm
 pub fn silk_sum_sqr_shift(energy: &mut i32, shift: &mut i32, x: &[i16], len: usize) {
     let mut i: usize;
     let mut shft: i32;
@@ -418,14 +451,25 @@ pub fn silk_sum_sqr_shift(energy: &mut i32, shift: &mut i32, x: &[i16], len: usi
 
     shft = (shft + 3 - silk_clz32(nrg)).max(0);
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        nrg = unsafe { silk_sum_sqr_shift_neon(x, len, shft) };
-    }
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        nrg = unsafe { silk_sum_sqr_shift_avx2(x, len, shft) };
-    } else {
+    nrg = 'second: {
+        #[cfg(target_arch = "aarch64")]
+        if crate::isa::neon() {
+            // SAFETY: `crate::isa::neon()` just returned true, so NEON is
+            // available. The kernel needs `x.len() >= len`: the first pass above
+            // already indexed `x[len - 1]` with bounds checks (a short `x`, or
+            // `len == 0`, panics there), so it holds here.
+            let v = unsafe { silk_sum_sqr_shift_neon(x, len, shft) };
+            break 'second v;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if crate::isa::avx2() {
+            // SAFETY: `crate::isa::avx2()` just returned true, matching the
+            // kernel's `#[target_feature(enable = "avx2")]`. The kernel needs
+            // `x.len() >= len`: the first pass above already indexed `x[len - 1]`
+            // with bounds checks (a short `x`, or `len == 0`, panics there).
+            let v = unsafe { silk_sum_sqr_shift_avx2(x, len, shft) };
+            break 'second v;
+        }
         nrg = 0;
         i = 0;
         while i < len - 1 {
@@ -438,78 +482,85 @@ pub fn silk_sum_sqr_shift(energy: &mut i32, shift: &mut i32, x: &[i16], len: usi
             nrg_tmp = silk_smulbb(x[i] as i32, x[i] as i32) as u32;
             nrg = nrg.wrapping_add((nrg_tmp >> shft) as i32);
         }
-    }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    {
-        nrg = 0;
-        i = 0;
-        while i < len - 1 {
-            nrg_tmp = silk_smulbb(x[i] as i32, x[i] as i32) as u32;
-            nrg_tmp = nrg_tmp.wrapping_add(silk_smulbb(x[i + 1] as i32, x[i + 1] as i32) as u32);
-            nrg = nrg.wrapping_add((nrg_tmp >> shft) as i32);
-            i += 2;
-        }
-        if i < len {
-            nrg_tmp = silk_smulbb(x[i] as i32, x[i] as i32) as u32;
-            nrg = nrg.wrapping_add((nrg_tmp >> shft) as i32);
-        }
-    }
+        nrg
+    };
 
     *shift = shft;
     *energy = nrg;
 }
 
+/// NEON twin of the second (shifted) energy pass of `silk_sum_sqr_shift`.
+///
+/// # Safety
+///
+/// - The CPU must support NEON (`crate::isa::neon()`; baseline on aarch64).
+/// - `x.len() >= len`: the 8-lane loads read `x[i..i + 8]` for `i + 8 <= len`
+///   through raw pointers (the tail uses checked indexing).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn silk_sum_sqr_shift_neon(x: &[i16], len: usize, shft: i32) -> i32 {
     use std::arch::aarch64::*;
 
-    let mut acc = vdupq_n_s64(0i64);
+    // libopus: nrg += (x[i]^2 + x[i+1]^2) >> shft, the pair summed as u32 BEFORE
+    // the shift (shifting each square first rounds differently for shft > 0).
+    // vpaddq_s32(lo, hi) = [x0^2+x1^2, x2^2+x3^2, x4^2+x5^2, x6^2+x7^2]; a pair
+    // is <= 2^31, so reinterpreting as u32 and shifting logically is exact, and
+    // the u32 accumulator wraps mod 2^32 like the scalar i32 wrapping adds.
+    let mut acc = vdupq_n_u32(0);
+    let shift_vec = vdupq_n_s32(-shft);
     let mut i = 0;
 
     while i + 8 <= len {
         let v = vld1q_s16(x.as_ptr().add(i));
-
-        let lo = vget_low_s16(v);
-        let hi = vget_high_s16(v);
-        let sq_lo = vmull_s16(lo, lo);
-        let sq_hi = vmull_s16(hi, hi);
-
-        let shift_vec = vdupq_n_s32(-shft);
-        let sq_lo_sh = vshlq_s32(sq_lo, shift_vec);
-        let sq_hi_sh = vshlq_s32(sq_hi, shift_vec);
-        acc = vaddq_s64(acc, vpaddlq_s32(sq_lo_sh));
-        acc = vaddq_s64(acc, vpaddlq_s32(sq_hi_sh));
+        let sq_lo = vmull_s16(vget_low_s16(v), vget_low_s16(v));
+        let sq_hi = vmull_s16(vget_high_s16(v), vget_high_s16(v));
+        let pairs = vreinterpretq_u32_s32(vpaddq_s32(sq_lo, sq_hi));
+        acc = vaddq_u32(acc, vshlq_u32(pairs, shift_vec));
         i += 8;
     }
 
-    let mut nrg = vaddvq_s64(acc) as i32;
+    let mut nrg = vaddvq_u32(acc) as i32;
 
-    while i < len {
-        let v = x[i] as i32;
-        let sq = (v * v) as u32;
+    while i + 1 < len {
+        let (a, b) = (x[i] as i32, x[i + 1] as i32);
+        let sq = ((a * a) as u32).wrapping_add((b * b) as u32);
         nrg = nrg.wrapping_add((sq >> shft) as i32);
-        i += 1;
+        i += 2;
+    }
+    if i < len {
+        let v = x[i] as i32;
+        nrg = nrg.wrapping_add((((v * v) as u32) >> shft) as i32);
     }
     nrg
 }
 
 #[inline(always)]
 pub fn silk_inner_prod_aligned(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32 {
+    assert!(
+        ptr1.len() >= len && ptr2.len() >= len,
+        "silk_inner_prod_aligned: len out of range"
+    );
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        silk_inner_prod_aligned_neon(ptr1, ptr2, len)
+    if crate::isa::neon() {
+        // SAFETY: `crate::isa::neon()` just returned true, so NEON is available.
+        // The kernel reads `ptr1[..len]` and `ptr2[..len]` through raw 8-lane
+        // loads, so it needs `ptr1.len() >= len && ptr2.len() >= len`, which
+        // the `assert!` at the top of this function enforces.
+        return unsafe { silk_inner_prod_aligned_neon(ptr1, ptr2, len) };
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if crate::isa::avx2() {
+        // SAFETY: `crate::isa::avx2()` just returned true, matching the
+        // kernel's `#[target_feature(enable = "avx2")]`. The kernel reads
+        // `ptr1[..len]` and `ptr2[..len]` through raw 16/8-lane loads, so it
+        // needs `ptr1.len() >= len && ptr2.len() >= len`, which the `assert!`
+        // at the top of this function enforces.
         return unsafe { silk_inner_prod_aligned_avx2(ptr1, ptr2, len) };
     }
-    #[cfg(not(target_arch = "aarch64"))]
     silk_inner_prod_aligned_scalar(ptr1, ptr2, len)
 }
 
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 #[inline(always)]
 fn silk_inner_prod_aligned_scalar(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32 {
     let ptr1 = &ptr1[..len];
@@ -539,6 +590,14 @@ fn silk_inner_prod_aligned_scalar(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32
         .wrapping_add(sum3)
 }
 
+/// NEON twin of `silk_inner_prod_aligned_scalar`.
+///
+/// # Safety
+///
+/// - The CPU must support NEON (`crate::isa::neon()`; baseline on aarch64).
+/// - `ptr1.len() >= len` and `ptr2.len() >= len`: the 8-lane loads read
+///   `[i..i + 8]` for `i + 8 <= len` through raw pointers (the tail uses
+///   checked indexing).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -606,7 +665,7 @@ pub fn silk_corr_vector_fix(
 ) {
     let mut ptr1_idx = order - 1;
     if rshifts > 0 {
-        for xt_val in xt[..order].iter_mut() {
+        for xt_val in &mut xt[..order] {
             let mut inner_prod: i32 = 0;
             for i in 0..l {
                 inner_prod = silk_add_rshift32(
@@ -619,7 +678,7 @@ pub fn silk_corr_vector_fix(
             ptr1_idx = ptr1_idx.saturating_sub(1);
         }
     } else {
-        for xt_val in xt[..order].iter_mut() {
+        for xt_val in &mut xt[..order] {
             *xt_val = silk_inner_prod_aligned(&x[ptr1_idx..], t, l);
             ptr1_idx = ptr1_idx.saturating_sub(1);
         }
@@ -796,26 +855,33 @@ fn warped_corr_update_scalar(corr_qc: &mut [i64], state_qs: &[i32], order: usize
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn warped_corr_avx2_enabled() -> bool {
+    // crate::isa owns detection + the RUSTY_OPUS_ISA / RUSTY_OPUS_NO_AVX2 caps;
+    // this kernel keeps its own isolated A/B knob (env read once).
     use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0);
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
+    static OPT_OUT: AtomicU8 = AtomicU8::new(0); // 0=unknown, 1=off, 2=on
+    let opted_out = match OPT_OUT.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
         _ => {
-            let on = is_x86_feature_detected!("avx2")
-                && std::env::var_os("RUSTY_OPUS_NO_AVX2").is_none()
-                && std::env::var_os("RUSTY_OPUS_NO_WARP_AVX2").is_none();
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
+            let out = crate::research_env("RUSTY_OPUS_NO_WARP_AVX2").is_some();
+            OPT_OUT.store(if out { 2 } else { 1 }, Ordering::Relaxed);
+            out
         }
-    }
+    };
+    crate::isa::avx2() && !opted_out
 }
 
 /// AVX2 twin: 4 taps/iteration, `(state[i] as i64 * state0 as i64) >> 16`
 /// accumulated into `corr_qc` (i64). Byte-identical to the scalar.
 ///
-/// SAFETY: `corr_qc.len() >= order+1` and `state_qs.len() >= order+1` (the caller
-/// sizes both `MAX_SHAPE_LPC_ORDER+1`); AVX2 checked by the caller.
+/// # Safety
+///
+/// - The CPU must support AVX2 (the kernel is compiled with
+///   `#[target_feature(enable = "avx2")]`).
+/// - `corr_qc.len() >= order + 1` and `state_qs.len() >= order + 1`: the 4-lane
+///   loads/stores touch `[i..i + 4]` for `i + 4 <= order + 1` through raw
+///   pointers (the tail uses checked indexing). `silk_warped_autocorrelation_fix`
+///   sizes both `MAX_SHAPE_LPC_ORDER + 1`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn warped_corr_update_avx2(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
@@ -847,7 +913,13 @@ fn warped_corr_update(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         if warped_corr_avx2_enabled() {
-            // SAFETY: avx2 checked; caller sizes both slices to order+1.
+            // SAFETY: `warped_corr_avx2_enabled()` returns true only if
+            // `crate::isa::avx2()` does, which checks exactly the kernel's `avx2`
+            // feature. Lengths: the only caller, `silk_warped_autocorrelation_fix`,
+            // passes `corr_qc`/`state_qs` arrays of `MAX_SHAPE_LPC_ORDER + 1`
+            // elements and has just executed the bounds-checked
+            // `state_qs[order] = ..`, so `order + 1 <= state_qs.len() ==
+            // corr_qc.len()` (a larger `order` would have panicked there).
             unsafe { warped_corr_update_avx2(corr_qc, state_qs, order) };
             return;
         }
@@ -871,7 +943,7 @@ pub fn silk_warped_autocorrelation_fix(
     let mut state_qs = [0i32; MAX_SHAPE_LPC_ORDER + 1];
     let mut corr_qc = [0i64; MAX_SHAPE_LPC_ORDER + 1];
 
-    debug_assert!((order & 1) == 0);
+    debug_assert_eq!(order & 1, 0);
 
     for &input_n in input.iter().take(length) {
         tmp1_qs = (input_n as i32) << QS;
@@ -916,7 +988,7 @@ mod warped_corr_avx2_tests {
         if !is_x86_feature_detected!("avx2") {
             return;
         }
-        let mut s: u64 = 0xDEAD_BEEF_1357_9bdf;
+        let mut s: u64 = 0xDEAD_BEEF_1357_9BDF;
         let mut rng = || {
             s ^= s << 13;
             s ^= s >> 7;
@@ -924,7 +996,7 @@ mod warped_corr_avx2_tests {
             s
         };
         for order in [10usize, 12, 14, 16] {
-            for _ in 0..50_000 {
+            for _ in 0..crate::isa::oracle::iters(50_000) {
                 let mut state = [0i32; MAX_SHAPE_LPC_ORDER + 1];
                 for v in state.iter_mut().take(order + 1) {
                     // Warped states reach ~i16<<QS magnitudes; cover full sign range.
@@ -939,6 +1011,10 @@ mod warped_corr_avx2_tests {
                     b[k] = init;
                 }
                 warped_corr_update_scalar(&mut a, &state, order);
+                // SAFETY: the test returns early unless
+                // `is_x86_feature_detected!("avx2")`; `b` and `state` have
+                // `MAX_SHAPE_LPC_ORDER + 1 = 25` elements and `order <= 16`, so
+                // both are >= `order + 1`.
                 unsafe { warped_corr_update_avx2(&mut b, &state, order) };
                 assert_eq!(a, b, "order={order}");
             }
@@ -1017,7 +1093,7 @@ pub fn silk_k2a(a_q24: &mut [i32], rc_q15: &[i16], order: usize) {
 pub fn silk_bwexpander(ar: &mut [i16], d: usize, mut chirp_q16: i32) {
     let chirp_minus_one_q16 = chirp_q16 - 65536;
 
-    for ar_val in ar[..d - 1].iter_mut() {
+    for ar_val in &mut ar[..d - 1] {
         *ar_val = silk_rshift_round((*ar_val as i32).wrapping_mul(chirp_q16), 16) as i16;
         chirp_q16 += silk_rshift_round(chirp_q16.wrapping_mul(chirp_minus_one_q16), 16);
     }
@@ -1033,37 +1109,46 @@ pub fn silk_lpc_analysis_filter(
     _arch: i32,
 ) {
     assert!(d >= 6);
-    assert!((d & 1) == 0);
+    // The AVX2 / NEON paths read `input[..len]`, `b[..d]` and write `out[..len]`
+    // through raw pointers.
+    assert!(
+        input.len() >= len && out.len() >= len && b.len() >= d,
+        "silk_lpc_analysis_filter: buffers too short"
+    );
+    assert_eq!(d & 1, 0);
     assert!(d <= len);
 
     #[cfg(target_arch = "x86_64")]
-    if d <= 16 && is_x86_feature_detected!("avx2") {
+    if d <= 16 && crate::isa::avx2() {
+        // SAFETY: `crate::isa::avx2()` just returned true, matching the kernel's
+        // `#[target_feature(enable = "avx2")]`; `d <= 16` (checked here) and the
+        // asserts above give the kernel's `6 <= d`, `d` even, `d <= len`.
+        // Memory: `b[..d]` and `out[..len]` are bounds-checked inside the
+        // kernel. Its raw loads read `input[ix - 16..ix]` for
+        // `ix in max(16, d)..len`; for `d < 16` the preceding checked scalar
+        // loop has already indexed `input[15]`, and each AVX iteration
+        // bounds-checks `input[ix]` before the next one loads up to it, so
+        // every raw load is covered. For `d == 16` the first iteration loads
+        // `input[0..16]` before any check; that is covered by the asserted
+        // `input.len() >= len` (with `len >= d == 16`).
         unsafe {
             silk_lpc_analysis_filter_avx2(out, input, b, len, d);
         }
         return;
     }
 
+    // NEON-backed inner-product path helps most for larger orders (e.g. d=16)
+    // and can regress small orders due to setup overhead.
     #[cfg(target_arch = "aarch64")]
-    {
-        // NEON-backed inner-product path helps most for larger orders (e.g. d=16)
-        // and can regress small orders due to setup overhead.
-        if d >= 16 {
-            silk_lpc_analysis_filter_aarch64(out, input, b, len, d);
-        } else {
-            silk_lpc_analysis_filter_scalar(out, input, b, len, d);
-        }
+    if d >= 16 && crate::isa::neon() {
+        silk_lpc_analysis_filter_aarch64(out, input, b, len, d);
         return;
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        silk_lpc_analysis_filter_scalar(out, input, b, len, d);
-    }
+    silk_lpc_analysis_filter_scalar(out, input, b, len, d);
 }
 
 #[inline(always)]
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 fn silk_lpc_analysis_filter_scalar(
     out: &mut [i16],
     input: &[i16],
@@ -1071,10 +1156,17 @@ fn silk_lpc_analysis_filter_scalar(
     len: usize,
     d: usize,
 ) {
-    for out_val in out[..d].iter_mut() {
+    for out_val in &mut out[..d] {
         *out_val = 0;
     }
 
+    // SAFETY: lower bounds: `ix >= d` and `j + 2 <= d`, so every
+    // `input[ix - j - 1]` / `input[ix - j - 2]` index is >= 0 (the public entry
+    // `silk_lpc_analysis_filter` asserts `6 <= d <= len` and `d` even, so the
+    // pairwise loop stays within `j + 1 < d`). Upper bounds: this needs
+    // `input.len() >= len`, `out.len() >= len` and `b.len() >= d`, which the
+    // only caller, `silk_lpc_analysis_filter`, enforces with its `assert!`
+    // before dispatching here (so `ix < len` and `j + 1 < d` stay in bounds).
     unsafe {
         for ix in d..len {
             let mut out32_q12: i32;
@@ -1133,7 +1225,7 @@ fn silk_lpc_analysis_filter_aarch64(
     len: usize,
     d: usize,
 ) {
-    for out_val in out[..d].iter_mut() {
+    for out_val in &mut out[..d] {
         *out_val = 0;
     }
 
@@ -1179,8 +1271,20 @@ pub fn silk_shr32(a: i32, shift: i32) -> i32 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[cfg(target_arch = "x86")]
+use std::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+/// AVX2 twin of `silk_inner_prod_aligned_scalar`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 (the kernel is compiled with
+///   `#[target_feature(enable = "avx2")]`).
+/// - `ptr1.len() >= len` and `ptr2.len() >= len`: the 16/8-lane loads read
+///   `[i..i + 16]` / `[i..i + 8]` only while that range is within `..len`,
+///   through raw pointers (the tail uses checked indexing).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -1232,6 +1336,18 @@ unsafe fn silk_inner_prod_aligned_avx2(ptr1: &[i16], ptr2: &[i16], len: usize) -
     result
 }
 
+/// AVX2 twin of `xcorr_kernel_scalar`: 4 lagged dot products of `x` against `y`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 (the kernel is compiled with
+///   `#[target_feature(enable = "avx2")]`).
+/// - `x.len() >= len`.
+/// - `y.len() >= len + 4` if `len % 4 == 0` and `len >= 4`, else
+///   `y.len() >= len + 3`: the main loop does an 8-lane raw load of
+///   `y[i..i + 8]` for every `i + 4 <= len`, which for `i = len - 4` reaches
+///   `y[len + 3]`. NOTE: the `debug_assert!` below only checks `len + 3`. The
+///   scalar tail uses checked indexing.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -1286,6 +1402,14 @@ unsafe fn xcorr_kernel_avx2(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize
     }
 }
 
+/// AVX2 twin of the second (shifted) energy pass of `silk_sum_sqr_shift`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 (the kernel is compiled with
+///   `#[target_feature(enable = "avx2")]`).
+/// - `x.len() >= len`: the 16-lane loads read `x[i..i + 16]` for
+///   `i + 16 <= len` through raw pointers (the tail uses checked indexing).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -1315,16 +1439,34 @@ unsafe fn silk_sum_sqr_shift_avx2(x: &[i16], len: usize, shft: i32) -> i32 {
     let sum1 = _mm_add_epi32(sum2, _mm_srli_si128(sum2, 4));
     let mut nrg = _mm_cvtsi128_si32(sum1);
 
-    while i < len {
-        let v = x[i] as i32;
-        let sq = (v * v) as u32;
+    // Tail in PAIRS: libopus shifts (x0^2 + x1^2) together, so shifting each
+    // square on its own rounded differently whenever shft > 0.
+    while i + 1 < len {
+        let (a, b) = (x[i] as i32, x[i + 1] as i32);
+        let sq = ((a * a) as u32).wrapping_add((b * b) as u32);
         nrg = nrg.wrapping_add((sq >> shft) as i32);
-        i += 1;
+        i += 2;
+    }
+    if i < len {
+        let v = x[i] as i32;
+        nrg = nrg.wrapping_add((((v * v) as u32) >> shft) as i32);
     }
 
     nrg
 }
 
+/// AVX2 twin of `silk_lpc_analysis_filter_scalar` for orders `d <= 16`.
+///
+/// # Safety
+///
+/// - The CPU must support AVX2 (the kernel is compiled with
+///   `#[target_feature(enable = "avx2")]`).
+/// - `6 <= d <= 16`, `d` even, `d <= len` (only `debug_assert!`ed here; a
+///   `d > 16` would panic on `b_rev_pad[15 - k]` rather than read out of
+///   bounds).
+/// - `input.len() >= len`: for each `ix in max(16, d)..len` the kernel loads
+///   `input[ix - 16..ix]` through raw pointers. (`b[..d]`, `out[..len]` and
+///   `input[ix]` use checked indexing.)
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -1342,7 +1484,7 @@ unsafe fn silk_lpc_analysis_filter_avx2(
         b_rev_pad[15 - k] = b[k];
     }
 
-    for v in out[..d].iter_mut() {
+    for v in &mut out[..d] {
         *v = 0;
     }
 
@@ -1384,6 +1526,17 @@ unsafe fn silk_lpc_analysis_filter_avx2(
     }
 }
 
+/// NEON version of the stride-2 (interleaved stereo) biquad filter.
+///
+/// # Safety
+///
+/// - The CPU must support NEON (`crate::isa::neon()`; baseline on aarch64).
+/// - `a_q28.len() >= 2` and `b_q28.len() >= 3` (2-lane raw loads at
+///   `a_q28[0..2]`, `b_q28[0..2]` and `b_q28[1..3]`).
+/// - `s.len() >= 4` (4-lane raw load of `s[0..4]`).
+/// - `input_output.len() >= 2 * len`: 4-lane raw loads/stores at
+///   `input_output[2k..2k + 4]` for every even `k` with `k + 1 < len`. (The
+///   odd-`len` tail and the final state stores use checked indexing.)
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -1513,10 +1666,10 @@ unsafe fn silk_biquad_alt_stride2_neon(
         s[2] = s2_new;
         s[3] = s3_new;
     } else {
-        vst1q_lane_s32(&mut s[0], s_s32x4, 0);
-        vst1q_lane_s32(&mut s[1], s_s32x4, 2);
-        vst1q_lane_s32(&mut s[2], s_s32x4, 1);
-        vst1q_lane_s32(&mut s[3], s_s32x4, 3);
+        vst1q_lane_s32(&raw mut s[0], s_s32x4, 0);
+        vst1q_lane_s32(&raw mut s[1], s_s32x4, 2);
+        vst1q_lane_s32(&raw mut s[2], s_s32x4, 1);
+        vst1q_lane_s32(&raw mut s[3], s_s32x4, 3);
     }
 }
 
@@ -1561,6 +1714,100 @@ mod tests {
 
                 assert_eq!(out_opt, out_ref, "mismatch for d={d}, len={len}");
             }
+        }
+    }
+}
+
+/// SIMD-vs-scalar oracle for the SILK fixed-point dispatchers: integer kernels,
+/// so the gate is bit-identity (assert_eq), over random sizes and full-range data.
+#[cfg(test)]
+mod isa_oracle {
+    use super::*;
+    use crate::isa::oracle::{Rng, both};
+
+    /// libopus silk_sum_sqr_shift, literally: the reference on EVERY arch (the
+    /// isa cap only reaches x86 kernels, so this is what validates NEON).
+    fn sum_sqr_shift_ref(x: &[i16], len: usize) -> (i32, i32) {
+        let pass = |start: i32, shft: i32| {
+            let mut nrg = start;
+            let mut i = 0;
+            while i + 1 < len {
+                let t = ((x[i] as i32 * x[i] as i32) as u32)
+                    .wrapping_add((x[i + 1] as i32 * x[i + 1] as i32) as u32);
+                nrg = nrg.wrapping_add((t >> shft) as i32);
+                i += 2;
+            }
+            if i < len {
+                nrg = nrg.wrapping_add((((x[i] as i32 * x[i] as i32) as u32) >> shft) as i32);
+            }
+            nrg
+        };
+        let shft0 = 31 - (len as u32).leading_zeros() as i32;
+        let nrg0 = pass(len as i32, shft0);
+        let shft = (shft0 + 3 - (nrg0 as u32).leading_zeros() as i32).max(0);
+        (pass(0, shft), shft)
+    }
+
+    #[test]
+    fn sum_sqr_shift_matches_libopus() {
+        let mut r = Rng(0x00ab_cdef_0123_4567);
+        for _ in 0..crate::isa::oracle::iters(20000) {
+            let len = 1 + r.below(700);
+            let amp = [32767, 20000, 3000, 200][r.below(4)];
+            let x = r.i16s(len, amp);
+            let (mut e, mut sh) = (0i32, 0i32);
+            silk_sum_sqr_shift(&mut e, &mut sh, &x, len);
+            assert_eq!(
+                (e, sh),
+                sum_sqr_shift_ref(&x, len),
+                "silk_sum_sqr_shift len={len}"
+            );
+        }
+    }
+
+    #[test]
+    fn inner_prod_sum_sqr_xcorr_match_scalar() {
+        let mut r = Rng(0x5117_0000_dead_c0de);
+        for _ in 0..crate::isa::oracle::iters(5000) {
+            let len = 1 + r.below(700);
+            // Full 16-bit range on short vectors, speech-like range on long ones
+            // (the scalar twins' i32 accumulators are only defined there).
+            let amp = if len <= 32 { 32767 } else { 3000 };
+            let (a, b) = (r.i16s(len + 4, amp), r.i16s(len + 4, amp));
+            let (s, c) = both(|| silk_inner_prod_aligned(&a, &b, len));
+            assert_eq!(s, c, "silk_inner_prod_aligned len={len}");
+            let (s, c) = both(|| {
+                let (mut e, mut sh) = (0i32, 0i32);
+                silk_sum_sqr_shift(&mut e, &mut sh, &a, len);
+                (e, sh)
+            });
+            assert_eq!(s, c, "silk_sum_sqr_shift len={len}");
+            if len >= 3 {
+                let init = [r.below(1000) as i32; 4];
+                let (s, c) = both(|| {
+                    let mut sum = init;
+                    xcorr_kernel_c(&a, &b, &mut sum, len);
+                    sum
+                });
+                assert_eq!(s, c, "xcorr_kernel len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn lpc_analysis_filter_matches_scalar() {
+        let mut r = Rng(0x0a0a_1b1b_2c2c_3d3d);
+        for _ in 0..crate::isa::oracle::iters(4000) {
+            let d = 6 + 2 * r.below(6); // even orders 6..16 (the filter's contract)
+            let len = d + 1 + r.below(320);
+            let input = r.i16s(len, 20000);
+            let b = r.i16s(d, 4096);
+            let (s, c) = both(|| {
+                let mut out = vec![0i16; len];
+                silk_lpc_analysis_filter(&mut out, &input, &b, len, d, 0);
+                out
+            });
+            assert_eq!(s, c, "silk_lpc_analysis_filter d={d} len={len}");
         }
     }
 }

@@ -1,0 +1,59 @@
+# Project-specific security invariants (hardening gate H-22), enforced on every PR
+# by the `semgrep` CI job. Each rule encodes a claim made in docs/threat-model.md.
+
+rules:
+  - id: unsafe-only-in-simd-kernels
+    message: >-
+      `unsafe` is confined to the SIMD kernel modules (see UNSAFE.md). The entropy
+      coder, packet parsing, rate tables and the public API layer must stay
+      entirely safe Rust: they process attacker-controlled bytes.
+    severity: ERROR
+    languages: [regex]
+    pattern-regex: '\bunsafe\s*(\{|fn\b|impl\b|extern\b)'
+    paths:
+      include: ["/src/"]
+      exclude:
+        - /src/bands.rs
+        - /src/celt.rs
+        - /src/celt_lpc.rs
+        - /src/kiss_fft.rs
+        - /src/mdct.rs
+        - /src/pitch.rs
+        - /src/pvq.rs
+        - /src/prof.rs
+        - /src/silk/nsq.rs
+        - /src/silk/nsq_del_dec.rs
+        - /src/silk/resampler.rs
+        - /src/silk/sigproc_fix.rs
+
+  - id: no-unchecked-indexing-on-untrusted-input
+    message: >-
+      Unchecked indexing in a module that parses attacker-controlled bytes. Use
+      checked indexing: an out-of-range index must panic or error, never read
+      out of bounds.
+    severity: ERROR
+    languages: [regex]
+    pattern-regex: '\.get_unchecked(_mut)?\('
+    paths:
+      include:
+        - /src/range_coder.rs
+        - /src/rate.rs
+        - /src/repacketizer.rs
+        - /src/multistream.rs
+        - /src/lib.rs
+        - /src/silk/dec_api.rs
+        - /src/silk/decode_*.rs
+
+  - id: library-performs-no-io
+    message: >-
+      rusty-opus is a pure codec library: no network or process access (threat
+      model section 1). Move I/O to the caller.
+    severity: ERROR
+    languages: [regex]
+    pattern-regex: '\bstd::(net|process)::'
+    paths:
+      include: ["/src/"]
+
+# The two test-sensitive invariants (no unwrap on decode paths; CPU features only
+# via crate::isa) live in tools/check_invariants.py, which strips #[cfg(test)]
+# modules first: semgrep's Rust grammar does not match through item attributes.

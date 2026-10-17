@@ -65,11 +65,11 @@ fn test_mdct_simple_roundtrip() {
         noise_power += (s - d) * (s - d);
     }
     let snr = 10.0 * (signal_power / (noise_power + 1e-12)).log10();
-    eprintln!("SNR in non-overlap region: {:.2} dB", snr);
+    eprintln!("SNR in non-overlap region: {snr:.2} dB");
 
     // Check scaling
-    let in_max = input.iter().cloned().fold(0.0f32, f32::max).abs();
-    let out_max = output.iter().cloned().fold(0.0f32, f32::max).abs();
+    let in_max = input.iter().copied().fold(0.0f32, f32::max).abs();
+    let out_max = output.iter().copied().fold(0.0f32, f32::max).abs();
     eprintln!(
         "Input max: {:.6}, Output max: {:.6}, Ratio: {:.2}",
         in_max,
@@ -79,5 +79,5 @@ fn test_mdct_simple_roundtrip() {
 
     // The roundtrip should preserve signal reasonably well
     // Due to windowing, we expect some loss but not 100x
-    assert!(snr > 0.0, "MDCT roundtrip SNR too low: {:.2} dB", snr);
+    assert!(snr > 0.0, "MDCT roundtrip SNR too low: {snr:.2} dB");
 }

@@ -9,10 +9,7 @@ fn test_mdct_shift3() {
     let n = 1920 >> shift; // n = 240 for shift=3
     let overlap = 120;
 
-    eprintln!(
-        "Testing MDCT with shift={}, n={}, overlap={}",
-        shift, n, overlap
-    );
+    eprintln!("Testing MDCT with shift={shift}, n={n}, overlap={overlap}");
 
     // Create a simple test signal (overlap + n samples)
     let input_len = overlap + n;
@@ -61,7 +58,7 @@ fn test_mdct_shift3() {
         output.len(),
         output.iter().map(|f| f.abs()).fold(0.0f32, f32::max)
     );
-    eprintln!("Full output: {:?}", &output);
+    eprintln!("Full output: {output:?}");
 
     // The reconstructed signal should be at output[overlap/2 + overlap..]
     // because output[0..overlap] is the overlap tail from previous frame (zero in our case)
@@ -71,10 +68,7 @@ fn test_mdct_shift3() {
     let reconstruct_start = overlap / 2 + overlap;
     if reconstruct_start < output.len() {
         let available = output.len() - reconstruct_start;
-        eprintln!(
-            "Reconstructed samples starting at {}: {} available",
-            reconstruct_start, available
-        );
+        eprintln!("Reconstructed samples starting at {reconstruct_start}: {available} available");
         eprintln!(
             "First 10 reconstructed: {:?}",
             &output[reconstruct_start..reconstruct_start + 10.min(available)]
@@ -91,6 +85,6 @@ fn test_mdct_shift3() {
             snr_sq_err += (recon - sig) * (recon - sig);
         }
         let snr = 10.0 * (snr_sq_sig / snr_sq_err.max(1e-10)).log10();
-        eprintln!("SNR: {:.2} dB", snr);
+        eprintln!("SNR: {snr:.2} dB");
     }
 }

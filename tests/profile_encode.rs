@@ -19,7 +19,10 @@ struct Lcg(u64);
 impl Lcg {
     fn next_f32(&mut self) -> f32 {
         // Numerical Recipes LCG; top 24 bits → [-1, 1).
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 40) as f32 / (1u32 << 23) as f32) - 1.0
     }
 }
@@ -42,7 +45,11 @@ fn synth_music(rate: u32, channels: usize, secs: f32) -> Vec<f32> {
         s = (s * beat + rng.next_f32() * 0.02).clamp(-0.98, 0.98) * 0.5;
         for c in 0..channels {
             // Slight stereo decorrelation: right channel gets a phase-shifted mix.
-            let sc = if c == 0 { s } else { s * 0.8 + rng.next_f32() * 0.01 };
+            let sc = if c == 0 {
+                s
+            } else {
+                s * 0.8 + rng.next_f32() * 0.01
+            };
             out[i * channels + c] = sc;
         }
     }
@@ -74,7 +81,10 @@ fn synth_speech(rate: u32, secs: f32) -> Vec<f32> {
             rng.next_f32() * 0.4
         };
         // Two fixed resonators (≈700 Hz, ≈1800 Hz at 16 kHz) as crude formants.
-        let (r, c1) = (0.95f32, (2.0 * std::f32::consts::PI * 700.0 / rate as f32).cos());
+        let (r, c1) = (
+            0.95f32,
+            (2.0 * std::f32::consts::PI * 700.0 / rate as f32).cos(),
+        );
         let ya = exc + 2.0 * r * c1 * y1a - r * r * y2a;
         y2a = y1a;
         y1a = ya;
@@ -129,7 +139,10 @@ fn scenarios(secs: f32) -> Vec<Scenario> {
 fn encode_clip(sc: &Scenario) -> (usize, usize) {
     let mut enc = OpusEncoder::new(sc.rate as i32, sc.channels, sc.app).unwrap();
     enc.bitrate_bps = sc.bitrate;
-    if let Some(c) = std::env::var("RUSTY_OPUS_COMPLEXITY").ok().and_then(|s| s.parse::<i32>().ok()) {
+    if let Some(c) = std::env::var("RUSTY_OPUS_COMPLEXITY")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+    {
         enc.complexity = c.clamp(0, 10);
     }
     let frame = sc.rate as usize / 50; // 20 ms
@@ -146,7 +159,7 @@ fn encode_clip(sc: &Scenario) -> (usize, usize) {
 
 /// Best-of-N ×realtime throughput (run with `profile` OFF).
 #[test]
-#[ignore]
+#[ignore = "throughput measurement; run explicitly"]
 fn encode_throughput() {
     let secs = 30.0f32;
     let passes = 7;
@@ -181,7 +194,7 @@ fn encode_throughput() {
 
 /// Per-stage median-of-N breakdown (run with `profile` ON; read percentages).
 #[test]
-#[ignore]
+#[ignore = "profiling run; run explicitly"]
 fn profile_breakdown() {
     let secs = 10.0f32;
     let passes = 15;
@@ -206,7 +219,10 @@ fn profile_breakdown() {
             .iter()
             .map(|s| s.0)
             .sum();
-        println!("\n=== {} — {:.1} ms total (median of {passes}) ===", sc.name, total);
+        println!(
+            "\n=== {} — {:.1} ms total (median of {passes}) ===",
+            sc.name, total
+        );
         let mut rows: Vec<(usize, f64, u64)> = stages[..rusty_opus::prof::Stage::Total as usize]
             .iter()
             .enumerate()
@@ -232,4 +248,3 @@ fn profile_breakdown() {
         );
     }
 }
-

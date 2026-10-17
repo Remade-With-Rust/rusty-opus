@@ -1,6 +1,5 @@
 use crate::kiss_fft::{KissCpx, KissFftState, opus_fft_impl};
 use std::f32::consts::PI;
-use std::mem::MaybeUninit;
 
 const MAX_N2: usize = 960;
 const MAX_N4: usize = 480;
@@ -23,7 +22,7 @@ impl MdctLookup {
 
             if shift == 0 {
                 kfft.push(KissFftState::new(n4));
-            } else if let Some(base) = kfft.first().unwrap().as_ref() {
+            } else if let Some(Some(base)) = kfft.first() {
                 kfft.push(KissFftState::new_sub(base, n4));
             } else {
                 kfft.push(None);
@@ -72,9 +71,12 @@ impl MdctLookup {
         stride: usize,
     ) {
         let _prof = crate::prof::scope(crate::prof::Stage::CeltMdct);
-        let st = self.kfft[shift]
-            .as_ref()
-            .expect("FFT state not initialized");
+        // Every mode builds an FFT for each shift 0..=max_lm; an unknown shift
+        // (impossible for validated LM) leaves the output untouched, not a panic.
+        let Some(st) = self.kfft.get(shift).and_then(Option::as_ref) else {
+            debug_assert!(false, "MDCT forward: no FFT state for shift {shift}");
+            return;
+        };
         let n = self.n >> shift;
         let n2 = n / 2;
         let n4 = n / 4;
@@ -83,11 +85,13 @@ impl MdctLookup {
         let (trig, _) = self.get_trig(shift);
         let overlap2 = overlap / 2;
 
-        let mut f_buf = [MaybeUninit::<f32>::uninit(); MAX_N2];
-        let mut f2_buf = [MaybeUninit::<KissCpx>::uninit(); MAX_N4];
-
-        let f = unsafe { std::slice::from_raw_parts_mut(f_buf.as_mut_ptr() as *mut f32, n2) };
-        let f2 = unsafe { std::slice::from_raw_parts_mut(f2_buf.as_mut_ptr() as *mut KissCpx, n4) };
+        // Zero-initialised scratch (was MaybeUninit + from_raw_parts_mut: a reference
+        // over uninitialised memory, and n2 <= MAX_N2 was not checked here as it is
+        // in `backward`). The checked slices enforce both bounds.
+        let mut f_buf = [0.0f32; MAX_N2];
+        let mut f2_buf = [KissCpx::default(); MAX_N4];
+        let f = &mut f_buf[..n2];
+        let f2 = &mut f2_buf[..n4];
 
         assert!(input.len() >= n2 + overlap2);
         assert!(window.len() >= overlap);
@@ -162,9 +166,13 @@ impl MdctLookup {
             }
         }
 
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel has no memory precondition, because
+        // it reaches every slice through bounds-checked indexing.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 mdct_pre_rotation_avx(f, f2, trig, &st.bitrev[..n4], n4, scale);
             } else {
                 for i in 0..n4 {
@@ -180,34 +188,34 @@ impl MdctLookup {
                 }
             }
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
-        ))]
-        {
+        #[cfg(target_arch = "aarch64")]
+        if crate::isa::neon() {
             mdct_pre_rotation_neon(f, f2, trig, &st.bitrev[..n4], n4, scale);
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
-        ))]
-        for i in 0..n4 {
-            let re = f[2 * i];
-            let im = f[2 * i + 1];
-            let t0 = trig[i];
-            let t1 = trig[n4 + i];
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        if !crate::isa::neon() {
+            for i in 0..n4 {
+                let re = f[2 * i];
+                let im = f[2 * i + 1];
+                let t0 = trig[i];
+                let t1 = trig[n4 + i];
 
-            let yr = re * t0 - im * t1;
-            let yi = im * t0 + re * t1;
+                let yr = re * t0 - im * t1;
+                let yi = im * t0 + re * t1;
 
-            f2[st.bitrev[i] as usize] = KissCpx::new(yr * scale, yi * scale);
+                f2[st.bitrev[i] as usize] = KissCpx::new(yr * scale, yi * scale);
+            }
         }
 
         opus_fft_impl(st, f2);
 
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel uses only bounds-checked indexing,
+        // so it has no memory precondition.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 mdct_post_rotation_avx(f2, trig, output, n4, n2, stride);
             } else {
                 for i in 0..n4 {
@@ -223,27 +231,23 @@ impl MdctLookup {
                 }
             }
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
-        ))]
-        {
+        #[cfg(target_arch = "aarch64")]
+        if crate::isa::neon() {
             mdct_post_rotation_neon(f2, trig, output, n4, n2, stride);
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
-        ))]
-        for i in 0..n4 {
-            let fp = &f2[i];
-            let t0 = trig[i];
-            let t1 = trig[n4 + i];
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        if !crate::isa::neon() {
+            for i in 0..n4 {
+                let fp = &f2[i];
+                let t0 = trig[i];
+                let t1 = trig[n4 + i];
 
-            let yr = fp.i * t1 - fp.r * t0;
-            let yi = fp.r * t1 + fp.i * t0;
+                let yr = fp.i * t1 - fp.r * t0;
+                let yi = fp.r * t1 + fp.i * t0;
 
-            output[i * 2 * stride] = yr;
-            output[stride * (n2 - 1 - 2 * i)] = yi;
+                output[i * 2 * stride] = yr;
+                output[stride * (n2 - 1 - 2 * i)] = yi;
+            }
         }
     }
 
@@ -275,13 +279,18 @@ impl MdctLookup {
 
         let (trig, _) = self.get_trig(shift);
 
-        let mut f2_buf = [MaybeUninit::<KissCpx>::uninit(); MAX_N4];
+        // Zero-initialised scratch (was MaybeUninit + from_raw_parts_mut over
+        // uninitialised memory); n4 <= MAX_N4 is checked above.
+        let mut f2_buf = [KissCpx::default(); MAX_N4];
+        let f2 = &mut f2_buf[..n4];
 
-        let f2 = unsafe { std::slice::from_raw_parts_mut(f2_buf.as_mut_ptr() as *mut KissCpx, n4) };
-
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel uses only bounds-checked indexing,
+        // so it has no memory precondition.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 mdct_backward_pre_rotation_avx(input, f2, trig, &st.bitrev[..n4], n4, n2, stride);
             } else {
                 for i in 0..n4 {
@@ -298,37 +307,39 @@ impl MdctLookup {
                 }
             }
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
-        ))]
-        {
+        #[cfg(target_arch = "aarch64")]
+        if crate::isa::neon() {
             mdct_backward_pre_rotation_neon(input, f2, trig, &st.bitrev[..n4], n4, n2, stride);
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
-        ))]
-        for i in 0..n4 {
-            let rev = st.bitrev[i] as usize;
-            let x1 = input[2 * i * stride];
-            let x2 = input[stride * (n2 - 1 - 2 * i)];
-            let t0 = trig[i];
-            let t1 = trig[n4 + i];
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        if !crate::isa::neon() {
+            for i in 0..n4 {
+                let rev = st.bitrev[i] as usize;
+                let x1 = input[2 * i * stride];
+                let x2 = input[stride * (n2 - 1 - 2 * i)];
+                let t0 = trig[i];
+                let t1 = trig[n4 + i];
 
-            let yr = x2 * t0 + x1 * t1;
-            let yi = x1 * t0 - x2 * t1;
+                let yr = x2 * t0 + x1 * t1;
+                let yi = x1 * t0 - x2 * t1;
 
-            f2[rev] = KissCpx::new(yi, yr);
+                f2[rev] = KissCpx::new(yi, yr);
+            }
         }
 
         opus_fft_impl(st, f2);
 
-        assert!(output.len() >= overlap2 + n2);
+        // The TDAC kernels (AVX / NEON) also touch `output[..overlap]` and
+        // `window[..overlap]` through raw pointers.
+        assert!(output.len() >= (overlap2 + n2).max(overlap) && window.len() >= overlap);
 
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. The kernel uses only bounds-checked indexing,
+        // so it has no memory precondition.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 mdct_backward_post_rotation_avx(f2, trig, output, n4, n2, overlap2);
             } else {
                 for i in 0..((n4 + 1) >> 1) {
@@ -356,44 +367,51 @@ impl MdctLookup {
                 }
             }
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
-        ))]
-        {
+        #[cfg(target_arch = "aarch64")]
+        if crate::isa::neon() {
             mdct_backward_post_rotation_neon(f2, trig, output, n4, n2, overlap2);
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
-        ))]
-        for i in 0..((n4 + 1) >> 1) {
-            let im0 = f2[i].r;
-            let re0 = f2[i].i;
-            let t0_0 = trig[i];
-            let t1_0 = trig[n4 + i];
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        if !crate::isa::neon() {
+            for i in 0..((n4 + 1) >> 1) {
+                let im0 = f2[i].r;
+                let re0 = f2[i].i;
+                let t0_0 = trig[i];
+                let t1_0 = trig[n4 + i];
 
-            let yr0 = re0 * t0_0 + im0 * t1_0;
-            let yi0 = re0 * t1_0 - im0 * t0_0;
+                let yr0 = re0 * t0_0 + im0 * t1_0;
+                let yi0 = re0 * t1_0 - im0 * t0_0;
 
-            let j = n4 - 1 - i;
-            let im1 = f2[j].r;
-            let re1 = f2[j].i;
-            let t0_1 = trig[j];
-            let t1_1 = trig[n4 + j];
+                let j = n4 - 1 - i;
+                let im1 = f2[j].r;
+                let re1 = f2[j].i;
+                let t0_1 = trig[j];
+                let t1_1 = trig[n4 + j];
 
-            let yr1 = re1 * t0_1 + im1 * t1_1;
-            let yi1 = re1 * t1_1 - im1 * t0_1;
+                let yr1 = re1 * t0_1 + im1 * t1_1;
+                let yi1 = re1 * t1_1 - im1 * t0_1;
 
-            output[overlap2 + 2 * i] = yr0;
-            output[overlap2 + n2 - 1 - 2 * i] = yi0;
-            output[overlap2 + n2 - 2 - 2 * i] = yr1;
-            output[overlap2 + 2 * i + 1] = yi1;
+                output[overlap2 + 2 * i] = yr0;
+                output[overlap2 + n2 - 1 - 2 * i] = yi0;
+                output[overlap2 + n2 - 2 - 2 * i] = yr1;
+                output[overlap2 + 2 * i + 1] = yi1;
+            }
         }
 
+        // SAFETY: the kernel is only called after `crate::isa::avx()` returns
+        // true, which confirms the CPU supports the `avx` feature in its
+        // `#[target_feature]`. Its unchecked accesses are 8-wide loads and
+        // stores at `output[i..i + 8]` and `window[i..i + 8]`, with
+        // `i + 8 <= overlap / 2`:
+        // - `output`: the `assert!(output.len() >= overlap2 + n2)` above
+        //   covers this range.
+        // - `window`: earlier in the same iteration, the kernel makes a
+        //   bounds-checked read of `window[overlap - 1 - i]`, an index
+        //   `>= i + 8`. A window too short for the load would already have
+        //   panicked there.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if crate::isa::avx() {
                 mdct_tdac_avx(output, window, overlap);
             } else {
                 for i in 0..overlap2 {
@@ -407,29 +425,33 @@ impl MdctLookup {
                 }
             }
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
-        ))]
-        {
+        #[cfg(target_arch = "aarch64")]
+        if crate::isa::neon() {
             mdct_tdac_neon(output, window, overlap);
         }
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
-        ))]
-        for i in 0..overlap2 {
-            let x1 = output[overlap - 1 - i];
-            let x2 = output[i];
-            let wp1 = window[i];
-            let wp2 = window[overlap - 1 - i];
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        if !crate::isa::neon() {
+            for i in 0..overlap2 {
+                let x1 = output[overlap - 1 - i];
+                let x2 = output[i];
+                let wp1 = window[i];
+                let wp2 = window[overlap - 1 - i];
 
-            output[i] = x2 * wp2 - x1 * wp1;
-            output[overlap - 1 - i] = x2 * wp1 + x1 * wp2;
+                output[i] = x2 * wp2 - x1 * wp1;
+                output[overlap - 1 - i] = x2 * wp1 + x1 * wp2;
+            }
         }
     }
 }
 
+/// AVX-compiled twin of the forward MDCT pre-rotation (scalar body, built
+/// with AVX codegen).
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all slice accesses are bounds-checked and panic on
+/// inconsistent lengths.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn mdct_pre_rotation_avx(
@@ -453,6 +475,12 @@ unsafe fn mdct_pre_rotation_avx(
     }
 }
 
+/// AVX-compiled twin of the forward MDCT post-rotation.
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all slice accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn mdct_post_rotation_avx(
@@ -476,6 +504,12 @@ unsafe fn mdct_post_rotation_avx(
     }
 }
 
+/// AVX-compiled twin of the inverse MDCT pre-rotation.
+///
+/// # Safety
+///
+/// The CPU must support `avx` (check `crate::isa::avx()`). There are no
+/// memory preconditions: all slice accesses are bounds-checked.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn mdct_backward_pre_rotation_avx(
@@ -501,6 +535,13 @@ unsafe fn mdct_backward_pre_rotation_avx(
     }
 }
 
+/// AVX post-rotation for the inverse MDCT.
+///
+/// # Safety
+///
+/// The CPU must support `avx`. All slice accesses in the body are bounds-checked
+/// or derived from the caller-validated `n4`/`n2`/`overlap2` sizes of
+/// [`MdctLookup::backward`].
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn mdct_backward_post_rotation_avx(
@@ -536,9 +577,28 @@ unsafe fn mdct_backward_post_rotation_avx(
     }
 }
 
+/// AVX time-domain aliasing cancellation over the first `overlap` samples
+/// of `output`.
+///
+/// # Safety
+///
+/// - The CPU must support `avx` (check `crate::isa::avx()`).
+/// - `output.len() >= overlap / 2`. The 8-wide `_mm256_loadu_ps` /
+///   `_mm256_storeu_ps` at `output[i..i + 8]` (`i + 8 <= overlap / 2`) are
+///   unchecked and run before any bounds-checked access to `output` in
+///   their iteration.
+/// - `window[i..i + 8]` is loaded unchecked too, but only after a
+///   bounds-checked read of `window[overlap - 1 - i]` (index `>= i + 8`), so
+///   a short `window` panics rather than being read out of bounds.
+///
+/// Every other access is bounds-checked. No alignment is required (all
+/// loads and stores are unaligned forms).
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
 unsafe fn mdct_tdac_avx(output: &mut [f32], window: &[f32], overlap: usize) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
     let overlap2 = overlap / 2;
@@ -594,6 +654,21 @@ fn mdct_pre_rotation_neon(
 ) {
     use std::arch::aarch64::*;
 
+    // SAFETY: NEON is a baseline feature of every aarch64 target, so the
+    // intrinsics are available; the `crate::isa::neon()` gate in the caller
+    // only exists for ISA capping. The raw-pointer accesses rest on the only
+    // caller, `MdctLookup::forward`, which this private safe fn trusts and
+    // does not re-check:
+    // - `f.len() == n2 >= 2 * n4` (`f` is the checked slice `&mut f_buf[..n2]`).
+    // - `trig` comes from `get_trig(shift)` and has `n2 >= 2 * n4` elements.
+    // - `bitrev` is `&st.bitrev[..n4]` (length checked at the slice).
+    // - `f2.len() == n4` (`f2` is the checked slice `&mut f2_buf[..n4]`).
+    // The vector loop reads `f[2i..2i + 8]`, `trig[i..i + 4]` and
+    // `trig[n4 + i..n4 + i + 4]` with `i + 4 <= n4 & !3`, so every read is
+    // below `2 * n4`. The writes `f2[rev]` (as two `f32`s through the
+    // `#[repr(C)]` `KissCpx` layout) stay below `n4` because `st.bitrev` is
+    // a permutation of `0..n4` (`st.nfft == n4`). The scalar tail uses the
+    // same bounds.
     unsafe {
         let vscale = vdupq_n_f32(scale);
         let f_ptr = f.as_ptr();
@@ -672,6 +747,19 @@ fn mdct_post_rotation_neon(
         return;
     }
 
+    // SAFETY: NEON is baseline on aarch64, so the intrinsics are available.
+    // Here `stride <= 1` (larger strides returned above), so the raw writes
+    // use stride-1 indexing. The only caller, `MdctLookup::forward`,
+    // guarantees the lengths:
+    // - `f2.len() == n4`, i.e. `2 * n4` `f32`s via the `#[repr(C)]`
+    //   `KissCpx` layout.
+    // - `trig.len() == n2 >= 2 * n4`.
+    // - `output.len() >= n2`, from forward's `assert!`.
+    // In the vector loop (`i + 4 <= n4 & !3`), the reads `f2[2i..2i + 8]`
+    // and `trig[n4 + i..n4 + i + 4]` stay below `2 * n4`. The writes go to
+    // `2 * (i + j) <= 2 * n4 - 2` and to `n2 - 1 - 2 * (i + j)`, which lies in
+    // `[n2 - 2 * n4 + 1, n2 - 1]`, so both stay below `n2`. The scalar tail is
+    // bounds-checked.
     unsafe {
         let f2_ptr = f2.as_ptr() as *const f32;
         let trig_ptr = trig.as_ptr();
@@ -745,6 +833,23 @@ fn mdct_backward_pre_rotation_neon(
         return;
     }
 
+    // SAFETY: NEON is baseline on aarch64, so the intrinsics are available.
+    // Here `stride == 1`. The only caller, `MdctLookup::backward`, provides:
+    // - `trig.len() == n2 >= 2 * n4`.
+    // - `bitrev = &st.bitrev[..n4]`, a permutation of `0..n4`, so the writes
+    //   to `f2[rev]` (as two `f32`s, `#[repr(C)]` `KissCpx`) stay below
+    //   `f2.len() == n4`.
+    // - `input.len() >= n2`, from its guard
+    //   `stride * (n2 - 1) < input.len()`.
+    // - x2 loads: `input[n2 - 8 - 2i..n2 - 4 - 2i]` and
+    //   `input[n2 - 4 - 2i..n2 - 2i]`. With `i <= n4_vec - 4` and
+    //   `n2 == 2 * n4 >= 2 * n4_vec`, the lowest index is `>= 0` and the
+    //   highest is `n2 - 1`, inside `input.len() >= n2`. (These used to load
+    //   from `n2 - 7 - 2i` / `n2 - 3 - 2i` and keep the even lanes, which read
+    //   `input[n2]` at `i == 0`: one past the end for the last channel. The odd
+    //   lanes of the shifted loads are the same four values.)
+    // - x1 loads `input[2i..2i + 8]` and trig loads `trig[n4 + i..n4 + i + 4]`
+    //   stay inside the guaranteed ranges.
     unsafe {
         let in_ptr = input.as_ptr();
         let trig_ptr = trig.as_ptr();
@@ -760,11 +865,12 @@ fn mdct_backward_pre_rotation_neon(
             let deint_x1 = vuzpq_f32(f0, f1);
             let x1_v = deint_x1.0;
 
-            let g0 = vld1q_f32(in_ptr.add(n2 - 7 - 2 * i));
-            let g1 = vld1q_f32(in_ptr.add(n2 - 3 - 2 * i));
+            let g0 = vld1q_f32(in_ptr.add(n2 - 8 - 2 * i));
+            let g1 = vld1q_f32(in_ptr.add(n2 - 4 - 2 * i));
             let deint_x2 = vuzpq_f32(g0, g1);
 
-            let x2_raw = deint_x2.0;
+            // Odd lanes: input[n2 - 7 - 2i], [n2 - 5 - 2i], [n2 - 3 - 2i], [n2 - 1 - 2i].
+            let x2_raw = deint_x2.1;
             let x2_v = vrev64q_f32(x2_raw);
             let x2_v = vextq_f32(x2_v, x2_v, 2);
 
@@ -810,6 +916,15 @@ fn mdct_backward_post_rotation_neon(
     n2: usize,
     overlap2: usize,
 ) {
+    // SAFETY: the only caller, `MdctLookup::backward`, runs
+    // `assert!(output.len() >= overlap2 + n2)` before calling, so
+    // `out_base = output + overlap2` is in bounds with `n2` elements after
+    // it. With `i < half = ceil(n4 / 2)` and `n2 >= 2 * n4`:
+    // - The writes at `2i`, `2i + 1`, `n2 - 1 - 2i` and `n2 - 2 - 2i` all
+    //   fall in `[0, n2)`.
+    // - The `trig` reads at `j` and `n4 + j` (`j < n4`) stay below
+    //   `2 * n4 <= trig.len() == n2`.
+    // - `f2` is read with bounds-checked indexing.
     unsafe {
         let trig_ptr = trig.as_ptr();
         let out_base = output.as_mut_ptr().add(overlap2);
@@ -904,6 +1019,18 @@ fn mdct_tdac_neon(output: &mut [f32], window: &[f32], overlap: usize) {
         return;
     }
 
+    // SAFETY: NEON is baseline on aarch64, so the intrinsics are available.
+    // With `n4 = overlap2 & !3` and `i + 4 <= n4`, the raw loads and stores
+    // touch `output`/`window` at `[i, i + 4)` and `[overlap - 4 - i, overlap - i)`,
+    // so they require `output.len() >= overlap` and `window.len() >= overlap`.
+    // These two bounds are still NOT enforced: neither this fn nor its
+    // caller, `MdctLookup::backward`, checks them. `backward` only asserts
+    // `output.len() >= overlap2 + n2`, which implies `>= overlap` only when
+    // `n2 >= overlap - overlap2`, and it never checks `window.len()`. Both
+    // hold for every mode the crate builds (`window` is `mode.window`, length
+    // `overlap`; `n2 >= 120 > 60`), but `backward` is a safe `pub fn`, and on
+    // aarch64 a short `window`/`output` passed to it would be accessed out of
+    // bounds here. (The x86 scalar and AVX paths index-check these accesses.)
     unsafe {
         let out_ptr = output.as_mut_ptr();
         let win_ptr = window.as_ptr();
@@ -982,14 +1109,14 @@ mod mdct_tests {
             stride,
         );
 
-        let max0 = output0.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let max1 = output1.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        eprintln!("sub0 max={} sub1 max={}", max0, max1);
+        let max0 = output0.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let max1 = output1.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        eprintln!("sub0 max={max0} sub1 max={max1}");
         eprintln!("sub0[60..70]={:?}", &output0[60..70]);
         eprintln!("sub1[60..70]={:?}", &output1[60..70]);
 
-        assert!(max0.abs() < 500.0, "sub0 blowup: {}", max0);
-        assert!(max1.abs() < 500.0, "sub1 blowup: {}", max1);
+        assert!(max0.abs() < 500.0, "sub0 blowup: {max0}");
+        assert!(max1.abs() < 500.0, "sub1 blowup: {max1}");
     }
 
     #[test]
@@ -1074,8 +1201,7 @@ mod mdct_tests {
             .fold(0.0f32, f32::max);
         assert!(
             max_diff < 0.5,
-            "stride=1 NEON vs scalar mismatch: max_diff={}",
-            max_diff
+            "stride=1 NEON vs scalar mismatch: max_diff={max_diff}"
         );
     }
 
@@ -1172,8 +1298,71 @@ mod mdct_tests {
             .fold(0.0f32, f32::max);
         assert!(
             max_diff < 0.1,
-            "NEON/HW vs scalar mismatch: max_diff={}",
-            max_diff
+            "NEON/HW vs scalar mismatch: max_diff={max_diff}"
         );
+    }
+}
+
+/// SIMD-vs-scalar oracle for the MDCT (and, through it, every FFT butterfly).
+#[cfg(test)]
+mod isa_oracle {
+    use crate::isa::oracle::{Rng, both, close_slices};
+
+    #[test]
+    fn mdct_forward_backward_match_scalar() {
+        let m = crate::modes::default_mode();
+        let mut r = Rng(0x00c0_ffee_0000_beef);
+        for _ in 0..crate::isa::oracle::iters(200) {
+            let shift = r.below(m.max_lm + 1);
+            let n = m.mdct.n >> shift;
+            let stride = 1 + r.below(8);
+            let input = r.vec(n + m.overlap, 30000.0);
+            let (s, c) = both(|| {
+                let mut out = vec![0.0f32; (n / 2) * stride];
+                m.mdct
+                    .forward(&input, &mut out, m.window, m.overlap, shift, stride);
+                out
+            });
+            close_slices(
+                &s,
+                &c,
+                &format!("mdct.forward shift={shift} stride={stride}"),
+            );
+            let freq = r.vec((n / 2) * stride, 30000.0);
+            let (s, c) = both(|| {
+                let mut out = vec![0.0f32; n / 2 + m.overlap];
+                m.mdct
+                    .backward(&freq, &mut out, m.window, m.overlap, shift, stride);
+                out
+            });
+            close_slices(
+                &s,
+                &c,
+                &format!("mdct.backward shift={shift} stride={stride}"),
+            );
+        }
+    }
+
+    #[test]
+    fn fft_matches_scalar() {
+        use crate::kiss_fft::{KissCpx, KissFftState, opus_fft};
+        let mut r = Rng(0x5eed_5eed_5eed_5eed);
+        for &nfft in &[480usize, 240, 120, 60] {
+            let st = KissFftState::new(nfft).unwrap();
+            for _ in 0..crate::isa::oracle::iters(50) {
+                let fin: Vec<KissCpx> = (0..nfft)
+                    .map(|_| KissCpx {
+                        r: r.f32(1e4),
+                        i: r.f32(1e4),
+                    })
+                    .collect();
+                let (s, c) = both(|| {
+                    let mut out = vec![KissCpx { r: 0.0, i: 0.0 }; nfft];
+                    opus_fft(&st, &fin, &mut out);
+                    out.iter().flat_map(|v| [v.r, v.i]).collect::<Vec<f32>>()
+                });
+                close_slices(&s, &c, &format!("opus_fft nfft={nfft}"));
+            }
+        }
     }
 }

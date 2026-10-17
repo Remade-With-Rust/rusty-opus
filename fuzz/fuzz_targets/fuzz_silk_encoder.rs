@@ -66,7 +66,10 @@ fuzz_target!(|data: &[u8]| {
             0 => (2.0 * std::f32::consts::PI * (i as f32 % 100.0) / 100.0).sin() * 0.5,
             // White noise
             1 => {
-                ((data[(i % (data.len() - 8).max(1)) + 8] as f32 - 128.0) / 128.0).clamp(-1.0, 1.0)
+                // Bytes after the 8 control bytes; none -> silence.
+                let noise = &data[8..];
+                let b = if noise.is_empty() { 128 } else { noise[i % noise.len()] };
+                ((b as f32 - 128.0) / 128.0).clamp(-1.0, 1.0)
             }
             // Impulses
             2 => {

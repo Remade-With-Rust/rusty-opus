@@ -40,10 +40,14 @@ fn run_config(fs: i32, bitrate: i32, complexity: i32, c_ref_hex: &[&str], label:
         let pkt = &out[..n];
         if pkt != c_ref.as_slice() {
             mismatches += 1;
-            let rust_hex: String = pkt.iter().map(|b| format!("{:02x}", b)).collect();
-            println!("[{}] Frame {}: MISMATCH", label, i);
-            println!("  C:    {}", ref_hex);
-            println!("  Rust: {}", rust_hex);
+            let rust_hex: String = pkt.iter().fold(String::new(), |mut s, b| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+            println!("[{label}] Frame {i}: MISMATCH");
+            println!("  C:    {ref_hex}");
+            println!("  Rust: {rust_hex}");
             for j in 0..pkt.len().min(c_ref.len()) {
                 if pkt[j] != c_ref[j] {
                     println!(
@@ -61,7 +65,7 @@ fn run_config(fs: i32, bitrate: i32, complexity: i32, c_ref_hex: &[&str], label:
         c_ref_hex.len() - mismatches,
         c_ref_hex.len()
     );
-    assert_eq!(mismatches, 0, "{}: {} frames mismatched", label, mismatches);
+    assert_eq!(mismatches, 0, "{label}: {mismatches} frames mismatched");
 }
 
 fn hex_decode(s: &str) -> Vec<u8> {

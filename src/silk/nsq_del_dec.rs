@@ -100,7 +100,7 @@ fn silk_nsq_del_dec_scale_states(
         if signal_type == TYPE_VOICED && nsq.rewhite_flag == 0 {
             let ltp_start = nsq.s_ltp_buf_idx as usize - lag - LTP_ORDER / 2;
             let ltp_end = nsq.s_ltp_buf_idx as usize - decision_delay as usize;
-            for v in s_ltp_q15[ltp_start..ltp_end].iter_mut() {
+            for v in &mut s_ltp_q15[ltp_start..ltp_end] {
                 *v = silk_smulww(gain_adj_q16, *v);
             }
         }
@@ -125,6 +125,17 @@ fn silk_nsq_del_dec_scale_states(
     }
 }
 
+/// NEON twin of the LPC short-prediction dot product (4 taps per iteration,
+/// scalar tail).
+///
+/// # Safety
+///
+/// - The CPU must support NEON (`crate::isa::neon()`; baseline on aarch64).
+/// - With `order = predict_lpc_order as usize` and `n4 = order & !3`:
+///   `idx < ps_lpc_q14.len()` and `idx + 1 >= n4`, so the raw 4-lane loads of
+///   `ps_lpc_q14[idx - j - 3 ..= idx - j]` (j = 0, 4, .., n4 - 4) are in bounds.
+/// - `a_q12.len() >= n4`, so the raw 4-lane loads of `a_q12[j .. j + 4]` are in
+///   bounds. (The scalar tail uses checked indexing.)
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -184,10 +195,17 @@ unsafe fn silk_lpc_prediction_neon(
 /// sum exactly. AVX2 has no signed 64-bit shift, so `>>16` is emulated
 /// (logical shift + sign fill). Processes 8 taps/iteration; scalar tail.
 ///
-/// SAFETY: caller guarantees `idx >= predict_lpc_order - 1` (SILK frame sizing,
-/// same precondition the scalar path relies on) so the 8 loads at
-/// `lpc[idx-j-7 ..= idx-j]` are in bounds; AVX2 availability is checked by the
-/// caller via `is_x86_feature_detected!`.
+/// # Safety
+///
+/// - The CPU must support AVX2 (the kernel is compiled with
+///   `#[target_feature(enable = "avx2")]`); callers check `crate::isa::avx2()`
+///   (via `lpc_avx2_enabled()`) or `is_x86_feature_detected!("avx2")`.
+/// - With `order = predict_lpc_order as usize` and `n8 = order & !7`:
+///   `idx < ps_lpc_q14.len()` and `idx + 1 >= n8` (the dispatcher checks the
+///   stronger `idx + 1 >= order`), so the raw 8-lane loads of
+///   `ps_lpc_q14[idx - j - 7 ..= idx - j]` (j = 0, 8, .., n8 - 8) are in bounds.
+/// - `a_q12.len() >= n8`, so the raw 8-lane loads of `a_q12[j .. j + 8]` are in
+///   bounds. (The scalar tail uses checked indexing.)
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn silk_lpc_prediction_avx2(
@@ -236,10 +254,7 @@ unsafe fn silk_lpc_prediction_avx2(
 
     // Sum the 8 i64 lanes; only the low 32 bits matter (== i32 wrapping sum).
     let s = _mm256_add_epi64(acc_e, acc_o); // 4 i64
-    let s2 = _mm_add_epi64(
-        _mm256_castsi256_si128(s),
-        _mm256_extracti128_si256(s, 1),
-    ); // 2 i64
+    let s2 = _mm_add_epi64(_mm256_castsi256_si128(s), _mm256_extracti128_si256(s, 1)); // 2 i64
     let s3 = _mm_add_epi64(s2, _mm_unpackhi_epi64(s2, s2)); // 1 i64 in low lane
     let mut out = silk_rshift(predict_lpc_order, 1).wrapping_add(_mm_cvtsi128_si32(s3));
 
@@ -250,24 +265,14 @@ unsafe fn silk_lpc_prediction_avx2(
     out
 }
 
-/// Cached AVX2 dispatch decision: `is_x86_feature_detected!("avx2")` unless the
-/// `RUSTY_OPUS_NO_AVX2` env var is set (for interleaved A/B against the scalar
+/// AVX2 dispatch decision via `crate::isa` (cached there; `RUSTY_OPUS_ISA` and
+/// `RUSTY_OPUS_NO_AVX2` cap it, for interleaved A/B against the scalar
 /// twin). Cached so the hot path pays no per-call feature-detect/env cost.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn lpc_avx2_enabled() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0); // 0=unknown, 1=on, 2=off
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = is_x86_feature_detected!("avx2")
-                && std::env::var_os("RUSTY_OPUS_NO_AVX2").is_none();
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
-        }
-    }
+    // Detection + the RUSTY_OPUS_ISA / RUSTY_OPUS_NO_AVX2 caps live in crate::isa.
+    crate::isa::avx2()
 }
 
 #[inline(always)]
@@ -290,20 +295,29 @@ fn silk_noise_shape_quantizer_short_prediction(
     a_q12: &[i16],
     predict_lpc_order: i32,
 ) -> i32 {
+    // The SIMD kernels read `ps_lpc_q14[idx + 1 - order..=idx]` and `a_q12[..16]`
+    // through raw pointers; take them only when that whole window is in bounds
+    // (the bit-identical scalar twin below handles anything else).
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let simd_ok =
+        idx + 1 >= predict_lpc_order as usize && idx < ps_lpc_q14.len() && a_q12.len() >= 16;
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: aarch64 always has NEON; bounds are guaranteed by SILK frame sizing.
-    unsafe {
-        return silk_lpc_prediction_neon(ps_lpc_q14, idx, a_q12, predict_lpc_order);
+    if simd_ok && crate::isa::neon() {
+        // SAFETY: NEON confirmed by `isa::neon()`; `simd_ok` checked the kernel's
+        // full read window (`idx + 1 >= order`, `idx < ps_lpc_q14.len()`,
+        // `a_q12.len() >= 16`).
+        return unsafe { silk_lpc_prediction_neon(ps_lpc_q14, idx, a_q12, predict_lpc_order) };
     }
     #[cfg(target_arch = "x86_64")]
     {
         // Runtime-dispatched; scalar twin stays the oracle/fallback. The AVX2 path
         // is cached once (feature-detect + `RUSTY_OPUS_NO_AVX2` A/B override).
-        if lpc_avx2_enabled() && idx + 1 >= predict_lpc_order as usize {
-            // SAFETY: avx2 verified at runtime; idx precondition guarantees the loads.
-            return unsafe {
-                silk_lpc_prediction_avx2(ps_lpc_q14, idx, a_q12, predict_lpc_order)
-            };
+        if simd_ok && lpc_avx2_enabled() {
+            // SAFETY: `lpc_avx2_enabled()` is `crate::isa::avx2()`, matching the
+            // kernel's `avx2` target feature; `simd_ok` checked its full read
+            // window (`idx + 1 >= order`, `idx < ps_lpc_q14.len()`,
+            // `a_q12.len() >= 16`).
+            return unsafe { silk_lpc_prediction_avx2(ps_lpc_q14, idx, a_q12, predict_lpc_order) };
         }
     }
     #[allow(unreachable_code)]
@@ -315,19 +329,20 @@ fn silk_noise_shape_quantizer_short_prediction(
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn nsq_shape_avx2_enabled() -> bool {
+    // crate::isa owns detection + the RUSTY_OPUS_ISA / RUSTY_OPUS_NO_AVX2 caps;
+    // this kernel keeps its own isolated A/B knob (env read once).
     use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0);
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
+    static OPT_OUT: AtomicU8 = AtomicU8::new(0); // 0=unknown, 1=off, 2=on
+    let opted_out = match OPT_OUT.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
         _ => {
-            let on = is_x86_feature_detected!("avx2")
-                && std::env::var_os("RUSTY_OPUS_NO_AVX2").is_none()
-                && std::env::var_os("RUSTY_OPUS_NO_NSQ_AVX2").is_none();
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
+            let out = crate::research_env("RUSTY_OPUS_NO_NSQ_AVX2").is_some();
+            OPT_OUT.store(if out { 2 } else { 1 }, Ordering::Relaxed);
+            out
         }
-    }
+    };
+    crate::isa::avx2() && !opted_out
 }
 
 /// Cross-state warped shaping AR filter over a state-minor SoA buffer
@@ -370,7 +385,15 @@ fn nsq_shape_filter_soa_scalar(
 /// the shaping states are bounded Q14 values, verified by the oracle + unit test).
 /// Micro-benchmarked at ~1.56× the 4-chain scalar.
 ///
-/// SAFETY: AVX2 verified by the caller; `sar`/`n_ar` sized ≥ order/4.
+/// # Safety
+///
+/// The CPU must support AVX2 (the kernel is compiled with
+/// `#[target_feature(enable = "avx2")]`). There are no memory preconditions:
+/// every raw load/store goes through a `&[i32; 4]` / `&mut [i32; 4]` reference
+/// (always 16 valid bytes; unaligned intrinsics), and all slice/array indexing
+/// (`sar[j]`, `ar_shp_q13[j]`, `vsar[j]` with `vsar` sized
+/// `MAX_SHAPE_LPC_ORDER`) is bounds-checked, so a bad `order` panics rather
+/// than reading out of bounds.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn nsq_shape_filter_soa_avx2(
@@ -406,7 +429,11 @@ unsafe fn nsq_shape_filter_soa_avx2(
     let mut tmp2 = smlawb_v(vdiff, vsar[0], wb);
     let mut tmp1 = smlawb_v(vsar[0], _mm256_sub_epi64(vsar[1], tmp2), wb);
     vsar[0] = tmp2;
-    let mut acc = smlawb_v(_mm256_set1_epi64x(base as i64), tmp2, cbv(ar_shp_q13[0] as i32));
+    let mut acc = smlawb_v(
+        _mm256_set1_epi64x(base as i64),
+        tmp2,
+        cbv(ar_shp_q13[0] as i32),
+    );
     let mut j = 2;
     while j < order {
         tmp2 = smlawb_v(vsar[j - 1], _mm256_sub_epi64(vsar[j], tmp1), wb);
@@ -438,7 +465,11 @@ fn nsq_shape_filter_soa(
     #[cfg(target_arch = "x86_64")]
     {
         if nsq_shape_avx2_enabled() {
-            // SAFETY: avx2 checked; sar/n_ar sized ≥ order/4.
+            // SAFETY: `nsq_shape_avx2_enabled()` returns true only if
+            // `crate::isa::avx2()` does, which checks exactly the `avx2` feature
+            // the kernel is compiled with. The kernel has no memory
+            // preconditions: its raw loads/stores go through `&[i32; 4]`
+            // references and all other indexing is bounds-checked.
             unsafe { nsq_shape_filter_soa_avx2(sar, diff, warp, ar_shp_q13, order, base, n_ar) };
             return;
         }
@@ -466,10 +497,10 @@ mod lpc_pred_avx2_tests {
             s
         };
         for order in [10usize, 12, 14, 16] {
-            for _ in 0..50_000 {
+            for _ in 0..crate::isa::oracle::iters(50_000) {
                 // buffer big enough for idx and the order-1 look-back
                 let mut lpc = [0i32; 64];
-                for v in lpc.iter_mut() {
+                for v in &mut lpc {
                     // Q14-ish magnitudes, full sign range.
                     *v = (rng() as i32) >> (rng() as u32 % 12);
                 }
@@ -478,9 +509,11 @@ mod lpc_pred_avx2_tests {
                     *v = (rng() as i16) >> (rng() as u32 % 3);
                 }
                 let idx = 32 + (rng() as usize % 16);
-                let got = unsafe {
-                    silk_lpc_prediction_avx2(&lpc, idx, &a, order as i32)
-                };
+                // SAFETY: the test returns early unless
+                // `is_x86_feature_detected!("avx2")`. `lpc` has 64 elements and
+                // `idx` is in 32..48, so `idx < 64` and `idx + 1 >= 16 >= order`;
+                // `a` has 16 elements >= `order & !7`.
+                let got = unsafe { silk_lpc_prediction_avx2(&lpc, idx, &a, order as i32) };
                 let want = silk_lpc_prediction_scalar(&lpc, idx, &a, order as i32);
                 assert_eq!(got, want, "order={order} idx={idx}");
             }
@@ -504,10 +537,10 @@ mod lpc_pred_avx2_tests {
             s
         };
         for order in [16usize, 24] {
-            for _ in 0..20_000 {
+            for _ in 0..crate::isa::oracle::iters(20_000) {
                 let sh = 6 + (rng() % 20) as u32;
                 let mut sar_a = vec![[0i32; 4]; order];
-                for row in sar_a.iter_mut() {
+                for row in &mut sar_a {
                     for v in row.iter_mut() {
                         *v = (rng() as i32) >> sh;
                     }
@@ -525,8 +558,12 @@ mod lpc_pred_avx2_tests {
                 let mut na = [0i32; 4];
                 let mut nb = [0i32; 4];
                 nsq_shape_filter_soa_scalar(&mut sar_a, &diff, warp, &ar, order, base, &mut na);
+                // SAFETY: the test returns early unless
+                // `is_x86_feature_detected!("avx2")`; the kernel has no memory
+                // preconditions beyond that (`sar_b` and `ar` have `order`
+                // entries, and its indexing is bounds-checked anyway).
                 unsafe {
-                    nsq_shape_filter_soa_avx2(&mut sar_b, &diff, warp, &ar, order, base, &mut nb)
+                    nsq_shape_filter_soa_avx2(&mut sar_b, &diff, warp, &ar, order, base, &mut nb);
                 };
                 assert_eq!(na, nb, "n_ar mismatch order={order} sh={sh}");
                 assert_eq!(sar_a, sar_b, "sar mismatch order={order} sh={sh}");
@@ -963,11 +1000,7 @@ pub fn silk_nsq_del_dec(
         }
     }
 
-    let lsf_interpolation_flag = if ps_indices.nlsf_interp_coef_q2 == 4 {
-        0
-    } else {
-        1
-    };
+    let lsf_interpolation_flag = i32::from(ps_indices.nlsf_interp_coef_q2 != 4);
 
     ps_nsq.s_ltp_shp_buf_idx = ps_common.ltp_mem_length;
     ps_nsq.s_ltp_buf_idx = ps_common.ltp_mem_length;

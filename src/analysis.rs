@@ -41,7 +41,7 @@ pub struct AnalysisInfo {
 
 impl Default for AnalysisInfo {
     fn default() -> Self {
-        AnalysisInfo {
+        Self {
             valid: false,
             tonality: 0.0,
             tonality_slope: 0.0,
@@ -87,7 +87,14 @@ fn sigmoid_approx(x: f32) -> f32 {
     0.5 + 0.5 * tansig_approx(0.5 * x)
 }
 
-fn gemm_accum(out: &mut [f32], weights: &[i8], rows: usize, cols: usize, col_stride: usize, x: &[f32]) {
+fn gemm_accum(
+    out: &mut [f32],
+    weights: &[i8],
+    rows: usize,
+    cols: usize,
+    col_stride: usize,
+    x: &[f32],
+) {
     for i in 0..rows {
         for j in 0..cols {
             out[i] += weights[j * col_stride + i] as f32 * x[j];
@@ -266,7 +273,10 @@ fn downmix_and_resample(
     };
     // downmix all channels (c1=0, c2=-2), scale 1/C.
     let scale = 1.0f32 / channels as f32;
-    let mut tmp = vec![0.0f32; subframe];
+    // run_analysis feeds at most fs/50 samples: <= 960 here at every rate (and
+    // 3 x 320 for the 16 kHz zero-order hold). Stack scratch, not a per-call Vec.
+    let mut tmp_buf = [0.0f32; 960];
+    let tmp = &mut tmp_buf[..subframe];
     for (j, t) in tmp.iter_mut().enumerate() {
         let mut sum = 0.0f32;
         for c in 0..channels {
@@ -275,20 +285,21 @@ fn downmix_and_resample(
         *t = sum * scale;
     }
     match fs {
-        48000 => resampler_down2_hp(s, y, &tmp),
+        48000 => resampler_down2_hp(s, y, tmp),
         24000 => {
-            y[..subframe].copy_from_slice(&tmp);
+            y[..subframe].copy_from_slice(tmp);
             0.0
         }
         16000 => {
             // "Don't do this at home": zero-order-hold 3x then down2.
-            let mut tmp3x = vec![0.0f32; 3 * subframe];
+            let mut tmp3x_buf = [0.0f32; 960];
+            let tmp3x = &mut tmp3x_buf[..3 * subframe];
             for j in 0..subframe {
                 tmp3x[3 * j] = tmp[j];
                 tmp3x[3 * j + 1] = tmp[j];
                 tmp3x[3 * j + 2] = tmp[j];
             }
-            resampler_down2_hp(s, y, &tmp3x)
+            resampler_down2_hp(s, y, tmp3x)
         }
         _ => 0.0,
     }
@@ -331,7 +342,7 @@ pub struct TonalityAnalysisState {
 
 impl TonalityAnalysisState {
     pub fn new(fs: i32) -> Self {
-        TonalityAnalysisState {
+        Self {
             fs,
             angle: [0.0; 240],
             d_angle: [0.0; 240],
@@ -371,7 +382,7 @@ impl TonalityAnalysisState {
 
     pub fn reset(&mut self) {
         let fs = self.fs;
-        *self = TonalityAnalysisState::new(fs);
+        *self = Self::new(fs);
     }
 }
 
@@ -483,8 +494,10 @@ pub fn tonality_get_info(tonal: &mut TonalityAnalysisState, len: usize) -> Analy
             break;
         }
         let pos_vad = tonal.info[vpos as usize].activity_probability;
-        prob_min = ((prob_avg - TRANSITION_PENALTY * (vad_prob - pos_vad)) / prob_count).min(prob_min);
-        prob_max = ((prob_avg + TRANSITION_PENALTY * (vad_prob - pos_vad)) / prob_count).max(prob_max);
+        prob_min =
+            ((prob_avg - TRANSITION_PENALTY * (vad_prob - pos_vad)) / prob_count).min(prob_min);
+        prob_max =
+            ((prob_avg + TRANSITION_PENALTY * (vad_prob - pos_vad)) / prob_count).max(prob_max);
         prob_count += 0.1f32.max(pos_vad);
         prob_avg += 0.1f32.max(pos_vad) * tonal.info[mpos as usize].music_prob;
     }
@@ -500,7 +513,7 @@ pub fn tonality_get_info(tonal: &mut TonalityAnalysisState, len: usize) -> Analy
         let mut pmax = prob_max;
         let mut pos = pos0;
         // Look for min/max in the past.
-        for _ in 0..(tonal.count - 1).min(15).max(0) {
+        for _ in 0..(tonal.count - 1).clamp(0, 15) {
             pos -= 1;
             if pos < 0 {
                 pos = DETECT_SIZE as i32 - 1;
@@ -557,11 +570,12 @@ fn tonality_analysis(
     }
 
     {
+        // Downmix straight into inmem (was: a Vec per call, then a copy in).
         let fill = (len).min(ANALYSIS_BUF_SIZE - tonal.mem_fill);
-        let mut seg = vec![0.0f32; fill.max(1)];
+        let mf = tonal.mem_fill;
         let hp = downmix_and_resample(
             x,
-            &mut seg,
+            &mut tonal.inmem[mf..mf + fill],
             &mut tonal.downmix_state,
             fill,
             offset,
@@ -569,8 +583,6 @@ fn tonality_analysis(
             tonal.fs,
         );
         tonal.hp_ener_accum += hp;
-        let mf = tonal.mem_fill;
-        tonal.inmem[mf..mf + fill].copy_from_slice(&seg[..fill]);
     }
 
     if tonal.mem_fill + len < ANALYSIS_BUF_SIZE {
@@ -587,39 +599,34 @@ fn tonality_analysis(
 
     // is_digital_silence (float build): a THRESHOLD at 1 LSB, not exact zero.
     let silence_thresh = 1.0f32 / (1i64 << lsb_depth) as f32;
-    let is_silence = tonal
-        .inmem
-        .iter()
-        .fold(0.0f32, |m, &v| m.max(v.abs()))
-        <= silence_thresh;
+    let is_silence = tonal.inmem.iter().fold(0.0f32, |m, &v| m.max(v.abs())) <= silence_thresh;
 
-    let mut fft_in = vec![KissCpx::new(0.0, 0.0); N];
-    let mut fft_out = vec![KissCpx::new(0.0, 0.0); N];
+    let mut fft_in = [KissCpx::new(0.0, 0.0); N];
+    let mut fft_out = [KissCpx::new(0.0, 0.0); N];
     let mut tonality = [0.0f32; 240];
     let mut noisiness = [0.0f32; 240];
     for i in 0..N2 {
         let w = ANALYSIS_WINDOW[i];
         fft_in[i] = KissCpx::new(w * tonal.inmem[i], w * tonal.inmem[N2 + i]);
-        fft_in[N - i - 1] = KissCpx::new(
-            w * tonal.inmem[N - i - 1],
-            w * tonal.inmem[N + N2 - i - 1],
-        );
+        fft_in[N - i - 1] =
+            KissCpx::new(w * tonal.inmem[N - i - 1], w * tonal.inmem[N + N2 - i - 1]);
     }
-    tonal.inmem.copy_within(ANALYSIS_BUF_SIZE - 240..ANALYSIS_BUF_SIZE, 0);
+    tonal
+        .inmem
+        .copy_within(ANALYSIS_BUF_SIZE - 240..ANALYSIS_BUF_SIZE, 0);
     let remaining = len - (ANALYSIS_BUF_SIZE - tonal.mem_fill);
     {
-        let mut seg = vec![0.0f32; remaining.max(1)];
+        let mf = tonal.mem_fill;
         let hp = downmix_and_resample(
             x,
-            &mut seg,
+            &mut tonal.inmem[240..240 + remaining],
             &mut tonal.downmix_state,
             remaining,
-            offset + ANALYSIS_BUF_SIZE - tonal.mem_fill,
+            offset + ANALYSIS_BUF_SIZE - mf,
             channels,
             tonal.fs,
         );
         tonal.hp_ener_accum = hp;
-        tonal.inmem[240..240 + remaining].copy_from_slice(&seg[..remaining]);
     }
     tonal.mem_fill = 240 + remaining;
 
@@ -770,7 +777,8 @@ fn tonality_analysis(
             l2 += tonal.e[i][b];
         }
 
-        let mut stationarity = (l1 / (1e-15 + NB_FRAMES as f64 * l2 as f64).sqrt() as f32).min(0.99);
+        let mut stationarity =
+            (l1 / (1e-15 + NB_FRAMES as f64 * l2 as f64).sqrt() as f32).min(0.99);
         stationarity *= stationarity;
         stationarity *= stationarity;
         frame_stationarity += stationarity;
@@ -829,7 +837,8 @@ fn tonality_analysis(
         }
         spec_variability += mindist;
     }
-    spec_variability = ((spec_variability / NB_FRAMES as f32 / NB_TBANDS as f32) as f64).sqrt() as f32;
+    spec_variability =
+        ((spec_variability / NB_FRAMES as f32 / NB_TBANDS as f32) as f64).sqrt() as f32;
 
     let mut bandwidth_mask = 0.0f32;
     let mut bandwidth = 0i32;
@@ -867,7 +876,7 @@ fn tonality_analysis(
             bandwidth = b as i32 + 1;
         }
         is_masked[b] = e
-            < (if tonal.prev_bandwidth >= b as i32 + 1 {
+            < (if tonal.prev_bandwidth > b as i32 {
                 0.01
             } else {
                 0.05
@@ -879,7 +888,11 @@ fn tonality_analysis(
     let (mut hp_e_dbg, mut hp_thresh_dbg) = (0.0f32, 0.0f32);
     // The energy above 12 kHz comes from the resampler's HP branch.
     if tonal.fs == 48000 {
-        let noise_ratio = if tonal.prev_bandwidth == 20 { 10.0 } else { 30.0 };
+        let noise_ratio = if tonal.prev_bandwidth == 20 {
+            10.0
+        } else {
+            30.0
+        };
         let e = hp_ener * (1.0 / (60.0 * 60.0));
         above_max_pitch += e;
         tonal.mean_e[NB_TBANDS] = ((1.0 - alpha_e2) * tonal.mean_e[NB_TBANDS]).max(e);
@@ -890,7 +903,11 @@ fn tonality_analysis(
             bandwidth = 20;
         }
         is_masked[NB_TBANDS] = e
-            < (if tonal.prev_bandwidth == 20 { 0.01 } else { 0.05 }) * bandwidth_mask;
+            < (if tonal.prev_bandwidth == 20 {
+                0.01
+            } else {
+                0.05
+            }) * bandwidth_mask;
     }
     let bw_before_mask_dbg = bandwidth;
     tonal.info[info_idx].max_pitch_ratio = if above_max_pitch > below_max_pitch {
@@ -911,7 +928,10 @@ fn tonality_analysis(
     // Great Gate D1 probe: which branch pins `bandwidth` at 20 (=FB)? The band
     // loop can only reach NB_TBANDS(18), so FB must come from the hp_ener test
     // or this warm-up forcing. Enabled by RUSTY_OPUS_BW_DEBUG=1.
-    if std::env::var_os("RUSTY_OPUS_BW_DEBUG").is_some() && tonal.count < 40 {
+    static BW_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if tonal.count < 40
+        && *BW_DEBUG.get_or_init(|| crate::research_env("RUSTY_OPUS_BW_DEBUG").is_some())
+    {
         eprintln!(
             "BWDBG count={:3} bw_raw={:2} bw_premask={:2} bw_final={:2} \
              hp_ener={:.6e} hp_e={:.6e} thresh={:.6e} masked_hp={} noise_floor={:.3e}",

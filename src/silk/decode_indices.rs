@@ -38,7 +38,7 @@ pub fn silk_decode_indices(
         ps_dec.indices.gains_indices[i] = ps_range_dec.decode_icdf(&SILK_DELTA_GAIN_ICDF, 8) as i8;
     }
 
-    let nlsf_cb = ps_dec.ps_nlsf_cb.unwrap();
+    let nlsf_cb = ps_dec.ps_nlsf_cb;
     ps_dec.indices.nlsf_indices[0] = ps_range_dec.decode_icdf(
         &nlsf_cb.cb1_icdf
             [((ps_dec.indices.signal_type >> 1) as usize) * (nlsf_cb.n_vectors as usize)..],
@@ -117,12 +117,12 @@ pub fn silk_decode_indices(
 /// MS->LR reconstruction.
 pub fn silk_stereo_decode_pred(ps_range_dec: &mut RangeCoder) -> [i32; 2] {
     let mut ix = [[0i32; 3]; 2];
-    let n = ps_range_dec.decode_icdf(&SILK_STEREO_PRED_JOINT_ICDF, 8) as i32;
+    let n = ps_range_dec.decode_icdf(&SILK_STEREO_PRED_JOINT_ICDF, 8);
     ix[0][2] = n / 5;
     ix[1][2] = n - 5 * ix[0][2];
     for j in 0..2 {
-        ix[j][0] = ps_range_dec.decode_icdf(&SILK_UNIFORM3_ICDF, 8) as i32;
-        ix[j][1] = ps_range_dec.decode_icdf(&SILK_UNIFORM5_ICDF, 8) as i32;
+        ix[j][0] = ps_range_dec.decode_icdf(&SILK_UNIFORM3_ICDF, 8);
+        ix[j][1] = ps_range_dec.decode_icdf(&SILK_UNIFORM5_ICDF, 8);
     }
     // Dequantize
     let mut pred_q13 = [0i32; 2];
@@ -166,14 +166,12 @@ pub fn silk_stereo_ms_to_lr(
     s_side[0] = x2[frame_length];
     s_side[1] = x2[frame_length + 1];
 
-    let interp_len = (STEREO_INTERP_LEN_MS as i32 * fs_khz) as usize;
-    let denom_q16 = silk_div32_16(1 << 16, STEREO_INTERP_LEN_MS as i32 * fs_khz);
+    let interp_len = (STEREO_INTERP_LEN_MS * fs_khz) as usize;
+    let denom_q16 = silk_div32_16(1 << 16, STEREO_INTERP_LEN_MS * fs_khz);
     let mut pred0_q13 = pred_prev_q13[0];
     let mut pred1_q13 = pred_prev_q13[1];
-    let delta0_q13 =
-        silk_rshift_round(silk_smulbb(pred_q13[0] - pred_prev_q13[0], denom_q16), 16);
-    let delta1_q13 =
-        silk_rshift_round(silk_smulbb(pred_q13[1] - pred_prev_q13[1], denom_q16), 16);
+    let delta0_q13 = silk_rshift_round(silk_smulbb(pred_q13[0] - pred_prev_q13[0], denom_q16), 16);
+    let delta1_q13 = silk_rshift_round(silk_smulbb(pred_q13[1] - pred_prev_q13[1], denom_q16), 16);
 
     for n in 0..frame_length {
         if n < interp_len {

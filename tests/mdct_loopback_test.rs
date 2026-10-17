@@ -32,14 +32,14 @@ fn test_mdct_loopback() {
         let expected = input[i];
         let actual = output[i];
         if i < overlap + 5 {
-            println!("Index {}: expected={}, actual={}", i, expected, actual);
+            println!("Index {i}: expected={expected}, actual={actual}");
         }
         sig_nrg += expected * expected;
         err_nrg += (expected - actual) * (expected - actual);
     }
 
     let snr = 10.0 * (sig_nrg / err_nrg).log10();
-    println!("MDCT Loopback SNR: {:.2} dB", snr);
+    println!("MDCT Loopback SNR: {snr:.2} dB");
     // TODO: Current implementation quality needs improvement
-    assert!(snr > 0.0, "SNR too low: {:.2} dB", snr);
+    assert!(snr > 0.0, "SNR too low: {snr:.2} dB");
 }

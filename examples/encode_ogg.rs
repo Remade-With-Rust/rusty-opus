@@ -19,7 +19,10 @@ use rusty_opus::{Application, OpusEncoder};
 
 fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
     let mut buf = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+    std::fs::File::open(path)
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
     let rate = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
     let channels = u16::from_le_bytes([buf[22], buf[23]]);
     let mut i = 12;
@@ -99,8 +102,8 @@ fn write_page(
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let (rate, channels, pcm) = read_wav(&a[1]);
-    let bitrate: i32 = a.get(3).map(|s| s.parse().unwrap()).unwrap_or(32_000);
-    let app = match a.get(4).map(|s| s.as_str()) {
+    let bitrate: i32 = a.get(3).map_or(32_000, |s| s.parse().unwrap());
+    let app = match a.get(4).map(std::string::String::as_str) {
         Some("voip") => Application::Voip,
         _ => Application::Audio,
     };
@@ -113,7 +116,7 @@ fn main() {
     enc.bitrate_bps = bitrate;
     // 5th arg "cbr" exercises the constant-bitrate path, which the silence
     // brick treats differently (no coder shrink — the packet length is fixed).
-    if a.get(5).map(|s| s == "cbr").unwrap_or(false) {
+    if a.get(5).is_some_and(|s| s == "cbr") {
         enc.use_cbr = true;
     }
 
@@ -150,10 +153,20 @@ fn main() {
         total += n;
         granule += (frame as u64) * 48000 / rate as u64;
         let last = i + 1 == nframes;
-        write_page(&mut out, &buf[..n], granule, serial, seq, if last { 0x04 } else { 0x00 });
+        write_page(
+            &mut out,
+            &buf[..n],
+            granule,
+            serial,
+            seq,
+            if last { 0x04 } else { 0x00 },
+        );
         seq += 1;
     }
-    std::fs::File::create(&a[2]).unwrap().write_all(&out).unwrap();
+    std::fs::File::create(&a[2])
+        .unwrap()
+        .write_all(&out)
+        .unwrap();
     eprintln!(
         "wrote {} ({} packets, {} payload bytes, {:.1} kbps)",
         a[2],

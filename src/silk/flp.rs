@@ -7,7 +7,7 @@
 //! (NSQ) that actually produces the excitation is fixed-point in *both* builds.
 //!
 //! This module ports the float analysis. The output is written into the same
-//! Q-format [`SilkEncoderControl`] and [`SideInfoIndices`] the fixed path
+//! Q-format [`SilkEncoderControl`] and `SideInfoIndices` the fixed path
 //! fills, so the rest of `enc_api` (bitrate loop, NSQ, entropy coding) runs
 //! unchanged. The float→Q conversion at the NSQ boundary mirrors
 //! `silk_NSQ_wrapper_FLP` in `wrappers_FLP.c`.
@@ -71,11 +71,6 @@ fn silk_sigmoid(x: f32) -> f32 {
     (1.0 / (1.0 + (-x as f64).exp())) as f32
 }
 
-/// Row-major matrix element (C `matrix_ptr`/`matrix_c_ptr`).
-#[inline]
-fn mtx(base: &[f32], row: usize, col: usize, n: usize) -> f32 {
-    base[row * n + col]
-}
 #[inline]
 fn mtx_mut(base: &mut [f32], row: usize, col: usize, n: usize) -> &mut f32 {
     &mut base[row * n + col]
@@ -191,7 +186,13 @@ fn apply_sine_window(px_win: &mut [f32], px: &[f32], win_type: i32, length: usiz
     }
 }
 
-fn warped_autocorrelation(corr: &mut [f32], input: &[f32], warping: f32, length: usize, order: usize) {
+fn warped_autocorrelation(
+    corr: &mut [f32],
+    input: &[f32],
+    warping: f32,
+    length: usize,
+    order: usize,
+) {
     let mut state = [0.0f64; MAX_SHAPE_LPC_ORDER + 1];
     let mut c = [0.0f64; MAX_SHAPE_LPC_ORDER + 1];
     let w = warping as f64;
@@ -247,7 +248,13 @@ fn insertion_sort_decreasing(a: &mut [f32], idx: &mut [i32], l: usize, k: usize)
 
 /// LPC residual: `r_LPC[ix] = s[ix] - sum_j s[ix-1-j]*PredCoef[j]`, first `order`
 /// samples zeroed. `s` is indexed so that `s[0..length]` is the analysis window.
-fn lpc_analysis_filter(r_lpc: &mut [f32], pred_coef: &[f32], s: &[f32], length: usize, order: usize) {
+fn lpc_analysis_filter(
+    r_lpc: &mut [f32],
+    pred_coef: &[f32],
+    s: &[f32],
+    length: usize,
+    order: usize,
+) {
     for ix in order..length {
         let mut pred = 0.0f32;
         for j in 0..order {
@@ -266,7 +273,8 @@ fn corr_matrix(x: &[f32], l: usize, order: usize, xx: &mut [f32]) {
     let mut e = energy(&x[p1..], l);
     *mtx_mut(xx, 0, 0, order) = e as f32;
     for j in 1..order {
-        e += (x[p1 - j] as f64) * (x[p1 - j] as f64) - (x[p1 + l - j] as f64) * (x[p1 + l - j] as f64);
+        e += (x[p1 - j] as f64) * (x[p1 - j] as f64)
+            - (x[p1 + l - j] as f64) * (x[p1 + l - j] as f64);
         *mtx_mut(xx, j, j, order) = e as f32;
     }
     // ptr2 = &x[order-2]
@@ -296,7 +304,14 @@ fn corr_vector(x: &[f32], t: &[f32], l: usize, order: usize, xt: &mut [f32]) {
 // Burg LPC (burg_modified_FLP.c).
 // ---------------------------------------------------------------------------
 
-fn burg_modified(a: &mut [f32], x: &[f32], min_inv_gain: f32, subfr_length: usize, nb_subfr: usize, d: usize) -> f32 {
+fn burg_modified(
+    a: &mut [f32],
+    x: &[f32],
+    min_inv_gain: f32,
+    subfr_length: usize,
+    nb_subfr: usize,
+    d: usize,
+) -> f32 {
     let mut c_first_row = [0.0f64; SILK_MAX_ORDER_LPC];
     let mut c_last_row = [0.0f64; SILK_MAX_ORDER_LPC];
     let mut caf = [0.0f64; SILK_MAX_ORDER_LPC + 1];
@@ -435,7 +450,7 @@ struct EncCtrlFlp {
 
 impl Default for EncCtrlFlp {
     fn default() -> Self {
-        EncCtrlFlp {
+        Self {
             gains: [0.0; MAX_NB_SUBFR],
             pred_coef: [[0.0; MAX_LPC_ORDER]; 2],
             ltp_coef: [0.0; LTP_ORDER * MAX_NB_SUBFR],
@@ -463,7 +478,12 @@ impl Default for EncCtrlFlp {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn find_pitch_lags(ps_enc: &mut SilkEncoderState, ctrl: &mut EncCtrlFlp, res: &mut [f32], x_buf: &[f32]) {
+fn find_pitch_lags(
+    ps_enc: &mut SilkEncoderState,
+    ctrl: &mut EncCtrlFlp,
+    res: &mut [f32],
+    x_buf: &[f32],
+) {
     let cmn = &ps_enc.s_cmn;
     let fs_khz = cmn.fs_khz as usize;
     let la_pitch = cmn.la_pitch as usize;
@@ -586,7 +606,12 @@ fn pitch_analysis_core(
             frame_16_fix[i] = float2short(frame[i]);
         }
         filt_state[..2].fill(0);
-        silk_resampler_down2(&mut filt_state[..2], &mut frame_8_fix, &frame_16_fix[..frame_length], frame_length as i32);
+        silk_resampler_down2(
+            &mut filt_state[..2],
+            &mut frame_8_fix,
+            &frame_16_fix[..frame_length],
+            frame_length as i32,
+        );
         for i in 0..frame_length_8khz {
             frame_8khz[i] = frame_8_fix[i] as f32;
         }
@@ -596,7 +621,12 @@ fn pitch_analysis_core(
             frame_12_fix[i] = float2short(frame[i]);
         }
         filt_state[..6].fill(0);
-        silk_resampler_down2_3(&mut filt_state[..6], &mut frame_8_fix, &frame_12_fix[..frame_length], frame_length as i32);
+        silk_resampler_down2_3(
+            &mut filt_state[..6],
+            &mut frame_8_fix,
+            &frame_12_fix[..frame_length],
+            frame_length as i32,
+        );
         for i in 0..frame_length_8khz {
             frame_8khz[i] = frame_8_fix[i] as f32;
         }
@@ -607,7 +637,12 @@ fn pitch_analysis_core(
     }
 
     filt_state[..2].fill(0);
-    silk_resampler_down2(&mut filt_state[..2], &mut frame_4_fix, &frame_8_fix[..frame_length_8khz], frame_length_8khz as i32);
+    silk_resampler_down2(
+        &mut filt_state[..2],
+        &mut frame_4_fix,
+        &frame_8_fix[..frame_length_8khz],
+        frame_length_8khz as i32,
+    );
     for i in 0..frame_length_4khz {
         frame_4khz[i] = frame_4_fix[i] as f32;
     }
@@ -701,7 +736,7 @@ fn pitch_analysis_core(
     }
 
     // Stage 2: 8 kHz.
-    for row in c.iter_mut() {
+    for row in &mut c {
         row.fill(0.0);
     }
     // target base pointer into either frame (8 kHz) or original frame (8 kHz Fs).
@@ -709,7 +744,11 @@ fn pitch_analysis_core(
     let t_base = PE_LTP_MEM_LENGTH_MS * 8;
     for k in 0..nb_subfr {
         let toff = t_base + k * sf_length_8khz;
-        let tgt: &[f32] = if use_orig { &frame[toff..] } else { &frame_8khz[toff..] };
+        let tgt: &[f32] = if use_orig {
+            &frame[toff..]
+        } else {
+            &frame_8khz[toff..]
+        };
         let energy_tmp = energy(tgt, sf_length_8khz) + 1.0;
         for j in 0..length_d_comp {
             let d = d_comp[j] as usize;
@@ -733,17 +772,16 @@ fn pitch_analysis_core(
     let mut cbimax = 0usize;
     let mut lag: i32 = -1;
 
-    let prev_lag_log2;
-    if prev_lag > 0 {
+    let prev_lag_log2 = if prev_lag > 0 {
         if fs_khz == 12 {
             prev_lag = (prev_lag << 1) / 3;
         } else if fs_khz == 16 {
             prev_lag >>= 1;
         }
-        prev_lag_log2 = silk_log2(prev_lag as f64);
+        silk_log2(prev_lag as f64)
     } else {
-        prev_lag_log2 = 0.0;
-    }
+        0.0
+    };
 
     let (cbk_size, nb_cbk_search): (usize, usize);
     let stage2_ext;
@@ -837,8 +875,22 @@ fn pitch_analysis_core(
             vec![[[0.0f32; PE_NB_STAGE3_LAGS]; PE_NB_CBKS_STAGE3_MAX]; PE_MAX_NB_SUBFR];
         let mut energies_st3 =
             vec![[[0.0f32; PE_NB_STAGE3_LAGS]; PE_NB_CBKS_STAGE3_MAX]; PE_MAX_NB_SUBFR];
-        calc_corr_st3(&mut cross_corr_st3, frame, start_lag, sf_length, nb_subfr, complexity);
-        calc_energy_st3(&mut energies_st3, frame, start_lag, sf_length, nb_subfr, complexity);
+        calc_corr_st3(
+            &mut cross_corr_st3,
+            frame,
+            start_lag,
+            sf_length,
+            nb_subfr,
+            complexity,
+        );
+        calc_energy_st3(
+            &mut energies_st3,
+            frame,
+            start_lag,
+            sf_length,
+            nb_subfr,
+            complexity,
+        );
 
         let contour_bias = PE_FLATCONTOUR_BIAS / lag as f32;
         let toff = PE_LTP_MEM_LENGTH_MS * fs_khz as usize;
@@ -871,7 +923,8 @@ fn pitch_analysis_core(
             } else {
                 SILK_CB_LAGS_STAGE3_10_MS[k][cbimax] as i32
             };
-            pitch_out[k] = (lag_new + cbval).clamp(min_lag as i32, (PE_MAX_LAG_MS * fs_khz as usize) as i32);
+            pitch_out[k] =
+                (lag_new + cbval).clamp(min_lag as i32, (PE_MAX_LAG_MS * fs_khz as usize) as i32);
         }
         let _ = cbk_size3;
         *lag_index = (lag - min_lag as i32) as i16;
@@ -1040,7 +1093,8 @@ fn warped_true2monic_coefs(coefs: &mut [f32], lambda: f32, limit: f32, order: us
         for c in coefs.iter_mut().take(order) {
             *c *= gain;
         }
-        let chirp = 0.99 - (0.8 + 0.1 * iter as f32) * (maxabs - limit) / (maxabs * (ind as f32 + 1.0));
+        let chirp =
+            0.99 - (0.8 + 0.1 * iter as f32) * (maxabs - limit) / (maxabs * (ind as f32 + 1.0));
         bwexpander(coefs, order, chirp);
         for i in (1..order).rev() {
             coefs[i - 1] -= lambda * coefs[i];
@@ -1066,7 +1120,8 @@ fn limit_coefs(coefs: &mut [f32], limit: f32, order: usize) {
         if maxabs <= limit {
             return;
         }
-        let chirp = 0.99 - (0.8 + 0.1 * iter as f32) * (maxabs - limit) / (maxabs * (ind as f32 + 1.0));
+        let chirp =
+            0.99 - (0.8 + 0.1 * iter as f32) * (maxabs - limit) / (maxabs * (ind as f32 + 1.0));
         bwexpander(coefs, order, chirp);
     }
 }
@@ -1097,14 +1152,14 @@ fn noise_shape_analysis(
     let signal_type = cmn.indices.signal_type as i32;
 
     let mut snr_adj_db = snr_db_q7 as f32 * (1.0 / 128.0);
-    ctrl.input_quality = 0.5
-        * (input_quality_bands_q15[0] + input_quality_bands_q15[1]) as f32
-        * (1.0 / 32768.0);
+    ctrl.input_quality =
+        0.5 * (input_quality_bands_q15[0] + input_quality_bands_q15[1]) as f32 * (1.0 / 32768.0);
     ctrl.coding_quality = silk_sigmoid(0.25 * (snr_adj_db - 20.0));
 
     if use_cbr == 0 {
         let b = 1.0 - speech_activity_q8 as f32 * (1.0 / 256.0);
-        snr_adj_db -= BG_SNR_DECR_dB * ctrl.coding_quality * (0.5 + 0.5 * ctrl.input_quality) * b * b;
+        snr_adj_db -=
+            BG_SNR_DECR_dB * ctrl.coding_quality * (0.5 + 0.5 * ctrl.input_quality) * b * b;
     }
     if signal_type == TYPE_VOICED {
         snr_adj_db += HARM_SNR_INCR_dB * ps_enc.flp_ltp_corr;
@@ -1127,12 +1182,9 @@ fn noise_shape_analysis(
             }
             log_energy_prev = log_energy;
         }
-        ps_enc.s_cmn.indices.quant_offset_type =
-            if energy_variation > ENERGY_VARIATION_THRESHOLD_QNT_OFFSET * (n_segs - 1) as f32 {
-                0
-            } else {
-                1
-            };
+        ps_enc.s_cmn.indices.quant_offset_type = i8::from(
+            energy_variation <= ENERGY_VARIATION_THRESHOLD_QNT_OFFSET * (n_segs - 1) as f32,
+        );
     }
 
     let strength0 = FIND_PITCH_WHITE_NOISE_FRACTION * ctrl.pred_gain;
@@ -1150,15 +1202,32 @@ fn noise_shape_analysis(
         let slope_part = (shape_win_length - flat_part) / 2;
         apply_sine_window(&mut x_windowed, &x_buf[xp..], 1, slope_part);
         let mut shift = slope_part;
-        x_windowed[shift..shift + flat_part].copy_from_slice(&x_buf[xp + shift..xp + shift + flat_part]);
+        x_windowed[shift..shift + flat_part]
+            .copy_from_slice(&x_buf[xp + shift..xp + shift + flat_part]);
         shift += flat_part;
-        apply_sine_window(&mut x_windowed[shift..], &x_buf[xp + shift..], 2, slope_part);
+        apply_sine_window(
+            &mut x_windowed[shift..],
+            &x_buf[xp + shift..],
+            2,
+            slope_part,
+        );
         xp += subfr_length;
 
         if warping_q16 > 0 {
-            warped_autocorrelation(&mut auto_corr, &x_windowed, warping, shape_win_length, shaping_lpc_order);
+            warped_autocorrelation(
+                &mut auto_corr,
+                &x_windowed,
+                warping,
+                shape_win_length,
+                shaping_lpc_order,
+            );
         } else {
-            autocorrelation(&mut auto_corr, &x_windowed, shape_win_length, shaping_lpc_order + 1);
+            autocorrelation(
+                &mut auto_corr,
+                &x_windowed,
+                shape_win_length,
+                shaping_lpc_order + 1,
+            );
         }
         auto_corr[0] += auto_corr[0] * SHAPE_WHITE_NOISE_FRACTION + 1.0;
         let nrg = schur(&mut rc, &auto_corr, shaping_lpc_order);
@@ -1184,17 +1253,19 @@ fn noise_shape_analysis(
     }
 
     let mut strength = LOW_FREQ_SHAPING
-        * (1.0 + LOW_QUALITY_LOW_FREQ_SHAPING_DECR * (input_quality_bands_q15[0] as f32 * (1.0 / 32768.0) - 1.0));
+        * (1.0
+            + LOW_QUALITY_LOW_FREQ_SHAPING_DECR
+                * (input_quality_bands_q15[0] as f32 * (1.0 / 32768.0) - 1.0));
     strength *= speech_activity_q8 as f32 * (1.0 / 256.0);
-    let tilt;
-    if signal_type == TYPE_VOICED {
+
+    let tilt = if signal_type == TYPE_VOICED {
         for k in 0..nb_subfr {
             let b = 0.2 / fs_khz as f32 + 3.0 / ctrl.pitch_l[k] as f32;
             ctrl.lf_ma_shp[k] = -1.0 + b;
             ctrl.lf_ar_shp[k] = 1.0 - b - b * strength;
         }
-        tilt = -HP_NOISE_COEF
-            - (1.0 - HP_NOISE_COEF) * HARM_HP_NOISE_COEF * speech_activity_q8 as f32 * (1.0 / 256.0);
+        -HP_NOISE_COEF
+            - (1.0 - HP_NOISE_COEF) * HARM_HP_NOISE_COEF * speech_activity_q8 as f32 * (1.0 / 256.0)
     } else {
         let b = 1.3 / fs_khz as f32;
         ctrl.lf_ma_shp[0] = -1.0 + b;
@@ -1203,18 +1274,18 @@ fn noise_shape_analysis(
             ctrl.lf_ma_shp[k] = ctrl.lf_ma_shp[0];
             ctrl.lf_ar_shp[k] = ctrl.lf_ar_shp[0];
         }
-        tilt = -HP_NOISE_COEF;
-    }
+        -HP_NOISE_COEF
+    };
 
-    let harm_shape_gain;
-    if USE_HARM_SHAPING != 0 && signal_type == TYPE_VOICED {
+    let harm_shape_gain = if USE_HARM_SHAPING != 0 && signal_type == TYPE_VOICED {
         let mut h = HARMONIC_SHAPING;
-        h += HIGH_RATE_OR_LOW_QUALITY_HARMONIC_SHAPING * (1.0 - (1.0 - ctrl.coding_quality) * ctrl.input_quality);
+        h += HIGH_RATE_OR_LOW_QUALITY_HARMONIC_SHAPING
+            * (1.0 - (1.0 - ctrl.coding_quality) * ctrl.input_quality);
         h *= ps_enc.flp_ltp_corr.sqrt();
-        harm_shape_gain = h;
+        h
     } else {
-        harm_shape_gain = 0.0;
-    }
+        0.0
+    };
 
     for k in 0..nb_subfr {
         ps_enc.s_shape.flp_harm_shape_gain_smth +=
@@ -1229,17 +1300,31 @@ fn noise_shape_analysis(
 // find_LTP_FLP + find_LPC_FLP + residual_energy_FLP + find_pred_coefs_FLP.
 // ---------------------------------------------------------------------------
 
-fn find_ltp(xx: &mut [f32], x_x: &mut [f32], r: &[f32], r_base: usize, lag: &[i32], subfr_length: usize, nb_subfr: usize) {
+fn find_ltp(
+    xx: &mut [f32],
+    x_x: &mut [f32],
+    r: &[f32],
+    r_base: usize,
+    lag: &[i32],
+    subfr_length: usize,
+    nb_subfr: usize,
+) {
     let mut r_ptr = r_base;
     let mut xx_off = 0usize;
     let mut x_x_off = 0usize;
     for k in 0..nb_subfr {
         let lag_ptr = r_ptr - (lag[k] as usize + LTP_ORDER / 2);
         corr_matrix(&r[lag_ptr..], subfr_length, LTP_ORDER, &mut xx[xx_off..]);
-        corr_vector(&r[lag_ptr..], &r[r_ptr..], subfr_length, LTP_ORDER, &mut x_x[x_x_off..]);
+        corr_vector(
+            &r[lag_ptr..],
+            &r[r_ptr..],
+            subfr_length,
+            LTP_ORDER,
+            &mut x_x[x_x_off..],
+        );
         let xx_energy = energy(&r[r_ptr..], subfr_length + LTP_ORDER) as f32;
-        let temp = 1.0
-            / xx_energy.max(LTP_CORR_INV_MAX * 0.5 * (xx[xx_off] + xx[xx_off + 24]) + 1.0);
+        let temp =
+            1.0 / xx_energy.max(LTP_CORR_INV_MAX * 0.5 * (xx[xx_off] + xx[xx_off + 24]) + 1.0);
         scale_vector(&mut xx[xx_off..], temp, LTP_ORDER * LTP_ORDER);
         scale_vector(&mut x_x[x_x_off..], temp, LTP_ORDER);
         r_ptr += subfr_length;
@@ -1390,7 +1475,15 @@ fn find_pred_coefs(
     if signal_type == TYPE_VOICED {
         let mut xx_ltp = [0.0f32; MAX_NB_SUBFR * LTP_ORDER * LTP_ORDER];
         let mut x_x_ltp = [0.0f32; MAX_NB_SUBFR * LTP_ORDER];
-        find_ltp(&mut xx_ltp, &mut x_x_ltp, res, res_frame, &ctrl.pitch_l, subfr_length, nb_subfr);
+        find_ltp(
+            &mut xx_ltp,
+            &mut x_x_ltp,
+            res,
+            res_frame,
+            &ctrl.pitch_l,
+            subfr_length,
+            nb_subfr,
+        );
 
         // quant_LTP_gains_FLP: float XX/xX -> Q17, fixed quant, back to float Q14.
         let mut xx_q17 = [0i32; MAX_NB_SUBFR * LTP_ORDER * LTP_ORDER];
@@ -1431,8 +1524,9 @@ fn find_pred_coefs(
         } else {
             ps_enc.s_cmn.indices.ltp_scale_index = 0;
         }
-        ctrl.ltp_scale =
-            SILK_LTP_SCALES_TABLE_Q14[ps_enc.s_cmn.indices.ltp_scale_index as usize] as f32 / 16384.0;
+        ctrl.ltp_scale = SILK_LTP_SCALES_TABLE_Q14[ps_enc.s_cmn.indices.ltp_scale_index as usize]
+            as f32
+            / 16384.0;
 
         // LTP_analysis_filter_FLP: x - order.
         ltp_analysis_filter(
@@ -1450,7 +1544,12 @@ fn find_pred_coefs(
         let mut xp = x_frame_idx - order;
         let mut pre = 0usize;
         for i in 0..nb_subfr {
-            scale_copy_vector(&mut lpc_in_pre[pre..], &x_buf[xp..], inv_gains[i], subfr_length + order);
+            scale_copy_vector(
+                &mut lpc_in_pre[pre..],
+                &x_buf[xp..],
+                inv_gains[i],
+                subfr_length + order,
+            );
             pre += subfr_length + order;
             xp += subfr_length;
         }
@@ -1479,7 +1578,15 @@ fn find_pred_coefs(
         }
     }
 
-    residual_energy(&mut ctrl.res_nrg, &lpc_in_pre, &ctrl.pred_coef, &ctrl.gains, subfr_length, nb_subfr, order);
+    residual_energy(
+        &mut ctrl.res_nrg,
+        &lpc_in_pre,
+        &ctrl.pred_coef,
+        &ctrl.gains,
+        subfr_length,
+        nb_subfr,
+        order,
+    );
     ps_enc.s_cmn.prev_nlsf_q15 = nlsf_q15;
 }
 
@@ -1595,7 +1702,15 @@ pub fn silk_encode_frame_flp_analysis(
 
     find_pitch_lags(ps_enc, &mut ctrl, &mut res, &x_buf);
     noise_shape_analysis(ps_enc, &mut ctrl, &res[x_frame_idx..], &x_buf, x_frame_idx);
-    find_pred_coefs(ps_enc, &mut ctrl, &res, x_frame_idx, &x_buf, x_frame_idx, cond_coding);
+    find_pred_coefs(
+        ps_enc,
+        &mut ctrl,
+        &res,
+        x_frame_idx,
+        &x_buf,
+        x_frame_idx,
+        cond_coding,
+    );
     process_gains(ps_enc, &mut ctrl, cond_coding);
 
     // ---- float control -> fixed SilkEncoderControl (NSQ boundary) ----

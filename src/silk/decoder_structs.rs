@@ -68,7 +68,9 @@ pub struct SilkDecoderState {
     pub vad_flags: [i32; MAX_FRAMES_PER_PACKET],
     pub lbrr_flag: i32,
     pub lbrr_flags: [i32; MAX_FRAMES_PER_PACKET],
-    pub ps_nlsf_cb: Option<&'static NLSFCodebook>,
+    /// Always valid: set per internal rate by `silk_decoder_set_fs`, and
+    /// narrowband until then (no uninitialised state to unwrap).
+    pub ps_nlsf_cb: &'static NLSFCodebook,
     pub indices: SideInfoIndices,
     pub s_cng: SilkCNGState,
     pub loss_cnt: i32,
@@ -103,7 +105,7 @@ impl Default for SilkDecoderState {
             vad_flags: [0; MAX_FRAMES_PER_PACKET],
             lbrr_flag: 0,
             lbrr_flags: [0; MAX_FRAMES_PER_PACKET],
-            ps_nlsf_cb: None,
+            ps_nlsf_cb: &crate::silk::tables_nlsf::SILK_NLSF_CB_NB_MB,
             indices: SideInfoIndices::default(),
             s_cng: SilkCNGState::default(),
             loss_cnt: 0,

@@ -29,8 +29,8 @@ fn test_stereo_basic() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    assert!(n >= 3, "Packet too short: {}", n);
-    println!("Stereo packet: {} bytes", n);
+    assert!(n >= 3, "Packet too short: {n}");
+    println!("Stereo packet: {n} bytes");
 
     // Decode
     let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -72,10 +72,10 @@ fn test_stereo_bitrate_range() {
         let mut output = vec![0u8; 1500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .unwrap_or_else(|_| panic!("Encode at {}bps failed", bitrate));
+            .unwrap_or_else(|_| panic!("Encode at {bitrate}bps failed"));
 
-        assert!(n >= 3, "Stereo packet at {}bps too short: {}", bitrate, n);
-        println!("Stereo at {}bps: {} bytes", bitrate, n);
+        assert!(n >= 3, "Stereo packet at {bitrate}bps too short: {n}");
+        println!("Stereo at {bitrate}bps: {n} bytes");
     }
 
     println!("✅ Stereo bitrate range test passed");
@@ -104,8 +104,8 @@ fn test_stereo_silk_only() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    assert!(n >= 3, "Stereo SILK packet too short: {}", n);
-    println!("Stereo SILK packet: {} bytes", n);
+    assert!(n >= 3, "Stereo SILK packet too short: {n}");
+    println!("Stereo SILK packet: {n} bytes");
 
     // Check TOC byte has stereo bit set
     let toc = output[0];
@@ -142,8 +142,8 @@ fn test_silk_stereo_roundtrip() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    assert!(n >= 3, "Stereo SILK packet too short: {}", n);
-    println!("Encoded stereo SILK: {} bytes", n);
+    assert!(n >= 3, "Stereo SILK packet too short: {n}");
+    println!("Encoded stereo SILK: {n} bytes");
 
     // Decode
     let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -153,7 +153,7 @@ fn test_silk_stereo_roundtrip() {
         .expect("Decode failed");
 
     assert_eq!(samples, frame_size);
-    println!("Decoded {} samples", samples);
+    println!("Decoded {samples} samples");
 
     // Verify output has energy (decode produced some audio)
     let mut left_energy = 0.0f32;
@@ -166,10 +166,7 @@ fn test_silk_stereo_roundtrip() {
     assert!(left_energy > 0.0, "Left channel should have energy");
     assert!(right_energy > 0.0, "Right channel should have energy");
 
-    println!(
-        "Left energy: {:.2}, Right energy: {:.2}",
-        left_energy, right_energy
-    );
+    println!("Left energy: {left_energy:.2}, Right energy: {right_energy:.2}");
     println!("✅ SILK stereo round-trip test passed");
 }
 
@@ -194,15 +191,13 @@ fn test_silk_stereo_sample_rates() {
         let mut output = vec![0u8; 500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .unwrap_or_else(|_| panic!("Encode at {}Hz failed", sample_rate));
+            .unwrap_or_else(|_| panic!("Encode at {sample_rate}Hz failed"));
 
         assert!(
             n >= 3,
-            "Stereo SILK at {}Hz packet too short: {}",
-            sample_rate,
-            n
+            "Stereo SILK at {sample_rate}Hz packet too short: {n}"
         );
-        println!("Stereo SILK at {}Hz: {} bytes", sample_rate, n);
+        println!("Stereo SILK at {sample_rate}Hz: {n} bytes");
 
         // Decode and verify
         let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -241,7 +236,7 @@ fn test_silk_stereo_channel_separation() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    println!("Channel separation test: {} bytes", n);
+    println!("Channel separation test: {n} bytes");
 
     // Decode
     let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -264,7 +259,7 @@ fn test_silk_stereo_channel_separation() {
     assert!(left_avg > 0.001, "Left channel should have some energy");
     assert!(right_avg > 0.001, "Right channel should have some energy");
 
-    println!("Left avg: {:.4}, Right avg: {:.4}", left_avg, right_avg);
+    println!("Left avg: {left_avg:.4}, Right avg: {right_avg:.4}");
     println!("✅ SILK stereo channel separation test passed");
 }
 
@@ -304,7 +299,7 @@ fn test_silk_stereo_multiframe() {
         let mut frame_output = vec![0u8; 400];
         let n = encoder
             .encode(frame_input, frame_size, &mut frame_output)
-            .unwrap_or_else(|_| panic!("Encode frame {} failed", frame));
+            .unwrap_or_else(|_| panic!("Encode frame {frame} failed"));
         encoded_frames.push(frame_output[..n].to_vec());
     }
 
@@ -315,7 +310,7 @@ fn test_silk_stereo_multiframe() {
         offset += frame_data.len();
     }
 
-    println!("Multi-frame stereo: {} total bytes", offset);
+    println!("Multi-frame stereo: {offset} total bytes");
     assert!(offset > 10, "Should produce significant output");
 
     // Decode all frames
@@ -330,7 +325,7 @@ fn test_silk_stereo_multiframe() {
         decoded_offset += samples;
     }
 
-    println!("Decoded {} total frames", num_frames);
+    println!("Decoded {num_frames} total frames");
     println!("✅ SILK stereo multi-frame test passed");
 }
 
@@ -359,7 +354,7 @@ fn test_silk_stereo_phase_inverted() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    println!("Phase-inverted stereo: {} bytes", n);
+    println!("Phase-inverted stereo: {n} bytes");
 
     // Decode
     let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -379,10 +374,7 @@ fn test_silk_stereo_phase_inverted() {
     assert!(left_energy > 0.0, "Left channel should have energy");
     assert!(right_energy > 0.0, "Right channel should have energy");
 
-    println!(
-        "Left energy: {:.2}, Right energy: {:.2}",
-        left_energy, right_energy
-    );
+    println!("Left energy: {left_energy:.2}, Right energy: {right_energy:.2}");
     println!("✅ SILK stereo phase-inverted test passed");
 }
 
@@ -410,8 +402,8 @@ fn test_stereo_narrowband() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    assert!(n >= 3, "Stereo narrowband packet too short: {}", n);
-    println!("Stereo narrowband: {} bytes", n);
+    assert!(n >= 3, "Stereo narrowband packet too short: {n}");
+    println!("Stereo narrowband: {n} bytes");
 
     // Decode
     let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -456,7 +448,7 @@ fn test_silk_stereo_speech() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    println!("Speech-like stereo: {} bytes", n);
+    println!("Speech-like stereo: {n} bytes");
 
     // Decode
     let mut decoder = OpusDecoder::new(sample_rate, channels).unwrap();
@@ -476,10 +468,7 @@ fn test_silk_stereo_speech() {
     assert!(left_energy > 0.0, "Left channel should have energy");
     assert!(right_energy > 0.0, "Right channel should have energy");
 
-    println!(
-        "Left energy: {:.2}, Right energy: {:.2}",
-        left_energy, right_energy
-    );
+    println!("Left energy: {left_energy:.2}, Right energy: {right_energy:.2}");
     println!("✅ SILK stereo speech test passed");
 }
 
@@ -506,8 +495,8 @@ fn test_stereo_celt_only() {
         .encode(&input, frame_size, &mut output)
         .expect("Encode failed");
 
-    assert!(n >= 3, "CELT stereo packet too short: {}", n);
-    println!("CELT stereo packet: {} bytes", n);
+    assert!(n >= 3, "CELT stereo packet too short: {n}");
+    println!("CELT stereo packet: {n} bytes");
 
     println!("✅ CELT stereo test passed");
 }

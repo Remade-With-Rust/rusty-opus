@@ -1,0 +1,137 @@
+# Scheduled deep checks (use-protection-please H-23, H-24, H-25, H-27, H-29, H-40).
+# Weekly, and on demand. Failures open an issue via the default GitHub
+# notification for failed scheduled runs.
+name: Scheduled hardening
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY: nightly-2026-09-09
+
+jobs:
+  advisories:
+    # Fresh RustSec database every week, independent of code changes (H-40).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-deny@0.19.9,cargo-audit@0.22.2
+      - run: cargo audit --deny warnings
+      - run: cargo deny --locked check advisories
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install $NIGHTLY --profile minimal --component miri,rust-src
+      - name: Miri (scalar rung, then native SIMD rung) on the unit-test suite
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: |
+          RUSTY_OPUS_ISA=scalar cargo +$NIGHTLY miri test --locked --lib
+          cargo +$NIGHTLY miri test --locked --lib
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install $NIGHTLY --profile minimal --component rust-src
+      - name: AddressSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+        run: cargo +$NIGHTLY test --locked --release -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+
+  careful:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install $NIGHTLY --profile minimal --component rust-src
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-careful@0.4.10
+      - run: cargo +$NIGHTLY careful test --locked --lib --tests
+
+  fuzz:
+    # Coverage-guided fuzzing of every target for 10 minutes each, seeded with
+    # the committed corpora; any crash fails the run and uploads the input (H-27).
+    # The per-input timeout is generous because the sweep targets (every TOC x
+    # every rate/layout per input) take several seconds per input by design.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_decoder
+          - fuzz_packet_parsing
+          - fuzz_silk_decoder
+          - fuzz_celt_decoder_boundary
+          - fuzz_multi_frame
+          - fuzz_roundtrip
+          - fuzz_encoder
+          - fuzz_encoder_boundary
+          - fuzz_hybrid_mode
+          - fuzz_overflow
+          - fuzz_celt_encoder
+          - fuzz_silk_encoder
+          - fuzz_celt_large_frame
+          - fuzz_multistream_decoder
+          - fuzz_repacketizer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install $NIGHTLY --profile minimal
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: fuzz ${{ matrix.target }} (600 s)
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/${{ matrix.target }}
+          cargo +$NIGHTLY fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} seeds/${{ matrix.target }} \
+            -- -max_total_time=600 -rss_limit_mb=2048 -timeout=60
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+
+  differential:
+    # Differential conformance against libopus built from source (H-29): every
+    # API rate x channel layout, decoded by both, plus libopus' range check of
+    # rusty-opus encoder output.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build libopus v1.5.2 (opus_demo)
+        run: |
+          git clone --depth 1 --branch v1.5.2 https://github.com/xiph/opus.git /tmp/opus
+          cmake -S /tmp/opus -B /tmp/opus/build -DOPUS_BUILD_PROGRAMS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/opus/build -j4
+      - name: Build rusty-opus examples
+        run: cargo build --locked --release --example encode_bit --example decode_bit
+      - name: Corpus + Python deps
+        run: |
+          python3 -m pip install --quiet numpy==2.3.3 scipy==1.16.2
+          python3 tools/gen_gate_corpus.py
+      - name: Decoder conformance sweep vs libopus
+        env:
+          OPUS_DEMO: /tmp/opus/build/opus_demo
+        run: python3 tools/coverage_decoder.py --jobs 4
+      - name: Encoder matrix (quick) vs libopus
+        env:
+          OPUS_DEMO: /tmp/opus/build/opus_demo
+        run: |
+          python3 tools/coverage_matrix.py --quick --jobs 4
+          python3 tools/coverage_report.py
+      - name: In-band FEC streams vs libopus (range-checked)
+        env:
+          OPUS_DEMO: /tmp/opus/build/opus_demo
+        run: python3 tools/coverage_fec.py --jobs 4

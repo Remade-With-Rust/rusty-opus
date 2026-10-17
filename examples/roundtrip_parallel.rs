@@ -6,15 +6,22 @@
 
 use std::io::{Read, Write};
 
-use rusty_opus::parallel::{encode_parallel, encode_serial, ParallelConfig};
+use rusty_opus::parallel::{ParallelConfig, encode_parallel, encode_serial};
 use rusty_opus::{Application, OpusDecoder};
 
 fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
     let mut buf = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+    std::fs::File::open(path)
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
     let rate = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
     let channels = u16::from_le_bytes([buf[22], buf[23]]);
-    assert_eq!(u16::from_le_bytes([buf[34], buf[35]]), 16, "16-bit PCM only");
+    assert_eq!(
+        u16::from_le_bytes([buf[34], buf[35]]),
+        16,
+        "16-bit PCM only"
+    );
     let mut i = 12;
     let (mut off, mut len) = (0usize, 0usize);
     while i + 8 <= buf.len() {
@@ -40,13 +47,15 @@ fn write_wav(path: &str, rate: u32, channels: u16, s: &[f32]) {
     }
     let mut f = std::fs::File::create(path).unwrap();
     f.write_all(b"RIFF").unwrap();
-    f.write_all(&(36 + data.len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&(36 + data.len() as u32).to_le_bytes())
+        .unwrap();
     f.write_all(b"WAVEfmt ").unwrap();
     f.write_all(&16u32.to_le_bytes()).unwrap();
     f.write_all(&1u16.to_le_bytes()).unwrap();
     f.write_all(&channels.to_le_bytes()).unwrap();
     f.write_all(&rate.to_le_bytes()).unwrap();
-    f.write_all(&(rate * channels as u32 * 2).to_le_bytes()).unwrap();
+    f.write_all(&(rate * channels as u32 * 2).to_le_bytes())
+        .unwrap();
     f.write_all(&(channels * 2).to_le_bytes()).unwrap();
     f.write_all(&16u16.to_le_bytes()).unwrap();
     f.write_all(b"data").unwrap();
@@ -58,7 +67,7 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let (inp, outp) = (&a[1], &a[2]);
     let bitrate: i32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(64_000);
-    let app = match a.get(4).map(|s| s.as_str()) {
+    let app = match a.get(4).map(std::string::String::as_str) {
         Some("voip") => Application::Voip,
         _ => Application::Audio,
     };
@@ -90,7 +99,7 @@ fn main() {
         decoded.extend_from_slice(&dbuf[..n * ch]);
     }
     write_wav(outp, rate, channels, &decoded);
-    let bytes: usize = pkts.iter().map(|p| p.len()).sum();
+    let bytes: usize = pkts.iter().map(std::vec::Vec::len).sum();
     let secs = pkts.len() as f64 * frame as f64 / rate as f64;
     eprintln!(
         "{} encode: {} pkts, {:.1} kbps, warmup={}",

@@ -6,6 +6,10 @@
 // — the format the official `opus_compare` expects.
 //
 // Usage: cargo run --release --example decode_bit -- <rate> <channels> <in.bit> <out.pcm>
+//
+// LOSSFILE=<file>: one integer per packet (1 = lost), as `opus_demo -lossfile`.
+// Lost packets are concealed exactly as opus_demo schedules it: deferred to the
+// next received packet, each concealed at the last packet's duration.
 use rusty_opus::OpusDecoder;
 use std::env;
 use std::fs::File;
@@ -70,7 +74,10 @@ fn main() {
     let channels: usize = args[2].parse().unwrap();
 
     let mut data = Vec::new();
-    File::open(&args[3]).unwrap().read_to_end(&mut data).unwrap();
+    File::open(&args[3])
+        .unwrap()
+        .read_to_end(&mut data)
+        .unwrap();
     let mut out = std::io::BufWriter::new(File::create(&args[4]).unwrap());
 
     let mut dec = OpusDecoder::new(rate, channels).unwrap();
@@ -82,6 +89,23 @@ fn main() {
     let check_range = env::var("RANGECHK").is_ok();
     let mut range_mismatch = 0u32;
     let mut first_mismatch_pkt = 0u32;
+    let mut loss: Vec<i32> = env::var("LOSSFILE")
+        .ok()
+        .map(|f| {
+            std::fs::read_to_string(f)
+                .unwrap()
+                .split_whitespace()
+                .map(|t| t.parse().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default();
+    loss.reverse();
+    let (mut lost_count, mut last_dur) = (0usize, 0usize);
+    let to_i16 = |x: f32| {
+        // Match libopus FLOAT2INT16 exactly: scale, clamp, then round
+        // half-to-even (lrintf), not half-away-from-zero.
+        ((x * 32768.0).clamp(-32768.0, 32767.0)).round_ties_even() as i16
+    };
     rusty_opus::prof::reset();
     while pos + 8 <= data.len() {
         let len = be32(&data[pos..pos + 4]) as usize;
@@ -93,6 +117,19 @@ fn main() {
         let payload = &data[pos..pos + len];
         pos += len;
         pkt += 1;
+        if loss.pop().unwrap_or(0) != 0 {
+            lost_count += 1;
+            continue;
+        }
+        for _ in 0..lost_count {
+            if let Ok(n) = dec.decode(&[], last_dur, &mut pcm) {
+                for &x in pcm.iter().take(n * channels) {
+                    out.write_all(&to_i16(x).to_le_bytes()).unwrap();
+                }
+                samples += n;
+            }
+        }
+        lost_count = 0;
         let pch = if payload[0] & 0x04 != 0 { 2 } else { 1 };
         ch_hist[pch] += 1;
 
@@ -116,13 +153,10 @@ fn main() {
                     }
                 }
                 for &x in pcm.iter().take(n * channels) {
-                    // Match libopus FLOAT2INT16 exactly: scale, clamp, then
-                    // round half-to-even (lrintf), not half-away-from-zero.
-                    let scaled = (x * 32768.0).clamp(-32768.0, 32767.0);
-                    let s = scaled.round_ties_even() as i16;
-                    out.write_all(&s.to_le_bytes()).unwrap();
+                    out.write_all(&to_i16(x).to_le_bytes()).unwrap();
                 }
                 samples += n;
+                last_dur = n;
             }
             Err(e) => {
                 errors += 1;

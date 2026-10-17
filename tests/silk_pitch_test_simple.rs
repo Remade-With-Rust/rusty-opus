@@ -78,7 +78,7 @@ fn test_pitch_analysis_unvoiced() {
         nb_subfr,
     );
 
-    println!("Unvoiced: voicing={} (1=unvoiced)", voicing);
+    println!("Unvoiced: voicing={voicing} (1=unvoiced)");
 }
 
 #[test]

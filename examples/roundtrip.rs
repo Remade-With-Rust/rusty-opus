@@ -12,7 +12,10 @@ use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 
 fn read_wav(path: &str) -> (u32, u16, Vec<f32>) {
     let mut buf = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+    std::fs::File::open(path)
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
     // Minimal RIFF/WAVE parse: find "fmt " and "data".
     let rate = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
     let channels = u16::from_le_bytes([buf[22], buf[23]]);
@@ -46,13 +49,15 @@ fn write_wav(path: &str, rate: u32, channels: u16, samples: &[f32]) {
     }
     let mut f = std::fs::File::create(path).unwrap();
     f.write_all(b"RIFF").unwrap();
-    f.write_all(&(36 + data.len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&(36 + data.len() as u32).to_le_bytes())
+        .unwrap();
     f.write_all(b"WAVEfmt ").unwrap();
     f.write_all(&16u32.to_le_bytes()).unwrap();
     f.write_all(&1u16.to_le_bytes()).unwrap();
     f.write_all(&channels.to_le_bytes()).unwrap();
     f.write_all(&rate.to_le_bytes()).unwrap();
-    f.write_all(&(rate * channels as u32 * 2).to_le_bytes()).unwrap();
+    f.write_all(&(rate * channels as u32 * 2).to_le_bytes())
+        .unwrap();
     f.write_all(&(channels * 2).to_le_bytes()).unwrap();
     f.write_all(&16u16.to_le_bytes()).unwrap();
     f.write_all(b"data").unwrap();
@@ -64,8 +69,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let inp = &args[1];
     let outp = &args[2];
-    let bitrate: i32 = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(64_000);
-    let app = match args.get(4).map(|s| s.as_str()) {
+    let bitrate: i32 = args.get(3).map_or(64_000, |s| s.parse().unwrap());
+    let app = match args.get(4).map(std::string::String::as_str) {
         Some("voip") => Application::Voip,
         _ => Application::Audio,
     };
@@ -111,7 +116,11 @@ fn main() {
         rate,
         ch,
         bitrate / 1000,
-        if matches!(app, Application::Voip) { "voip" } else { "audio" },
+        if matches!(app, Application::Voip) {
+            "voip"
+        } else {
+            "audio"
+        },
     );
 }
 
