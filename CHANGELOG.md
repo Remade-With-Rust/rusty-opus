@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.0.1...v1.0.2) - 2026-10-17
+
+### Other
+
+- bump rusty_alloc-api to =2.2.6 ([#15](https://github.com/Remade-With-Rust/rusty-opus/pull/15))
+- 58,493 active installs
+
 ## 1.0.1 — 2026-10-08
 
 Allocator update; no API change (`cargo semver-checks` against crates.io: no semver update required).
