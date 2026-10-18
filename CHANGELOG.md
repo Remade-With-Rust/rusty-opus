@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.3](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.0.2...v1.0.3) - 2026-10-18
+
+### Other
+
+- 63,546 active installs
+
 ## [1.0.2](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.0.1...v1.0.2) - 2026-10-17
 
 ### Other
