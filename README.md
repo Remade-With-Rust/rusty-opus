@@ -1,4 +1,4 @@
-### In The Wild with 63,546 Active Installs (6 hour Issue response, 72 hour Issue closure)
+### In The Wild with 68,462 Active Installs (6 hour Issue response, 72 hour Issue closure)
 
 FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
 
