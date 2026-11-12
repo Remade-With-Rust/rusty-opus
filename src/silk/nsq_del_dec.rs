@@ -873,8 +873,12 @@ pub fn silk_noise_shape_quantizer_del_dec(
                 // The rings and scalars travel as one constant-length copy.
                 max_state.t = min_state.t;
                 // s_ar2 lives in the SoA buffer during the loop — swap its column.
-                for j in 0..shp_ord {
-                    sar_soa[j][rd_max_ind] = sar_soa[j][rd_min_ind];
+                // Both indices are < n_states <= 4 == the row width; the mask
+                // cannot change them, it lets the compiler see they are in range
+                // (two guard branches per tap otherwise).
+                let (dst, src) = (rd_max_ind & 3, rd_min_ind & 3);
+                for row in &mut sar_soa[..shp_ord] {
+                    row[dst] = row[src];
                 }
             }
 
