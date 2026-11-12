@@ -233,12 +233,10 @@ unsafe fn silk_lpc_prediction_avx2(
     // truncating to i32 once at the end equals the scalar's i32 wrapping sum.
     let mut acc_e = _mm256_setzero_si256();
     let mut acc_o = _mm256_setzero_si256();
-    // Arithmetic >>16 of packed i64 (0<16<32): logical shift + sign fill.
-    let asr16 = |x: __m256i| -> __m256i {
-        let sign = _mm256_cmpgt_epi64(_mm256_setzero_si256(), x); // -1 where x<0
-        let fill = _mm256_slli_epi64(sign, 64 - 16);
-        _mm256_or_si256(_mm256_srli_epi64(x, 16), fill)
-    };
+    // `>> 16` of each i64 product, as a LOGICAL shift: only the low 32 bits of
+    // the lane sum survive (`_mm_cvtsi128_si32` below), and those do not depend
+    // on result bits 48..63, the only bits an arithmetic shift would change.
+    let asr16 = |x: __m256i| -> __m256i { _mm256_srli_epi64(x, 16) };
 
     let mut j = 0usize;
     let main = order & !7; // multiple of 8
