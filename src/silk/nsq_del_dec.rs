@@ -850,7 +850,16 @@ pub fn silk_noise_shape_quantizer_del_dec(
                     let (left, right) = ps_del_dec.split_at_mut(rd_min_ind);
                     (&right[0], &mut left[rd_max_ind])
                 };
-                max_state.s_lpc_q14[idx..].copy_from_slice(&min_state.s_lpc_q14[idx..]);
+                // Only a fixed 16-cell window of the LPC history is live here:
+                // the next predictions read cells [idx + 1, idx + 15] (sample
+                // i' reads [i', i' + 15]), and every cell from idx + 16 up is
+                // written by each state for itself (the update loop below)
+                // before it is read - by a later prediction or by the
+                // end-of-subframe tail copy. A constant-length window is two
+                // vector moves; the old `[idx..]` tail was a runtime-length
+                // libc memcpy on 65% of samples.
+                max_state.s_lpc_q14[idx..idx + NSQ_LPC_BUF_LENGTH]
+                    .copy_from_slice(&min_state.s_lpc_q14[idx..idx + NSQ_LPC_BUF_LENGTH]);
                 max_state.rand_state = min_state.rand_state;
                 max_state.q_q10 = min_state.q_q10;
                 max_state.xq_q14 = min_state.xq_q14;
