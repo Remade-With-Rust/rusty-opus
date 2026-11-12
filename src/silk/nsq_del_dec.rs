@@ -4,15 +4,16 @@ use crate::silk::sigproc_fix::*;
 use crate::silk::structs::*;
 use crate::silk::tables::*;
 
+/// Everything a delayed-decision state swap copies whole: the five
+/// DECISION_DELAY rings and the scalars. Grouped so the swap is ONE
+/// constant-length copy instead of a separate libc memcpy per ring.
 #[derive(Copy, Clone)]
-pub struct NSQDelDecStruct {
-    pub s_lpc_q14: [i32; MAX_SUB_FRAME_LENGTH + NSQ_LPC_BUF_LENGTH],
+pub struct NSQDelDecTail {
     pub rand_state: [i32; DECISION_DELAY],
     pub q_q10: [i32; DECISION_DELAY],
     pub xq_q14: [i32; DECISION_DELAY],
     pub pred_q15: [i32; DECISION_DELAY],
     pub shape_q14: [i32; DECISION_DELAY],
-    pub s_ar2_q14: [i32; MAX_SHAPE_LPC_ORDER],
     pub lf_ar_q14: i32,
     pub diff_q14: i32,
     pub seed: i32,
@@ -20,21 +21,30 @@ pub struct NSQDelDecStruct {
     pub rd_q10: i32,
 }
 
+#[derive(Copy, Clone)]
+pub struct NSQDelDecStruct {
+    pub s_lpc_q14: [i32; MAX_SUB_FRAME_LENGTH + NSQ_LPC_BUF_LENGTH],
+    pub s_ar2_q14: [i32; MAX_SHAPE_LPC_ORDER],
+    pub t: NSQDelDecTail,
+}
+
 impl Default for NSQDelDecStruct {
     fn default() -> Self {
         Self {
             s_lpc_q14: [0; MAX_SUB_FRAME_LENGTH + NSQ_LPC_BUF_LENGTH],
-            rand_state: [0; DECISION_DELAY],
-            q_q10: [0; DECISION_DELAY],
-            xq_q14: [0; DECISION_DELAY],
-            pred_q15: [0; DECISION_DELAY],
-            shape_q14: [0; DECISION_DELAY],
             s_ar2_q14: [0; MAX_SHAPE_LPC_ORDER],
-            lf_ar_q14: 0,
-            diff_q14: 0,
-            seed: 0,
-            seed_init: 0,
-            rd_q10: 0,
+            t: NSQDelDecTail {
+                rand_state: [0; DECISION_DELAY],
+                q_q10: [0; DECISION_DELAY],
+                xq_q14: [0; DECISION_DELAY],
+                pred_q15: [0; DECISION_DELAY],
+                shape_q14: [0; DECISION_DELAY],
+                lf_ar_q14: 0,
+                diff_q14: 0,
+                seed: 0,
+                seed_init: 0,
+                rd_q10: 0,
+            },
         }
     }
 }
@@ -108,8 +118,8 @@ fn silk_nsq_del_dec_scale_states(
         let n_states = (n_states_delayed_decision as usize).min(NSQ_MAX_STATES_OPERATING);
         for k in 0..n_states {
             let ps_dd = &mut ps_del_dec[k];
-            ps_dd.lf_ar_q14 = silk_smulww(gain_adj_q16, ps_dd.lf_ar_q14);
-            ps_dd.diff_q14 = silk_smulww(gain_adj_q16, ps_dd.diff_q14);
+            ps_dd.t.lf_ar_q14 = silk_smulww(gain_adj_q16, ps_dd.t.lf_ar_q14);
+            ps_dd.t.diff_q14 = silk_smulww(gain_adj_q16, ps_dd.t.diff_q14);
             for i in 0..NSQ_LPC_BUF_LENGTH {
                 ps_dd.s_lpc_q14[i] = silk_smulww(gain_adj_q16, ps_dd.s_lpc_q14[i]);
             }
@@ -117,8 +127,8 @@ fn silk_nsq_del_dec_scale_states(
                 ps_dd.s_ar2_q14[i] = silk_smulww(gain_adj_q16, ps_dd.s_ar2_q14[i]);
             }
             for i in 0..DECISION_DELAY {
-                ps_dd.pred_q15[i] = silk_smulww(gain_adj_q16, ps_dd.pred_q15[i]);
-                ps_dd.shape_q14[i] = silk_smulww(gain_adj_q16, ps_dd.shape_q14[i]);
+                ps_dd.t.pred_q15[i] = silk_smulww(gain_adj_q16, ps_dd.t.pred_q15[i]);
+                ps_dd.t.shape_q14[i] = silk_smulww(gain_adj_q16, ps_dd.t.shape_q14[i]);
             }
         }
         nsq.prev_gain_q16 = gains_q16[subfr];
@@ -678,7 +688,7 @@ pub fn silk_noise_shape_quantizer_del_dec(
         let mut diff_arr = [0i32; 4];
         for k in 0..n_states {
             let ps_dd = &mut ps_del_dec[k];
-            ps_dd.seed = silk_rand(ps_dd.seed);
+            ps_dd.t.seed = silk_rand(ps_dd.t.seed);
             let ps_lpc_q14_idx = NSQ_LPC_BUF_LENGTH - 1 + idx;
             lpc_pred_arr[k] = silk_lshift(
                 silk_noise_shape_quantizer_short_prediction(
@@ -689,7 +699,7 @@ pub fn silk_noise_shape_quantizer_del_dec(
                 ),
                 4,
             );
-            diff_arr[k] = ps_dd.diff_q14;
+            diff_arr[k] = ps_dd.t.diff_q14;
         }
         let mut n_ar_raw = [0i32; 4];
         nsq_shape_filter_soa(
@@ -705,11 +715,11 @@ pub fn silk_noise_shape_quantizer_del_dec(
         for k in 0..n_states {
             let ps_dd = &ps_del_dec[k];
             let mut n_ar_q14 = silk_lshift(n_ar_raw[k], 1);
-            n_ar_q14 = silk_smlawb(n_ar_q14, ps_dd.lf_ar_q14, tilt_q14);
+            n_ar_q14 = silk_smlawb(n_ar_q14, ps_dd.t.lf_ar_q14, tilt_q14);
             n_ar_q14 = silk_lshift(n_ar_q14, 2);
             n_ar_arr[k] = n_ar_q14;
-            let mut n_lf_q14 = silk_smulwb(ps_dd.shape_q14[smpl_idx], lf_shp_q14);
-            n_lf_q14 = silk_smlawt(n_lf_q14, ps_dd.lf_ar_q14, lf_shp_q14);
+            let mut n_lf_q14 = silk_smulwb(ps_dd.t.shape_q14[smpl_idx], lf_shp_q14);
+            n_lf_q14 = silk_smlawt(n_lf_q14, ps_dd.t.lf_ar_q14, lf_shp_q14);
             n_lf_q14 = silk_lshift(n_lf_q14, 2);
             n_lf_arr[k] = n_lf_q14;
         }
@@ -728,7 +738,7 @@ pub fn silk_noise_shape_quantizer_del_dec(
             );
             let r_q10 = x_q10[idx] - silk_rshift_round(tmp1_val, 4);
 
-            let r_q10_signed = if ps_dd.seed < 0 { -r_q10 } else { r_q10 };
+            let r_q10_signed = if ps_dd.t.seed < 0 { -r_q10 } else { r_q10 };
             let r_q10_signed = silk_limit_32(r_q10_signed, -(31 << 10), 30 << 10);
 
             let q1_q10_in = r_q10_signed - offset_q10;
@@ -777,20 +787,20 @@ pub fn silk_noise_shape_quantizer_del_dec(
             let rd2_q10_final = silk_rshift(silk_smlabb(rd2_q10, rr_q10, rr_q10), 10);
 
             if rd1_q10_final < rd2_q10_final {
-                ps_ss[0].rd_q10 = ps_dd.rd_q10 + rd1_q10_final;
-                ps_ss[1].rd_q10 = ps_dd.rd_q10 + rd2_q10_final;
+                ps_ss[0].rd_q10 = ps_dd.t.rd_q10 + rd1_q10_final;
+                ps_ss[1].rd_q10 = ps_dd.t.rd_q10 + rd2_q10_final;
                 ps_ss[0].q_q10 = q1_q10_val;
                 ps_ss[1].q_q10 = q2_q10_val;
             } else {
-                ps_ss[0].rd_q10 = ps_dd.rd_q10 + rd2_q10_final;
-                ps_ss[1].rd_q10 = ps_dd.rd_q10 + rd1_q10_final;
+                ps_ss[0].rd_q10 = ps_dd.t.rd_q10 + rd2_q10_final;
+                ps_ss[1].rd_q10 = ps_dd.t.rd_q10 + rd1_q10_final;
                 ps_ss[0].q_q10 = q2_q10_val;
                 ps_ss[1].q_q10 = q1_q10_val;
             }
 
             for j in 0..2 {
                 let mut exc_q14 = silk_lshift(ps_ss[j].q_q10, 4);
-                if ps_dd.seed < 0 {
+                if ps_dd.t.seed < 0 {
                     exc_q14 = -exc_q14;
                 }
                 let lpc_exc_q14 = silk_add32(exc_q14, ltp_pred_q14);
@@ -816,9 +826,9 @@ pub fn silk_noise_shape_quantizer_del_dec(
             }
         }
 
-        let winner_rand_state = ps_del_dec[winner_ind].rand_state[last_smple_idx];
+        let winner_rand_state = ps_del_dec[winner_ind].t.rand_state[last_smple_idx];
         for k in 0..n_states {
-            if ps_del_dec[k].rand_state[last_smple_idx] != winner_rand_state {
+            if ps_del_dec[k].t.rand_state[last_smple_idx] != winner_rand_state {
                 ps_sample_state[k][0].rd_q10 =
                     ps_sample_state[k][0].rd_q10.saturating_add(i32::MAX >> 4);
                 ps_sample_state[k][1].rd_q10 =
@@ -860,16 +870,8 @@ pub fn silk_noise_shape_quantizer_del_dec(
                 // libc memcpy on 65% of samples.
                 max_state.s_lpc_q14[idx..idx + NSQ_LPC_BUF_LENGTH]
                     .copy_from_slice(&min_state.s_lpc_q14[idx..idx + NSQ_LPC_BUF_LENGTH]);
-                max_state.rand_state = min_state.rand_state;
-                max_state.q_q10 = min_state.q_q10;
-                max_state.xq_q14 = min_state.xq_q14;
-                max_state.pred_q15 = min_state.pred_q15;
-                max_state.shape_q14 = min_state.shape_q14;
-                max_state.lf_ar_q14 = min_state.lf_ar_q14;
-                max_state.diff_q14 = min_state.diff_q14;
-                max_state.seed = min_state.seed;
-                max_state.seed_init = min_state.seed_init;
-                max_state.rd_q10 = min_state.rd_q10;
+                // The rings and scalars travel as one constant-length copy.
+                max_state.t = min_state.t;
                 // s_ar2 lives in the SoA buffer during the loop — swap its column.
                 for j in 0..shp_ord {
                     sar_soa[j][rd_max_ind] = sar_soa[j][rd_min_ind];
@@ -888,19 +890,19 @@ pub fn silk_noise_shape_quantizer_del_dec(
 
             if pulse_idx >= 0 && pulse_idx < pulses.len() as isize {
                 pulses[pulse_idx as usize] =
-                    silk_rshift_round(ps_dd.q_q10[last_smple_idx], 10) as i8;
+                    silk_rshift_round(ps_dd.t.q_q10[last_smple_idx], 10) as i8;
             }
             if xq_idx >= 0 && xq_idx < nsq.xq.len() as isize {
                 nsq.xq[xq_idx as usize] = silk_sat16(silk_rshift_round(
-                    silk_smulww(ps_dd.xq_q14[last_smple_idx], delayed_ga_q10[last_smple_idx]),
+                    silk_smulww(ps_dd.t.xq_q14[last_smple_idx], delayed_ga_q10[last_smple_idx]),
                     8,
                 )) as i16;
             }
             if shp_idx >= 0 && shp_idx < nsq.s_ltp_shp_q14.len() as isize {
-                nsq.s_ltp_shp_q14[shp_idx as usize] = ps_dd.shape_q14[last_smple_idx];
+                nsq.s_ltp_shp_q14[shp_idx as usize] = ps_dd.t.shape_q14[last_smple_idx];
             }
             if ltp_idx >= 0 && ltp_idx < s_ltp_q15.len() as isize {
-                s_ltp_q15[ltp_idx as usize] = ps_dd.pred_q15[last_smple_idx];
+                s_ltp_q15[ltp_idx as usize] = ps_dd.t.pred_q15[last_smple_idx];
             }
         }
         nsq.s_ltp_shp_buf_idx += 1;
@@ -909,21 +911,21 @@ pub fn silk_noise_shape_quantizer_del_dec(
         for k in 0..n_states {
             let ps_ss = &ps_sample_state[k][0];
             let ps_dd = &mut ps_del_dec[k];
-            ps_dd.lf_ar_q14 = ps_ss.lf_ar_q14;
-            ps_dd.diff_q14 = ps_ss.diff_q14;
+            ps_dd.t.lf_ar_q14 = ps_ss.lf_ar_q14;
+            ps_dd.t.diff_q14 = ps_ss.diff_q14;
 
             let lpc_idx = NSQ_LPC_BUF_LENGTH + idx;
             if lpc_idx < ps_dd.s_lpc_q14.len() {
                 ps_dd.s_lpc_q14[lpc_idx] = ps_ss.xq_q14;
             }
             let smpl_idx = (*smpl_buf_idx as usize).min(DECISION_DELAY - 1);
-            ps_dd.xq_q14[smpl_idx] = ps_ss.xq_q14;
-            ps_dd.q_q10[smpl_idx] = ps_ss.q_q10;
-            ps_dd.pred_q15[smpl_idx] = silk_lshift(ps_ss.lpc_exc_q14, 1);
-            ps_dd.shape_q14[smpl_idx] = ps_ss.s_ltp_shp_q14;
-            ps_dd.seed = silk_add32_ovflw(ps_dd.seed, silk_rshift_round(ps_ss.q_q10, 10));
-            ps_dd.rand_state[smpl_idx] = ps_dd.seed;
-            ps_dd.rd_q10 = ps_ss.rd_q10;
+            ps_dd.t.xq_q14[smpl_idx] = ps_ss.xq_q14;
+            ps_dd.t.q_q10[smpl_idx] = ps_ss.q_q10;
+            ps_dd.t.pred_q15[smpl_idx] = silk_lshift(ps_ss.lpc_exc_q14, 1);
+            ps_dd.t.shape_q14[smpl_idx] = ps_ss.s_ltp_shp_q14;
+            ps_dd.t.seed = silk_add32_ovflw(ps_dd.t.seed, silk_rshift_round(ps_ss.q_q10, 10));
+            ps_dd.t.rand_state[smpl_idx] = ps_dd.t.seed;
+            ps_dd.t.rd_q10 = ps_ss.rd_q10;
         }
         let smpl_idx = (*smpl_buf_idx as usize).min(DECISION_DELAY - 1);
         delayed_ga_q10[smpl_idx] = gain_q10;
@@ -976,14 +978,14 @@ pub fn silk_nsq_del_dec(
 
     for k in 0..n_states {
         let ps_dd = &mut ps_del_dec[k];
-        ps_dd.seed = (k as i32 + ps_indices.seed as i32) & 3;
-        ps_dd.seed_init = ps_dd.seed;
-        ps_dd.rd_q10 = 0;
-        ps_dd.lf_ar_q14 = ps_nsq.s_lf_ar_q14;
-        ps_dd.diff_q14 = ps_nsq.s_diff_shp_q14;
+        ps_dd.t.seed = (k as i32 + ps_indices.seed as i32) & 3;
+        ps_dd.t.seed_init = ps_dd.t.seed;
+        ps_dd.t.rd_q10 = 0;
+        ps_dd.t.lf_ar_q14 = ps_nsq.s_lf_ar_q14;
+        ps_dd.t.diff_q14 = ps_nsq.s_diff_shp_q14;
 
         if ps_common.ltp_mem_length > 0 {
-            ps_dd.shape_q14[0] = ps_nsq.s_ltp_shp_q14[ps_common.ltp_mem_length as usize - 1];
+            ps_dd.t.shape_q14[0] = ps_nsq.s_ltp_shp_q14[ps_common.ltp_mem_length as usize - 1];
         }
         ps_dd.s_lpc_q14[..NSQ_LPC_BUF_LENGTH]
             .copy_from_slice(&ps_nsq.s_lpc_q14[..NSQ_LPC_BUF_LENGTH]);
@@ -1034,18 +1036,18 @@ pub fn silk_nsq_del_dec(
             lag = pitch_l[k];
             if (k & (3 - silk_lshift(lsf_interpolation_flag, 1) as usize)) == 0 {
                 if k == 2 {
-                    let mut rd_min_q10 = ps_del_dec[0].rd_q10;
+                    let mut rd_min_q10 = ps_del_dec[0].t.rd_q10;
                     let mut winner_ind = 0;
                     for i in 1..n_states {
-                        if ps_del_dec[i].rd_q10 < rd_min_q10 {
-                            rd_min_q10 = ps_del_dec[i].rd_q10;
+                        if ps_del_dec[i].t.rd_q10 < rd_min_q10 {
+                            rd_min_q10 = ps_del_dec[i].t.rd_q10;
                             winner_ind = i;
                         }
                     }
                     for i in 0..n_states {
                         if i != winner_ind {
-                            ps_del_dec[i].rd_q10 =
-                                ps_del_dec[i].rd_q10.saturating_add(i32::MAX >> 4);
+                            ps_del_dec[i].t.rd_q10 =
+                                ps_del_dec[i].t.rd_q10.saturating_add(i32::MAX >> 4);
                         }
                     }
 
@@ -1060,13 +1062,13 @@ pub fn silk_nsq_del_dec(
                         let shp_idx = (ps_nsq.s_ltp_shp_buf_idx + i - decision_delay) as isize;
                         if pulse_idx >= 0 && xq_idx >= 0 && shp_idx >= 0 {
                             pulses[pulse_idx as usize] =
-                                silk_rshift_round(ps_dd.q_q10[last_smple_idx as usize], 10) as i8;
+                                silk_rshift_round(ps_dd.t.q_q10[last_smple_idx as usize], 10) as i8;
                             ps_nsq.xq[xq_idx as usize] = silk_sat16(silk_rshift_round(
-                                silk_smulww(ps_dd.xq_q14[last_smple_idx as usize], gains_q16[1]),
+                                silk_smulww(ps_dd.t.xq_q14[last_smple_idx as usize], gains_q16[1]),
                                 14,
                             )) as i16;
                             ps_nsq.s_ltp_shp_q14[shp_idx as usize] =
-                                ps_dd.shape_q14[last_smple_idx as usize];
+                                ps_dd.t.shape_q14[last_smple_idx as usize];
                         }
                     }
                     subfr_nsq = 0;
@@ -1153,18 +1155,18 @@ pub fn silk_nsq_del_dec(
         subfr_nsq += 1;
     }
 
-    let mut rd_min_q10 = ps_del_dec[0].rd_q10;
+    let mut rd_min_q10 = ps_del_dec[0].t.rd_q10;
     let mut winner_ind = 0;
     for k in 1..n_states {
-        if ps_del_dec[k].rd_q10 < rd_min_q10 {
-            rd_min_q10 = ps_del_dec[k].rd_q10;
+        if ps_del_dec[k].t.rd_q10 < rd_min_q10 {
+            rd_min_q10 = ps_del_dec[k].t.rd_q10;
             winner_ind = k;
         }
     }
 
     let ps_dd = &ps_del_dec[winner_ind];
-    ps_nsq.s_lf_ar_q14 = ps_dd.lf_ar_q14;
-    ps_nsq.s_diff_shp_q14 = ps_dd.diff_q14;
+    ps_nsq.s_lf_ar_q14 = ps_dd.t.lf_ar_q14;
+    ps_nsq.s_diff_shp_q14 = ps_dd.t.diff_q14;
     ps_nsq.lag_prev = pitch_l[ps_common.nb_subfr as usize - 1];
 
     let gain_q10_final = silk_rshift(gains_q16[ps_common.nb_subfr as usize - 1], 6);
@@ -1175,17 +1177,17 @@ pub fn silk_nsq_del_dec(
         let xq_idx = (xq_ptr as i32 + i - decision_delay) as isize;
         if pulse_idx >= 0 && (pulse_idx as usize) < pulses.len() {
             pulses[pulse_idx as usize] =
-                silk_rshift_round(ps_dd.q_q10[last_smple_idx as usize], 10) as i8;
+                silk_rshift_round(ps_dd.t.q_q10[last_smple_idx as usize], 10) as i8;
         }
         if xq_idx >= 0 && (xq_idx as usize) < ps_nsq.xq.len() {
             ps_nsq.xq[xq_idx as usize] = silk_sat16(silk_rshift_round(
-                silk_smulww(ps_dd.xq_q14[last_smple_idx as usize], gain_q10_final),
+                silk_smulww(ps_dd.t.xq_q14[last_smple_idx as usize], gain_q10_final),
                 8,
             )) as i16;
         }
         let shp_idx = (ps_nsq.s_ltp_shp_buf_idx - decision_delay + i) as isize;
         if shp_idx >= 0 && (shp_idx as usize) < ps_nsq.s_ltp_shp_q14.len() {
-            ps_nsq.s_ltp_shp_q14[shp_idx as usize] = ps_dd.shape_q14[last_smple_idx as usize];
+            ps_nsq.s_ltp_shp_q14[shp_idx as usize] = ps_dd.t.shape_q14[last_smple_idx as usize];
         }
     }
 
@@ -1201,5 +1203,5 @@ pub fn silk_nsq_del_dec(
         .s_ltp_shp_q14
         .copy_within(frame_len..frame_len + ltp_mem_len, 0);
 
-    ps_del_dec[winner_ind].seed_init
+    ps_del_dec[winner_ind].t.seed_init
 }
