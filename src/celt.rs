@@ -1581,6 +1581,8 @@ pub struct CeltEncoder {
 
     w_transient_tmp: Vec<f32>,
     w_transient_tmp2: Vec<f32>,
+    /// MDCT work buffers (see `mdct::MdctScratch`), reused across frames.
+    w_mdct: Box<crate::mdct::MdctScratch>,
 
     pub(crate) analysis: AnalysisInfo,
     /// Expected packet loss %, plumbed from `OpusEncoder.packet_loss_perc`
@@ -2021,6 +2023,7 @@ impl CeltEncoder {
             w_prefilter_pitch_buf: vec![0.0; (COMBFILTER_MAXPERIOD + MAX_FRAME_SIZE) >> 1],
             w_transient_tmp: vec![0.0; MAX_TRANSIENT_LEN],
             w_transient_tmp2: vec![0.0; MAX_TRANSIENT_LEN / 2],
+            w_mdct: Box::default(),
             consec_transient: 0,
 
             analysis: AnalysisInfo::default(),
@@ -2242,6 +2245,7 @@ impl CeltEncoder {
             false
         };
 
+        let mdct_scratch = &mut *self.w_mdct;
         let freq = &mut self.w_freq[..frame_size * channels];
         // The first MDCT pass is always LONG blocks: for non-transients it is
         // the coding transform; for transients it feeds bandLogE2 (the
@@ -2262,7 +2266,8 @@ impl CeltEncoder {
             }
 
             for i in 0..b {
-                mode.mdct.forward(
+                mode.mdct.forward_with(
+                    mdct_scratch,
                     &in_buf[c_buf_offset + i * n..],
                     &mut freq[c * frame_size + i..],
                     mode.window,
@@ -2381,7 +2386,8 @@ impl CeltEncoder {
             for c in 0..channels {
                 let c_offset = c * buf_stride;
                 for i in 0..b {
-                    mode.mdct.forward(
+                    mode.mdct.forward_with(
+                    mdct_scratch,
                         &in_buf[c_offset + i * n..c_offset + buf_stride],
                         &mut freq[c * frame_size + i..],
                         mode.window,
@@ -2890,7 +2896,8 @@ impl CeltEncoder {
                     } else {
                         syn_n
                     };
-                    mode.mdct.backward(
+                    mode.mdct.backward_with(
+                    &mut self.w_mdct,
                         &freq_synth[c * frame_size + bi..],
                         &mut self.enc_decode_mem[co + out_syn_idx + bi * syn_stride..],
                         mode.window,
@@ -3049,6 +3056,8 @@ pub struct CeltDecoder {
     w_band_amp: Vec<f32>,
     w_pcm_frame: Vec<f32>,
     w_post: Vec<f32>,
+    /// MDCT work buffers (see `mdct::MdctScratch`), reused across frames.
+    w_mdct: Box<crate::mdct::MdctScratch>,
 }
 
 impl CeltDecoder {
@@ -3108,6 +3117,7 @@ impl CeltDecoder {
             w_band_amp: vec![0.0; nb_x_ch],
             w_pcm_frame: vec![0.0; DECODE_BUFFER_SIZE],
             w_post: vec![0.0; DECODE_BUFFER_SIZE + COMBFILTER_MAXPERIOD],
+            w_mdct: Box::default(),
         }
     }
 
@@ -3679,7 +3689,8 @@ impl CeltDecoder {
                 if available_len < n + overlap {
                     return 0;
                 }
-                self.mode.mdct.backward(
+                self.mode.mdct.backward_with(
+                    &mut self.w_mdct,
                     &freq[block_freq_idx..],
                     &mut self.decode_mem[block_out_idx..],
                     mode.window,
@@ -4021,7 +4032,8 @@ impl CeltDecoder {
         let out_syn_idx = DECODE_BUFFER_SIZE - n;
         for ch in 0..c {
             let out = ch * mem_size + out_syn_idx;
-            self.mode.mdct.backward(
+            self.mode.mdct.backward_with(
+                    &mut self.w_mdct,
                 &freq[ch * n..],
                 &mut self.decode_mem[out..],
                 window,
