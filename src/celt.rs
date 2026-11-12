@@ -3607,8 +3607,27 @@ impl CeltDecoder {
         // Recompute band_amp after unquant_energy_finalise, which adjusts old_band_e.
         // (Mirrors the encoder's resynth path: log2amp is called after quant_energy_finalise.)
         log2amp(mode, nb_ebands, band_amp, &self.old_band_e, channels);
-        self.w_freq[..frame_size * channels].fill(0.0);
         let freq = &mut self.w_freq[..frame_size * channels];
+        // denormalise_bands writes exactly the coded span [lo, hi) of each
+        // channel, so only the uncoded spans around it need zeroing - not the
+        // whole buffer. Taken only when that span provably lies inside every
+        // channel (then denormalise_bands cannot bail early and leaves no cell
+        // unwritten); anything else keeps the full clear.
+        let lo = (mode.e_bands[start_band] as usize) << lm;
+        let hi = (mode.e_bands[end_band] as usize) << lm;
+        if !silence
+            && lo <= hi
+            && hi <= frame_size
+            && frame_size == mode.short_mdct_size << lm
+            && start_band < end_band
+        {
+            for ch in freq.chunks_exact_mut(frame_size) {
+                ch[..lo].fill(0.0);
+                ch[hi..].fill(0.0);
+            }
+        } else {
+            freq.fill(0.0);
+        }
         if !silence {
             denormalise_bands(
                 mode,
@@ -3706,7 +3725,7 @@ impl CeltDecoder {
                 *v = v.clamp(-SIG_SAT, SIG_SAT);
             }
 
-            self.w_pcm_frame[..frame_size].fill(0.0);
+            // (No clear: the copy below overwrites every cell.)
             let pcm_frame = &mut self.w_pcm_frame[..frame_size];
 
             pcm_frame.copy_from_slice(
