@@ -417,10 +417,13 @@ unsafe fn nsq_shape_filter_soa_avx2(
 ) {
     use core::arch::x86_64::*;
     let wb = _mm256_set1_epi64x(warp as i64);
-    let asr16 = |x: __m256i| {
-        let s = _mm256_cmpgt_epi64(_mm256_setzero_si256(), x);
-        _mm256_or_si256(_mm256_srli_epi64(x, 16), _mm256_slli_epi64(s, 48))
-    };
+    // `>> 16` of each 64-bit product. A LOGICAL shift is enough: it differs from
+    // the arithmetic one only in result bits 48..63, and every consumer of these
+    // lanes reads just the low 32 bits (`_mm256_mul_epi32` multiplies the low
+    // dwords, add/sub carry upward only, and `stv` stores the even dwords). The
+    // low dword of every lane is therefore the scalar's wrapping-i32 value at
+    // each step, with no sign fill (was cmpgt + shift + or per product).
+    let asr16 = |x: __m256i| _mm256_srli_epi64(x, 16);
     let smlawb_v =
         |a: __m256i, b: __m256i, cb: __m256i| _mm256_add_epi64(a, asr16(_mm256_mul_epi32(b, cb)));
     let ldv = |p: &[i32; 4]| _mm256_cvtepi32_epi64(_mm_loadu_si128(p.as_ptr() as *const __m128i));
