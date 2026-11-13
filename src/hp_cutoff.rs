@@ -4,6 +4,7 @@ use crate::silk::macros::*;
 const SILK_FIX_CONST_19: i32 =
     ((1.5 * std::f64::consts::PI / 1000.0) * (1 << 19) as f64 + 0.5) as i32;
 
+#[inline(never)]
 pub fn hp_cutoff(
     input: &[f32],
     cutoff_hz: i32,
@@ -37,7 +38,9 @@ pub fn hp_cutoff(
     let mut block = [0i16; BLOCK];
     let convert = |src: &[f32], dst: &mut [i16]| {
         for (d, &x) in dst.iter_mut().zip(src) {
-            *d = (x * 32768.0 + 0.5).floor().clamp(-32768.0, 32767.0) as i16;
+            // `fmath::floor` is bit-identical to `f32::floor` without the
+            // per-sample libm call.
+            *d = crate::fmath::floor(x * 32768.0 + 0.5).clamp(-32768.0, 32767.0) as i16;
         }
     };
 

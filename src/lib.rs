@@ -75,6 +75,7 @@ pub mod celt;
 #[doc(hidden)]
 pub mod celt_lpc;
 #[doc(hidden)]
+mod fmath;
 pub mod hp_cutoff;
 #[doc(hidden)]
 pub mod isa;
