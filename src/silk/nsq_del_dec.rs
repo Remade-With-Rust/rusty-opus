@@ -631,7 +631,21 @@ mod lpc_pred_avx2_tests {
     }
 }
 
-pub fn silk_noise_shape_quantizer_del_dec(
+/// The delayed-decision quantizer of one subframe. The two const parameters
+/// pick the kernels at compile time, so the instances inlined into the AVX2
+/// wrappers below run the LPC prediction (once per state per sample) and the
+/// cross-state shaping filter (once per sample) INLINE in the sample loop - not
+/// behind a `#[target_feature]` call boundary with the dispatch decision
+/// re-read on every call (1.44M calls per 18 s of wideband speech).
+///
+/// # Safety
+///
+/// With `LPC_AVX2` or `SHAPE_AVX2` set, the caller must be compiled with (and
+/// the CPU must support) AVX2. There is no memory precondition: the LPC
+/// kernel's read window is checked once per call (`lpc_window_ok`) and the
+/// shaping kernel goes through bounds-checked references.
+#[inline(always)]
+unsafe fn nsq_del_dec_samples<const LPC_AVX2: bool, const SHAPE_AVX2: bool>(
     nsq: &mut SilkNSQState,
     ps_del_dec: &mut [NSQDelDecStruct],
     signal_type: i32,
@@ -678,6 +692,15 @@ pub fn silk_noise_shape_quantizer_del_dec(
     let shp_base = silk_rshift(shaping_lpc_order, 1);
     #[cfg(target_arch = "x86_64")]
     let shp_cb = nsq_shape_coef_lanes(ar_shp_q13, shp_ord);
+    // The AVX2 LPC kernel reads `s_lpc_q14[idx + 1 - order..=idx]` and
+    // `a_q12[..16]` through raw pointers, with `idx = NSQ_LPC_BUF_LENGTH - 1 + i`
+    // for `i in 0..length`. Proved here once for the whole subframe:
+    // `idx + 1 >= order` because `order <= NSQ_LPC_BUF_LENGTH`, and
+    // `idx < s_lpc_q14.len()` because `length <= MAX_SUB_FRAME_LENGTH`.
+    #[cfg(target_arch = "x86_64")]
+    let lpc_window_ok = a_q12.len() >= 16
+        && (0..=NSQ_LPC_BUF_LENGTH as i32).contains(&predict_lpc_order)
+        && (0..=MAX_SUB_FRAME_LENGTH as i32).contains(&length);
     let mut sar_soa = [[0 as SarLane; 4]; MAX_SHAPE_LPC_ORDER];
     for k in 0..n_states {
         for j in 0..shp_ord {
@@ -741,25 +764,70 @@ pub fn silk_noise_shape_quantizer_del_dec(
             let ps_dd = &mut ps_del_dec[k];
             ps_dd.t.seed = silk_rand(ps_dd.t.seed);
             let ps_lpc_q14_idx = NSQ_LPC_BUF_LENGTH - 1 + idx;
-            lpc_pred_arr[k] = silk_lshift(
+            #[cfg(target_arch = "x86_64")]
+            let lpc_pred = if LPC_AVX2 && lpc_window_ok {
+                // SAFETY: AVX2 by this function's contract; `lpc_window_ok`
+                // proved the kernel's whole read window for every sample of the
+                // subframe (see its definition above).
+                unsafe {
+                    silk_lpc_prediction_avx2(
+                        &ps_dd.s_lpc_q14,
+                        ps_lpc_q14_idx,
+                        a_q12,
+                        predict_lpc_order,
+                    )
+                }
+            } else {
                 silk_noise_shape_quantizer_short_prediction(
                     &ps_dd.s_lpc_q14,
                     ps_lpc_q14_idx,
                     a_q12,
                     predict_lpc_order,
-                ),
-                4,
+                )
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let lpc_pred = silk_noise_shape_quantizer_short_prediction(
+                &ps_dd.s_lpc_q14,
+                ps_lpc_q14_idx,
+                a_q12,
+                predict_lpc_order,
             );
+            lpc_pred_arr[k] = silk_lshift(lpc_pred, 4);
             diff_arr[k] = ps_dd.t.diff_q14;
         }
         let mut n_ar_raw = [0i32; 4];
+        #[cfg(target_arch = "x86_64")]
+        if SHAPE_AVX2 {
+            // SAFETY: AVX2 by this function's contract; the kernel has no memory
+            // precondition (bounds-checked references throughout).
+            unsafe {
+                nsq_shape_filter_soa_avx2(
+                    &mut sar_soa,
+                    &diff_arr,
+                    warping_q16,
+                    &shp_cb,
+                    shp_ord,
+                    shp_base,
+                    &mut n_ar_raw,
+                );
+            }
+        } else {
+            nsq_shape_filter_soa_scalar(
+                &mut sar_soa,
+                &diff_arr,
+                warping_q16,
+                ar_shp_q13,
+                shp_ord,
+                shp_base,
+                &mut n_ar_raw,
+            );
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         nsq_shape_filter_soa(
             &mut sar_soa,
             &diff_arr,
             warping_q16,
             ar_shp_q13,
-            #[cfg(target_arch = "x86_64")]
-            &shp_cb,
             shp_ord,
             shp_base,
             &mut n_ar_raw,
@@ -1001,6 +1069,289 @@ pub fn silk_noise_shape_quantizer_del_dec(
             &ps_dd.s_lpc_q14[length as usize..length as usize + NSQ_LPC_BUF_LENGTH],
         );
         ps_dd.s_lpc_q14[..NSQ_LPC_BUF_LENGTH].copy_from_slice(&tmp);
+    }
+}
+
+/// [`nsq_del_dec_samples`] compiled with AVX2, both kernels inlined.
+///
+/// # Safety
+///
+/// The CPU must support AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn nsq_del_dec_samples_avx2(
+    nsq: &mut SilkNSQState,
+    ps_del_dec: &mut [NSQDelDecStruct],
+    signal_type: i32,
+    x_q10: &[i32],
+    pulses: &mut [i8],
+    pulses_offset: i32,
+    xq_ptr: i32,
+    s_ltp_q15: &mut [i32],
+    delayed_ga_q10: &mut [i32],
+    a_q12: &[i16],
+    b_q14: &[i16],
+    ar_shp_q13: &[i16],
+    lag: i32,
+    harm_shape_fir_packed_q14: i32,
+    tilt_q14: i32,
+    lf_shp_q14: i32,
+    gain_q16: i32,
+    lambda_q10: i32,
+    offset_q10: i32,
+    length: i32,
+    subfr: i32,
+    shaping_lpc_order: i32,
+    predict_lpc_order: i32,
+    warping_q16: i32,
+    n_states_delayed_decision: i32,
+    smpl_buf_idx: &mut i32,
+    decision_delay: i32,
+    _frame_counter: i32,
+) {
+    // SAFETY: compiled with AVX2; the caller checked the CPU.
+    unsafe {
+        nsq_del_dec_samples::<true, true>(
+            nsq,
+            ps_del_dec,
+            signal_type,
+            x_q10,
+            pulses,
+            pulses_offset,
+            xq_ptr,
+            s_ltp_q15,
+            delayed_ga_q10,
+            a_q12,
+            b_q14,
+            ar_shp_q13,
+            lag,
+            harm_shape_fir_packed_q14,
+            tilt_q14,
+            lf_shp_q14,
+            gain_q16,
+            lambda_q10,
+            offset_q10,
+            length,
+            subfr,
+            shaping_lpc_order,
+            predict_lpc_order,
+            warping_q16,
+            n_states_delayed_decision,
+            smpl_buf_idx,
+            decision_delay,
+            _frame_counter,
+        );
+    }
+}
+
+/// [`nsq_del_dec_samples`] compiled with AVX2, LPC kernel only (the
+/// `RUSTY_OPUS_NO_NSQ_AVX2` research knob opts the shaping kernel out).
+///
+/// # Safety
+///
+/// The CPU must support AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn nsq_del_dec_samples_avx2_lpc(
+    nsq: &mut SilkNSQState,
+    ps_del_dec: &mut [NSQDelDecStruct],
+    signal_type: i32,
+    x_q10: &[i32],
+    pulses: &mut [i8],
+    pulses_offset: i32,
+    xq_ptr: i32,
+    s_ltp_q15: &mut [i32],
+    delayed_ga_q10: &mut [i32],
+    a_q12: &[i16],
+    b_q14: &[i16],
+    ar_shp_q13: &[i16],
+    lag: i32,
+    harm_shape_fir_packed_q14: i32,
+    tilt_q14: i32,
+    lf_shp_q14: i32,
+    gain_q16: i32,
+    lambda_q10: i32,
+    offset_q10: i32,
+    length: i32,
+    subfr: i32,
+    shaping_lpc_order: i32,
+    predict_lpc_order: i32,
+    warping_q16: i32,
+    n_states_delayed_decision: i32,
+    smpl_buf_idx: &mut i32,
+    decision_delay: i32,
+    _frame_counter: i32,
+) {
+    // SAFETY: compiled with AVX2; the caller checked the CPU.
+    unsafe {
+        nsq_del_dec_samples::<true, false>(
+            nsq,
+            ps_del_dec,
+            signal_type,
+            x_q10,
+            pulses,
+            pulses_offset,
+            xq_ptr,
+            s_ltp_q15,
+            delayed_ga_q10,
+            a_q12,
+            b_q14,
+            ar_shp_q13,
+            lag,
+            harm_shape_fir_packed_q14,
+            tilt_q14,
+            lf_shp_q14,
+            gain_q16,
+            lambda_q10,
+            offset_q10,
+            length,
+            subfr,
+            shaping_lpc_order,
+            predict_lpc_order,
+            warping_q16,
+            n_states_delayed_decision,
+            smpl_buf_idx,
+            decision_delay,
+            _frame_counter,
+        );
+    }
+}
+
+pub fn silk_noise_shape_quantizer_del_dec(
+    nsq: &mut SilkNSQState,
+    ps_del_dec: &mut [NSQDelDecStruct],
+    signal_type: i32,
+    x_q10: &[i32],
+    pulses: &mut [i8],
+    pulses_offset: i32,
+    xq_ptr: i32,
+    s_ltp_q15: &mut [i32],
+    delayed_ga_q10: &mut [i32],
+    a_q12: &[i16],
+    b_q14: &[i16],
+    ar_shp_q13: &[i16],
+    lag: i32,
+    harm_shape_fir_packed_q14: i32,
+    tilt_q14: i32,
+    lf_shp_q14: i32,
+    gain_q16: i32,
+    lambda_q10: i32,
+    offset_q10: i32,
+    length: i32,
+    subfr: i32,
+    shaping_lpc_order: i32,
+    predict_lpc_order: i32,
+    warping_q16: i32,
+    n_states_delayed_decision: i32,
+    smpl_buf_idx: &mut i32,
+    decision_delay: i32,
+    _frame_counter: i32,
+) {
+    // Dispatch once per subframe.
+    #[cfg(target_arch = "x86_64")]
+    if lpc_avx2_enabled() {
+        // SAFETY: `lpc_avx2_enabled()` and `nsq_shape_avx2_enabled()` are true
+        // only if `crate::isa::avx2()` is, which checks exactly the `avx2`
+        // feature both wrappers are compiled with.
+        unsafe {
+            if nsq_shape_avx2_enabled() {
+                nsq_del_dec_samples_avx2(
+                    nsq,
+                    ps_del_dec,
+                    signal_type,
+                    x_q10,
+                    pulses,
+                    pulses_offset,
+                    xq_ptr,
+                    s_ltp_q15,
+                    delayed_ga_q10,
+                    a_q12,
+                    b_q14,
+                    ar_shp_q13,
+                    lag,
+                    harm_shape_fir_packed_q14,
+                    tilt_q14,
+                    lf_shp_q14,
+                    gain_q16,
+                    lambda_q10,
+                    offset_q10,
+                    length,
+                    subfr,
+                    shaping_lpc_order,
+                    predict_lpc_order,
+                    warping_q16,
+                    n_states_delayed_decision,
+                    smpl_buf_idx,
+                    decision_delay,
+                    _frame_counter,
+                );
+            } else {
+                nsq_del_dec_samples_avx2_lpc(
+                    nsq,
+                    ps_del_dec,
+                    signal_type,
+                    x_q10,
+                    pulses,
+                    pulses_offset,
+                    xq_ptr,
+                    s_ltp_q15,
+                    delayed_ga_q10,
+                    a_q12,
+                    b_q14,
+                    ar_shp_q13,
+                    lag,
+                    harm_shape_fir_packed_q14,
+                    tilt_q14,
+                    lf_shp_q14,
+                    gain_q16,
+                    lambda_q10,
+                    offset_q10,
+                    length,
+                    subfr,
+                    shaping_lpc_order,
+                    predict_lpc_order,
+                    warping_q16,
+                    n_states_delayed_decision,
+                    smpl_buf_idx,
+                    decision_delay,
+                    _frame_counter,
+                );
+            }
+        }
+        return;
+    }
+    // SAFETY: no AVX2 kernel is selected, so there is no precondition.
+    unsafe {
+        nsq_del_dec_samples::<false, false>(
+            nsq,
+            ps_del_dec,
+            signal_type,
+            x_q10,
+            pulses,
+            pulses_offset,
+            xq_ptr,
+            s_ltp_q15,
+            delayed_ga_q10,
+            a_q12,
+            b_q14,
+            ar_shp_q13,
+            lag,
+            harm_shape_fir_packed_q14,
+            tilt_q14,
+            lf_shp_q14,
+            gain_q16,
+            lambda_q10,
+            offset_q10,
+            length,
+            subfr,
+            shaping_lpc_order,
+            predict_lpc_order,
+            warping_q16,
+            n_states_delayed_decision,
+            smpl_buf_idx,
+            decision_delay,
+            _frame_counter,
+        );
     }
 }
 
