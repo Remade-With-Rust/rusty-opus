@@ -99,6 +99,21 @@ const CELT_PVQ_U_ROW: [u32; 15] = [
     0, 176, 351, 525, 698, 870, 1041, 1131, 1178, 1207, 1226, 1240, 1248, 1254, 1257,
 ];
 
+/// `U(r, c)` when the caller already knows which argument is the smaller one
+/// (`r <= c`): the same table cell as `celt_pvq_u_lookup(n, k)` without the
+/// min/max pair. `n`, `k` are the arguments in the caller's original order,
+/// used only by the out-of-table fallback so it is the identical call.
+#[inline(always)]
+fn pvq_u_ordered(r: u32, c: u32, n: u32, k: u32) -> u32 {
+    debug_assert!(r <= c && r == n.min(k) && c == n.max(k));
+    if let Some(&base) = CELT_PVQ_U_ROW.get(r as usize) {
+        if let Some(&v) = CELT_PVQ_U_DATA.get(base as usize + c as usize) {
+            return v;
+        }
+    }
+    compute_u(n, k)
+}
+
 #[inline(always)]
 pub fn celt_pvq_u_lookup(n: u32, k: u32) -> u32 {
     let r = n.min(k) as usize;
@@ -250,7 +265,11 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
 
     while curr_n > 2 {
         if curr_k >= curr_n as i32 {
-            let p_kp1 = celt_pvq_u_lookup(curr_n, (curr_k + 1) as u32);
+            // "Lots of pulses": every lookup in this arm has a known smaller
+            // argument, so none needs the min/max of the generic lookup
+            // (`pvq_u_ordered` is the same cell).
+            let kp1 = (curr_k + 1) as u32;
+            let p_kp1 = pvq_u_ordered(curr_n, kp1, curr_n, kp1);
             let s: i32 = if i >= p_kp1 {
                 i -= p_kp1;
                 -1
@@ -258,24 +277,33 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
                 0
             };
             let k0 = curr_k;
-            let q = celt_pvq_u_lookup(curr_n, curr_n);
+            let q = pvq_u_ordered(curr_n, curr_n, curr_n, curr_n);
             let mut p;
             if q > i {
+                // k walks down from n - 1: here k < n.
                 curr_k = curr_n as i32;
                 loop {
                     curr_k -= 1;
-                    p = celt_pvq_u_lookup(curr_n, curr_k.max(0) as u32);
+                    let kk = curr_k.max(0) as u32;
+                    p = pvq_u_ordered(kk, curr_n, curr_n, kk);
                     if p <= i || curr_k <= 0 {
                         break;
                     }
                 }
             } else {
-                p = celt_pvq_u_lookup(curr_n, curr_k as u32);
+                // k stays >= n: the walk starts at k >= n and stops at k == n at
+                // the latest, where p == q <= i.
+                p = pvq_u_ordered(curr_n, curr_k as u32, curr_n, curr_k as u32);
                 while p > i && curr_k > 0 {
                     curr_k -= 1;
-                    p = celt_pvq_u_lookup(curr_n, curr_k as u32);
+                    p = if curr_k >= curr_n as i32 {
+                        pvq_u_ordered(curr_n, curr_k as u32, curr_n, curr_k as u32)
+                    } else {
+                        celt_pvq_u_lookup(curr_n, curr_k as u32)
+                    };
                 }
             }
+
             i -= p;
             let val = k0 - curr_k;
             y[j] = (val + s) ^ s;
