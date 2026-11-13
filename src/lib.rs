@@ -1936,12 +1936,25 @@ impl OpusEncoder {
             } else {
                 let n = frame_size * self.channels;
                 self.buf_celt_input.resize(n, 0.0);
-                for i in 0..frame_size {
-                    for ch in 0..self.channels {
-                        self.buf_celt_input[ch * frame_size + i] = input[i * self.channels + ch];
+                if self.channels == 2 {
+                    // Stereo: zip the interleaved pairs with the two planes. The
+                    // indexed form below pays two index multiplies and two
+                    // bounds checks per sample and does not vectorise.
+                    let (left, right) = self.buf_celt_input[..n].split_at_mut(frame_size);
+                    for ((pair, l), r) in input[..n].chunks_exact(2).zip(left).zip(right) {
+                        *l = pair[0];
+                        *r = pair[1];
+                    }
+                } else {
+                    for i in 0..frame_size {
+                        for ch in 0..self.channels {
+                            self.buf_celt_input[ch * frame_size + i] =
+                                input[i * self.channels + ch];
+                        }
                     }
                 }
                 &self.buf_celt_input
+
             };
 
             if self.rc.tell() <= total_packet_bits {
