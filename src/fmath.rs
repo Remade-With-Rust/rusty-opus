@@ -22,7 +22,7 @@ const TWO_POW_23: f32 = 8_388_608.0;
 /// ties to even (the IEEE default mode); subtracting `2^23` back is exact. The
 /// sign is restored afterwards so `-0.3` yields `-0.0`, as std does.
 #[inline(always)]
-pub(crate) fn round_ties_even(x: f32) -> f32 {
+pub fn round_ties_even(x: f32) -> f32 {
     let ax = x.abs();
     let r = (ax + TWO_POW_23) - TWO_POW_23;
     // NaN and |x| >= 2^23 take the second arm unchanged.
@@ -31,7 +31,7 @@ pub(crate) fn round_ties_even(x: f32) -> f32 {
 
 /// Bit-identical to [`f32::floor`] for non-NaN input (NaN -> NaN).
 #[inline(always)]
-pub(crate) fn floor(x: f32) -> f32 {
+pub fn floor(x: f32) -> f32 {
     let r = round_ties_even(x);
     // Rounding to nearest overshoots by at most one; `r - 1.0` is exact here
     // (|r| < 2^23 whenever r != x). NaN compares false and passes through.
@@ -49,7 +49,6 @@ mod tests {
             return;
         }
         assert_eq!(
-
             round_ties_even(x).to_bits(),
             x.round_ties_even().to_bits(),
             "round_ties_even({x:e}) [{:#010x}]",

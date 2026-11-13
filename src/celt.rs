@@ -110,7 +110,6 @@ fn transient_analysis(
             *t = y;
         }
 
-
         tmp[..12].fill(0.0);
 
         let mut mean = 0.0f32;
@@ -123,7 +122,6 @@ fn transient_analysis(
             mem0 = x2 + (1.0 - forward_decay) * mem0;
             *t2 = forward_decay * mem0;
         }
-
 
         mem0 = 0.0f32;
         let mut max_e = 0.0f32;
@@ -2152,7 +2150,6 @@ impl CeltEncoder {
                     m = x * coef;
                 }
             } else {
-
                 // celt_preemphasis with upsample: one input sample every `up`
                 // positions, zeros between (the spectral images this creates
                 // above the input's Nyquist are cleared after the MDCT).
@@ -2405,7 +2402,7 @@ impl CeltEncoder {
                 let c_offset = c * buf_stride;
                 for i in 0..b {
                     mode.mdct.forward_with(
-                    mdct_scratch,
+                        mdct_scratch,
                         &in_buf[c_offset + i * n..c_offset + buf_stride],
                         &mut freq[c * frame_size + i..],
                         mode.window,
@@ -2915,7 +2912,7 @@ impl CeltEncoder {
                         syn_n
                     };
                     mode.mdct.backward_with(
-                    &mut self.w_mdct,
+                        &mut self.w_mdct,
                         &freq_synth[c * frame_size + bi..],
                         &mut self.enc_decode_mem[co + out_syn_idx + bi * syn_stride..],
                         mode.window,
@@ -4070,7 +4067,7 @@ impl CeltDecoder {
         for ch in 0..c {
             let out = ch * mem_size + out_syn_idx;
             self.mode.mdct.backward_with(
-                    &mut self.w_mdct,
+                &mut self.w_mdct,
                 &freq[ch * n..],
                 &mut self.decode_mem[out..],
                 window,

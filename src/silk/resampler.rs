@@ -729,7 +729,6 @@ fn ar2_q14_exact(s: &mut [i32; 2], out_q8: &mut [i32], input: &[i16], a_q14: &[i
     }
     s[0] = s0;
     s[1] = s1;
-
 }
 
 #[inline]

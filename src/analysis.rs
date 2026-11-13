@@ -112,7 +112,6 @@ fn gemm_accum(
     }
 }
 
-
 struct DenseLayer {
     bias: &'static [i8],
     input_weights: &'static [i8],
@@ -259,7 +258,6 @@ fn resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32]) -> f32 {
 
         hp_ener += (out32_hp as f64) * (out32_hp as f64);
         *o = 0.5 * out32;
-
     }
     hp_ener as f32
 }

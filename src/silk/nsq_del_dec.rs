@@ -379,8 +379,11 @@ fn nsq_shape_filter_soa_scalar(
 ) {
     for k in 0..4 {
         let mut tmp2 = silk_smlawb(diff[k], sar[0][k] as i32, warp);
-        let mut tmp1 =
-            silk_smlawb(sar[0][k] as i32, silk_sub32_ovflw(sar[1][k] as i32, tmp2), warp);
+        let mut tmp1 = silk_smlawb(
+            sar[0][k] as i32,
+            silk_sub32_ovflw(sar[1][k] as i32, tmp2),
+            warp,
+        );
         sar[0][k] = tmp2 as SarLane;
         let mut acc = silk_smlawb(base, tmp2, ar_shp_q13[0] as i32);
         let mut j = 2;
@@ -481,11 +484,7 @@ unsafe fn nsq_shape_filter_soa_avx2(
     let s_next = lds(&sar[1]);
     let mut tmp1 = smlawb_v(s_cur, _mm256_sub_epi64(s_next, tmp2), wb);
     sts(&mut sar[0], tmp2);
-    let mut acc = smlawb_v(
-        _mm256_set1_epi64x(base as i64),
-        tmp2,
-        cbv(0),
-    );
+    let mut acc = smlawb_v(_mm256_set1_epi64x(base as i64), tmp2, cbv(0));
     s_cur = s_next;
     let mut j = 2;
     while j < order {
@@ -505,6 +504,7 @@ unsafe fn nsq_shape_filter_soa_avx2(
     stv(n_ar, acc);
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
 fn nsq_shape_filter_soa(
     sar: &mut [[SarLane; 4]],
@@ -625,7 +625,11 @@ mod lpc_pred_avx2_tests {
                 let low = |v: &Vec<[SarLane; 4]>| -> Vec<[i32; 4]> {
                     v.iter().map(|r| r.map(|x| x as i32)).collect()
                 };
-                assert_eq!(low(&sar_a), low(&sar_b), "sar mismatch order={order} sh={sh}");
+                assert_eq!(
+                    low(&sar_a),
+                    low(&sar_b),
+                    "sar mismatch order={order} sh={sh}"
+                );
             }
         }
     }
@@ -673,7 +677,6 @@ unsafe fn nsq_del_dec_samples<const LPC_AVX2: bool, const SHAPE_AVX2: bool>(
     n_states_delayed_decision: i32,
     smpl_buf_idx: &mut i32,
     decision_delay: i32,
-    _frame_counter: i32,
 ) {
     let mut ps_sample_state = [[NSQSampleStruct::default(); 2]; NSQ_MAX_STATES_OPERATING];
     let gain_q10 = silk_rshift(gain_q16, 6);
@@ -1019,7 +1022,10 @@ unsafe fn nsq_del_dec_samples<const LPC_AVX2: bool, const SHAPE_AVX2: bool>(
             }
             if xq_idx >= 0 && xq_idx < nsq.xq.len() as isize {
                 nsq.xq[xq_idx as usize] = silk_sat16(silk_rshift_round_2s(
-                    silk_smulww(ps_dd.t.xq_q14[last_smple_idx], delayed_ga_q10[last_smple_idx]),
+                    silk_smulww(
+                        ps_dd.t.xq_q14[last_smple_idx],
+                        delayed_ga_q10[last_smple_idx],
+                    ),
                     8,
                 )) as i16;
             }
@@ -1107,7 +1113,6 @@ unsafe fn nsq_del_dec_samples_avx2(
     n_states_delayed_decision: i32,
     smpl_buf_idx: &mut i32,
     decision_delay: i32,
-    _frame_counter: i32,
 ) {
     // SAFETY: compiled with AVX2; the caller checked the CPU.
     unsafe {
@@ -1139,7 +1144,6 @@ unsafe fn nsq_del_dec_samples_avx2(
             n_states_delayed_decision,
             smpl_buf_idx,
             decision_delay,
-            _frame_counter,
         );
     }
 }
@@ -1180,7 +1184,6 @@ unsafe fn nsq_del_dec_samples_avx2_lpc(
     n_states_delayed_decision: i32,
     smpl_buf_idx: &mut i32,
     decision_delay: i32,
-    _frame_counter: i32,
 ) {
     // SAFETY: compiled with AVX2; the caller checked the CPU.
     unsafe {
@@ -1212,7 +1215,6 @@ unsafe fn nsq_del_dec_samples_avx2_lpc(
             n_states_delayed_decision,
             smpl_buf_idx,
             decision_delay,
-            _frame_counter,
         );
     }
 }
@@ -1283,7 +1285,6 @@ pub fn silk_noise_shape_quantizer_del_dec(
                     n_states_delayed_decision,
                     smpl_buf_idx,
                     decision_delay,
-                    _frame_counter,
                 );
             } else {
                 nsq_del_dec_samples_avx2_lpc(
@@ -1314,7 +1315,6 @@ pub fn silk_noise_shape_quantizer_del_dec(
                     n_states_delayed_decision,
                     smpl_buf_idx,
                     decision_delay,
-                    _frame_counter,
                 );
             }
         }
@@ -1350,7 +1350,6 @@ pub fn silk_noise_shape_quantizer_del_dec(
             n_states_delayed_decision,
             smpl_buf_idx,
             decision_delay,
-            _frame_counter,
         );
     }
 }
@@ -1470,7 +1469,8 @@ pub fn silk_nsq_del_dec(
                         let shp_idx = (ps_nsq.s_ltp_shp_buf_idx + i - decision_delay) as isize;
                         if pulse_idx >= 0 && xq_idx >= 0 && shp_idx >= 0 {
                             pulses[pulse_idx as usize] =
-                                silk_rshift_round_2s(ps_dd.t.q_q10[last_smple_idx as usize], 10) as i8;
+                                silk_rshift_round_2s(ps_dd.t.q_q10[last_smple_idx as usize], 10)
+                                    as i8;
                             ps_nsq.xq[xq_idx as usize] = silk_sat16(silk_rshift_round_2s(
                                 silk_smulww(ps_dd.t.xq_q14[last_smple_idx as usize], gains_q16[1]),
                                 14,

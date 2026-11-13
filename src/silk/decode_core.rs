@@ -315,7 +315,6 @@ fn silk_lpc_analysis_filter_offset(
         out[out_offset + ix] = 0;
     }
 
-
     for ix in d..len {
         let mut out32_q12: i32 = 0;
         for j in 0..d {

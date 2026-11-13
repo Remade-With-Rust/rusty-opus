@@ -74,8 +74,8 @@ pub mod bands;
 pub mod celt;
 #[doc(hidden)]
 pub mod celt_lpc;
-#[doc(hidden)]
 mod fmath;
+#[doc(hidden)]
 pub mod hp_cutoff;
 #[doc(hidden)]
 pub mod isa;
@@ -1954,7 +1954,6 @@ impl OpusEncoder {
                     }
                 }
                 &self.buf_celt_input
-
             };
 
             if self.rc.tell() <= total_packet_bits {
@@ -3276,8 +3275,8 @@ impl OpusDecoder {
                             }
                             2 => {
                                 let out = &mut output[out_start..out_start + 2 * sub_frame_size];
-                                let (left, right) = planar[..2 * sub_frame_size]
-                                    .split_at(sub_frame_size);
+                                let (left, right) =
+                                    planar[..2 * sub_frame_size].split_at(sub_frame_size);
                                 for ((o, &l), &r) in out.chunks_exact_mut(2).zip(left).zip(right) {
                                     o[0] = l.clamp(-1.0, 1.0);
                                     o[1] = r.clamp(-1.0, 1.0);
@@ -3287,13 +3286,12 @@ impl OpusDecoder {
                                 for i in 0..sub_frame_size {
                                     for ch in 0..self.channels {
                                         let idx = out_start + i * self.channels + ch;
-                                        output[idx] = planar[ch * sub_frame_size + i]
-                                            .clamp(-1.0, 1.0);
+                                        output[idx] =
+                                            planar[ch * sub_frame_size + i].clamp(-1.0, 1.0);
                                     }
                                 }
                             }
                         }
-
                     }
                     self.last_range = rc.rng;
                     self.rc_scratch = rc.buf; // reuse the payload buffer next frame

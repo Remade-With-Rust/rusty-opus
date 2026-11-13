@@ -61,13 +61,13 @@ pub fn silk_rshift_round(a: i32, shift: i32) -> i32 {
     ((a >> (shift - 1)) + 1) >> 1
 }
 
-
-/// [`silk_rshift_round`] in its two-shift form `(a >> s) + ((a >> (s - 1)) & 1)`
-/// - the same value for every input. Kept under its own name because the two
-/// forms win at different call sites: the three-operation form above measured
-/// better everywhere except the NSQ sample loops and the HP biquad, where it
-/// cost one instruction per use (del-dec NSQ +1,978,346, hp_cutoff +577,800 on
-/// the hybrid instrument). Those call this one.
+/// [`silk_rshift_round`] in its two-shift form,
+/// `(a >> s) + ((a >> (s - 1)) & 1)`: the same value for every input. It has
+/// its own name because the two forms win at different call sites. The
+/// three-operation form measured better everywhere except the NSQ sample loops
+/// and the HP biquad, where it cost one instruction per use (del-dec NSQ
+/// +1,978,346 and hp_cutoff +577,800 instructions on the hybrid instrument);
+/// those call this one.
 #[inline(always)]
 pub fn silk_rshift_round_2s(a: i32, shift: i32) -> i32 {
     if shift <= 0 {

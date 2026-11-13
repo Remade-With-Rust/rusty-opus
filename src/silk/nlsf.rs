@@ -268,11 +268,16 @@ pub fn silk_nlsf_vq(
         && lpc_order != 0
     {
         let x = &in_q15[..lpc_order];
-        let rows = pcb_q8.chunks_exact(lpc_order).zip(pwght_q9.chunks_exact(lpc_order));
+        let rows = pcb_q8
+            .chunks_exact(lpc_order)
+            .zip(pwght_q9.chunks_exact(lpc_order));
         for (err, (cb, w)) in err_q24[..k].iter_mut().zip(rows) {
             let mut sum_error_q24 = 0i32;
             let mut pred_q24 = 0i32;
-            let pairs = x.chunks_exact(2).zip(cb.chunks_exact(2)).zip(w.chunks_exact(2));
+            let pairs = x
+                .chunks_exact(2)
+                .zip(cb.chunks_exact(2))
+                .zip(w.chunks_exact(2));
             for ((xp, cp), wp) in pairs.rev() {
                 let diff_q15 = (xp[1] as i32) - ((cp[1] as i32) << 7);
                 let diffw_q24 = silk_smulbb(diff_q15, wp[1] as i32);
@@ -281,8 +286,7 @@ pub fn silk_nlsf_vq(
 
                 let diff_q15_m = (xp[0] as i32) - ((cp[0] as i32) << 7);
                 let diffw_q24_m = silk_smulbb(diff_q15_m, wp[0] as i32);
-                sum_error_q24 =
-                    sum_error_q24.wrapping_add((diffw_q24_m - (pred_q24 >> 1)).abs());
+                sum_error_q24 = sum_error_q24.wrapping_add((diffw_q24_m - (pred_q24 >> 1)).abs());
                 pred_q24 = diffw_q24_m;
             }
             *err = sum_error_q24;
@@ -294,7 +298,6 @@ pub fn silk_nlsf_vq(
         let mut pred_q24 = 0i32;
         let cb_ptr = &pcb_q8[i * lpc_order..];
         let w_ptr = &pwght_q9[i * lpc_order..];
-
 
         for m in (0..lpc_order).step_by(2).rev() {
             let diff_q15 = (in_q15[m + 1] as i32) - ((cb_ptr[m + 1] as i32) << 7);

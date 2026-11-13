@@ -225,7 +225,6 @@ pub fn silk_burg_modified_fix(
         .map(|&v| i64::from(i32::from(v) * i32::from(v)))
         .sum();
 
-
     let lz = silk_clz64(c0_64);
     let rshifts = (32 + 1 + N_BITS_HEAD_ROOM - lz).clamp(MIN_RSHIFTS, MAX_RSHIFTS);
 

@@ -914,7 +914,11 @@ pub fn pitch_downsample(x: &[&[f32]], x_lp: &mut [f32], len: usize, c: usize, fa
     if factor == 2 && (1..=2).contains(&c) && x.len() >= c {
         let min_len = x[..c].iter().map(|ch| ch.len()).min().unwrap_or(0);
         // Output i is interior iff 2 * i + 1 < min_len.
-        let end = if min_len >= 4 { ((min_len - 2) / 2 + 1).min(len) } else { 1 };
+        let end = if min_len >= 4 {
+            ((min_len - 2) / 2 + 1).min(len)
+        } else {
+            1
+        };
         if end > 1 {
             let out = &mut x_lp[1..end];
             // Taps of output i are a[2 * (i - 1)..][..3] with a = x[1..2 * end].

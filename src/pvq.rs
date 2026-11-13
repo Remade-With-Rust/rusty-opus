@@ -247,7 +247,6 @@ pub fn icwrs(n: u32, _k: u32, y: &[i32]) -> u32 {
         if yj < 0 {
             i = i.wrapping_add(celt_pvq_u_lookup(m, k + 1));
         }
-
     }
     i
 }
@@ -340,7 +339,6 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
                 if p <= i || curr_k <= 0 {
                     break;
                 }
-
             }
             i -= p;
             let val = k0 - curr_k;
@@ -1441,7 +1439,6 @@ fn exp_rotation1_scalar(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32
 fn exp_rotation1_scalar_checked(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
     let ms = -s;
     for i in 0..(len - stride) {
-
         let x1 = x[i];
         let x2 = x[i + stride];
         x[i + stride] = c * x2 + s * x1;
