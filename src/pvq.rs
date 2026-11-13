@@ -1408,8 +1408,40 @@ fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
 
 #[inline]
 fn exp_rotation1_scalar(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
+    // Bound relation: `len` bounds the band, `x.len()` bounds the memory, and
+    // nothing related them, so each of the four accesses per step carried its
+    // own bounds check. With `x` cut to exactly `len` and `stride <= len`, the
+    // loop conditions prove every index. Any other shape (never produced by
+    // the codec) takes the original checked loops unchanged.
+    if len > x.len() || stride > len {
+        return exp_rotation1_scalar_checked(x, len, stride, c, s);
+    }
+    let x = &mut x[..len];
     let ms = -s;
     for i in 0..(len - stride) {
+        let x1 = x[i];
+        let x2 = x[i + stride];
+        x[i + stride] = c * x2 + s * x1;
+        x[i] = c * x1 + ms * x2;
+    }
+    if len >= 2 * stride {
+        for i in (0..(len - 2 * stride)).rev() {
+            let x1 = x[i];
+            let x2 = x[i + stride];
+            x[i + stride] = c * x2 + s * x1;
+            x[i] = c * x1 + ms * x2;
+        }
+    }
+}
+
+/// The original, fully bounds-checked loops of [`exp_rotation1_scalar`], kept
+/// for shapes its fast path does not prove (`len > x.len()` or `stride > len`).
+#[cold]
+#[inline(never)]
+fn exp_rotation1_scalar_checked(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
+    let ms = -s;
+    for i in 0..(len - stride) {
+
         let x1 = x[i];
         let x2 = x[i + stride];
         x[i + stride] = c * x2 + s * x1;
