@@ -716,13 +716,20 @@ static RESAMPLER_1_6_COEFS: [i16; 2 + RESAMPLER_DOWN_ORDER_FIR2 / 2] = [
 /// silk_resampler_private_AR2, exact port. (The older silk_resampler_private_ar2
 /// above has a different state recurrence and is kept for its down2_3 caller.)
 fn ar2_q14_exact(s: &mut [i32; 2], out_q8: &mut [i32], input: &[i16], a_q14: &[i16]) {
-    for (k, &x) in input.iter().enumerate() {
-        let mut out32 = s[0].wrapping_add((x as i32) << 8);
-        out_q8[k] = out32;
+    // Coefficients and state in locals, input zipped with the output: no
+    // per-sample bounds check on `out_q8` or `a_q14`. Same recurrence.
+    let (a0, a1) = (a_q14[0] as i32, a_q14[1] as i32);
+    let (mut s0, mut s1) = (s[0], s[1]);
+    for (&x, o) in input.iter().zip(out_q8[..input.len()].iter_mut()) {
+        let mut out32 = s0.wrapping_add((x as i32) << 8);
+        *o = out32;
         out32 = out32.wrapping_shl(2);
-        s[0] = silk_smlawb(s[1], out32, a_q14[0] as i32);
-        s[1] = silk_smulwb(out32, a_q14[1] as i32);
+        s0 = silk_smlawb(s1, out32, a0);
+        s1 = silk_smulwb(out32, a1);
     }
+    s[0] = s0;
+    s[1] = s1;
+
 }
 
 #[inline]
