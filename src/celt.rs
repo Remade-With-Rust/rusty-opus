@@ -134,8 +134,13 @@ fn transient_analysis(
 
         let mut unmask = 0.0f32;
         for i in (12..(len2 - 5)).step_by(4) {
-            let id = (64.0 * norm * (tmp2[i] + 1e-10)).floor() as i32;
+            // No floor: the clamp to [0, 127] follows, and for every f32 the
+            // truncating cast gives the same clamped index (v >= 0: trunc ==
+            // floor; v < 0: both clamp to 0; NaN: both 0; +inf: both 127). The
+            // floor was a libm call per 4 samples of every analysed frame.
+            let id = (64.0 * norm * (tmp2[i] + 1e-10)) as i32;
             let id = id.clamp(0, 127) as usize;
+
             unmask += INV_TABLE[id] as f32;
         }
 
