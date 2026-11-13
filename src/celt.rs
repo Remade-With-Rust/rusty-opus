@@ -2133,13 +2133,20 @@ impl CeltEncoder {
             let mut m = self.preemph_mem[c];
             let coef = mode.preemph[0];
             if up == 1 {
-                for i in 0..frame_size {
-                    let x = pcm[c * frame_size + i] * 32768.0;
-                    let val = x - m;
-                    self.syn_mem[channel_offset + syn_mem_size - frame_size + i] = val;
+                // Slices instead of two computed indices per sample: one range
+                // check per channel, and the loop body is the same three float
+                // operations in the same order (`m` is the previous sample
+                // times `coef`, not a feedback term).
+                let src = &pcm[c * frame_size..(c + 1) * frame_size];
+                let dst_start = channel_offset + syn_mem_size - frame_size;
+                let dst = &mut self.syn_mem[dst_start..dst_start + frame_size];
+                for (d, &p) in dst.iter_mut().zip(src) {
+                    let x = p * 32768.0;
+                    *d = x - m;
                     m = x * coef;
                 }
             } else {
+
                 // celt_preemphasis with upsample: one input sample every `up`
                 // positions, zeros between (the spectral images this creates
                 // above the input's Nyquist are cleared after the MDCT).
