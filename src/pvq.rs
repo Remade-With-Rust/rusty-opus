@@ -241,9 +241,13 @@ pub fn icwrs(n: u32, _k: u32, y: &[i32]) -> u32 {
         i = i.wrapping_add(celt_pvq_u_lookup(m, k));
         k += yj.unsigned_abs();
 
-        let sign_mask = yj >> 31;
-        let lookup = (sign_mask as u32) & celt_pvq_u_lookup(m, k + 1);
-        i = i.wrapping_add(lookup);
+        // libopus shape (`if (_y[j] < 0) i += CELT_PVQ_U(_n - j, k + 1)`): the
+        // masked form looked the cell up for every coefficient, including the
+        // zeros and the positives that then discard it.
+        if yj < 0 {
+            i = i.wrapping_add(celt_pvq_u_lookup(m, k + 1));
+        }
+
     }
     i
 }
