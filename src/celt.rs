@@ -99,14 +99,17 @@ fn transient_analysis(
         let mut mem0 = 0.0f32;
         let mut mem1 = 0.0f32;
 
-        for i in 0..len {
-            let x = input[c * len + i];
+        // One source and one destination slice per channel (was an index
+        // multiply and two bounds checks per sample); the recurrence is
+        // unchanged.
+        for (t, &x) in tmp[..len].iter_mut().zip(&input[c * len..(c + 1) * len]) {
             let y = mem0 + x;
             let mem00 = mem0;
             mem0 = mem0 - x + 0.5 * mem1;
             mem1 = x - mem00;
-            tmp[i] = y;
+            *t = y;
         }
+
 
         tmp[..12].fill(0.0);
 
