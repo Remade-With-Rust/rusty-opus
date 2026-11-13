@@ -3262,13 +3262,38 @@ impl OpusDecoder {
                             0,
                             celt_end_band,
                         );
-                        for i in 0..sub_frame_size {
-                            for ch in 0..self.channels {
-                                let idx = out_start + i * self.channels + ch;
-                                output[idx] =
-                                    self.w_celt_planar[ch * sub_frame_size + i].clamp(-1.0, 1.0);
+                        // Planar -> interleaved with the clamp. Mono and stereo
+                        // zip slices (one range check each, vectorisable);
+                        // the indexed general form paid two index multiplies
+                        // and two bounds checks per sample.
+                        let planar = &self.w_celt_planar[..needed];
+                        match self.channels {
+                            1 => {
+                                let out = &mut output[out_start..out_start + sub_frame_size];
+                                for (o, &p) in out.iter_mut().zip(&planar[..sub_frame_size]) {
+                                    *o = p.clamp(-1.0, 1.0);
+                                }
+                            }
+                            2 => {
+                                let out = &mut output[out_start..out_start + 2 * sub_frame_size];
+                                let (left, right) = planar[..2 * sub_frame_size]
+                                    .split_at(sub_frame_size);
+                                for ((o, &l), &r) in out.chunks_exact_mut(2).zip(left).zip(right) {
+                                    o[0] = l.clamp(-1.0, 1.0);
+                                    o[1] = r.clamp(-1.0, 1.0);
+                                }
+                            }
+                            _ => {
+                                for i in 0..sub_frame_size {
+                                    for ch in 0..self.channels {
+                                        let idx = out_start + i * self.channels + ch;
+                                        output[idx] = planar[ch * sub_frame_size + i]
+                                            .clamp(-1.0, 1.0);
+                                    }
+                                }
                             }
                         }
+
                     }
                     self.last_range = rc.rng;
                     self.rc_scratch = rc.buf; // reuse the payload buffer next frame
