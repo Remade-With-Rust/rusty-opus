@@ -75,7 +75,10 @@ fn tansig_approx(x: f32) -> f32 {
         return 0.0;
     }
     let (x, sign) = if x < 0.0 { (-x, -1.0f32) } else { (x, 1.0f32) };
-    let i = (0.5 + 25.0 * x).floor() as usize;
+    // `x >= 0` here (sign folded out above, NaN returned earlier), so the
+    // truncating cast is the floor - without the libm call.
+    let i = (0.5 + 25.0 * x) as usize;
+
     let x = x - 0.04 * i as f32;
     let y = TANSIG_TABLE[i];
     let dy = 1.0 - y * y;
@@ -669,12 +672,14 @@ fn tonality_analysis(
         let d_angle2 = angle2 - angle;
         let d2_angle2 = d_angle2 - d_angle;
 
-        let mut mod1 = d2_angle - d2_angle.round_ties_even();
+        // `fmath::round_ties_even` returns the bits of the std function without
+        // its libm call (rintf, twice per analysed bin).
+        let mut mod1 = d2_angle - crate::fmath::round_ties_even(d2_angle);
         noisiness[i] = mod1.abs();
         mod1 *= mod1;
         mod1 *= mod1;
 
-        let mut mod2 = d2_angle2 - d2_angle2.round_ties_even();
+        let mut mod2 = d2_angle2 - crate::fmath::round_ties_even(d2_angle2);
         noisiness[i] += mod2.abs();
         mod2 *= mod2;
         mod2 *= mod2;
