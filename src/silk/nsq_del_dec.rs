@@ -386,6 +386,20 @@ fn nsq_shape_filter_soa_scalar(
     }
 }
 
+/// The shaping coefficients of one subframe as 4 x i64 lanes each (the value
+/// `_mm256_mul_epi32` multiplies by sits in the low dword of every lane), built
+/// once per subframe for [`nsq_shape_filter_soa_avx2`]. Indexing panics exactly
+/// where the scalar twin's `ar_shp_q13[j]` would.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn nsq_shape_coef_lanes(ar_shp_q13: &[i16], order: usize) -> [[i64; 4]; MAX_SHAPE_LPC_ORDER] {
+    let mut cb = [[0i64; 4]; MAX_SHAPE_LPC_ORDER];
+    for j in 0..order {
+        cb[j] = [i64::from(ar_shp_q13[j]); 4];
+    }
+    cb
+}
+
 /// Hand-AVX2 twin: the 4 states run as 4 **i64 lanes** of a `__m256i` throughout
 /// the recurrence (values stay i32-range) — the key over the reverted S1d attempt
 /// is that nothing narrows/permutes per op; the narrow-to-i32 happens once, on
@@ -407,7 +421,7 @@ unsafe fn nsq_shape_filter_soa_avx2(
     sar: &mut [[i32; 4]],
     diff: &[i32; 4],
     warp: i32,
-    ar_shp_q13: &[i16],
+    cb: &[[i64; 4]; MAX_SHAPE_LPC_ORDER],
     order: usize,
     base: i32,
     n_ar: &mut [i32; 4],
@@ -428,7 +442,10 @@ unsafe fn nsq_shape_filter_soa_avx2(
         let g = _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6));
         _mm_storeu_si128(p.as_mut_ptr() as *mut __m128i, _mm256_castsi256_si128(g));
     };
-    let cbv = |c: i32| _mm256_set1_epi64x(c as i16 as i64);
+    // Coefficient lanes come pre-expanded (see `nsq_shape_coef_lanes`): a load
+    // the multiply can fold, instead of a sign-extend + broadcast per tap per
+    // sample for values that are constant over the subframe.
+    let cbv = |j: usize| _mm256_loadu_si256(cb[j].as_ptr() as *const __m256i);
 
     // One pass over the taps, loading each state column when it is first needed
     // and storing it as soon as its new value is known (the recurrence at tap j
@@ -444,7 +461,7 @@ unsafe fn nsq_shape_filter_soa_avx2(
     let mut acc = smlawb_v(
         _mm256_set1_epi64x(base as i64),
         tmp2,
-        cbv(ar_shp_q13[0] as i32),
+        cbv(0),
     );
     s_cur = s_next;
     let mut j = 2;
@@ -452,16 +469,16 @@ unsafe fn nsq_shape_filter_soa_avx2(
         let s_j = ldv(&sar[j]);
         tmp2 = smlawb_v(s_cur, _mm256_sub_epi64(s_j, tmp1), wb);
         stv(&mut sar[j - 1], tmp1);
-        acc = smlawb_v(acc, tmp1, cbv(ar_shp_q13[j - 1] as i32));
+        acc = smlawb_v(acc, tmp1, cbv(j - 1));
         let s_j1 = ldv(&sar[j + 1]);
         tmp1 = smlawb_v(s_j, _mm256_sub_epi64(s_j1, tmp2), wb);
         stv(&mut sar[j], tmp2);
-        acc = smlawb_v(acc, tmp2, cbv(ar_shp_q13[j] as i32));
+        acc = smlawb_v(acc, tmp2, cbv(j));
         s_cur = s_j1;
         j += 2;
     }
     stv(&mut sar[order - 1], tmp1);
-    acc = smlawb_v(acc, tmp1, cbv(ar_shp_q13[order - 1] as i32));
+    acc = smlawb_v(acc, tmp1, cbv(order - 1));
     stv(n_ar, acc);
 }
 
@@ -471,6 +488,7 @@ fn nsq_shape_filter_soa(
     diff: &[i32; 4],
     warp: i32,
     ar_shp_q13: &[i16],
+    #[cfg(target_arch = "x86_64")] cb: &[[i64; 4]; MAX_SHAPE_LPC_ORDER],
     order: usize,
     base: i32,
     n_ar: &mut [i32; 4],
@@ -483,7 +501,7 @@ fn nsq_shape_filter_soa(
             // the kernel is compiled with. The kernel has no memory
             // preconditions: its raw loads/stores go through `&[i32; 4]`
             // references and all other indexing is bounds-checked.
-            unsafe { nsq_shape_filter_soa_avx2(sar, diff, warp, ar_shp_q13, order, base, n_ar) };
+            unsafe { nsq_shape_filter_soa_avx2(sar, diff, warp, cb, order, base, n_ar) };
             return;
         }
     }
@@ -576,7 +594,8 @@ mod lpc_pred_avx2_tests {
                 // preconditions beyond that (`sar_b` and `ar` have `order`
                 // entries, and its indexing is bounds-checked anyway).
                 unsafe {
-                    nsq_shape_filter_soa_avx2(&mut sar_b, &diff, warp, &ar, order, base, &mut nb);
+                    let cb = nsq_shape_coef_lanes(&ar, order);
+                    nsq_shape_filter_soa_avx2(&mut sar_b, &diff, warp, &cb, order, base, &mut nb);
                 };
                 assert_eq!(na, nb, "n_ar mismatch order={order} sh={sh}");
                 assert_eq!(sar_a, sar_b, "sar mismatch order={order} sh={sh}");
@@ -630,6 +649,8 @@ pub fn silk_noise_shape_quantizer_del_dec(
     // ONLY in `sar_soa` (the shaping filter + the RD state-swap update it there).
     let shp_ord = shaping_lpc_order as usize;
     let shp_base = silk_rshift(shaping_lpc_order, 1);
+    #[cfg(target_arch = "x86_64")]
+    let shp_cb = nsq_shape_coef_lanes(ar_shp_q13, shp_ord);
     let mut sar_soa = [[0i32; 4]; MAX_SHAPE_LPC_ORDER];
     for k in 0..n_states {
         for j in 0..shp_ord {
@@ -710,6 +731,8 @@ pub fn silk_noise_shape_quantizer_del_dec(
             &diff_arr,
             warping_q16,
             ar_shp_q13,
+            #[cfg(target_arch = "x86_64")]
+            &shp_cb,
             shp_ord,
             shp_base,
             &mut n_ar_raw,
