@@ -353,12 +353,23 @@ fn nsq_shape_avx2_enabled() -> bool {
     crate::isa::avx2() && !opted_out
 }
 
+/// Storage type of one lane of the cross-state shaping state `sar[tap][state]`.
+/// On x86_64 the AVX2 kernel works in 64-bit lanes whose LOW dword is the i32
+/// state, so the state is kept in that form for the whole subframe: columns
+/// load and store as plain 256-bit moves instead of a sign-extending load and a
+/// permute + narrow store per tap per sample. Bits 32..63 are unspecified and
+/// never read (every reader truncates with `as i32`). Elsewhere it is the i32.
+#[cfg(target_arch = "x86_64")]
+type SarLane = i64;
+#[cfg(not(target_arch = "x86_64"))]
+type SarLane = i32;
+
 /// Cross-state warped shaping AR filter over a state-minor SoA buffer
 /// `sar[tap][state]` (the 4 del-dec states are the lanes). Serial in the tap
 /// dimension; scalar twin = the oracle for the AVX2 version below.
 #[inline(always)]
 fn nsq_shape_filter_soa_scalar(
-    sar: &mut [[i32; 4]],
+    sar: &mut [[SarLane; 4]],
     diff: &[i32; 4],
     warp: i32,
     ar_shp_q13: &[i16],
@@ -367,21 +378,30 @@ fn nsq_shape_filter_soa_scalar(
     n_ar: &mut [i32; 4],
 ) {
     for k in 0..4 {
-        let mut tmp2 = silk_smlawb(diff[k], sar[0][k], warp);
-        let mut tmp1 = silk_smlawb(sar[0][k], silk_sub32_ovflw(sar[1][k], tmp2), warp);
-        sar[0][k] = tmp2;
+        let mut tmp2 = silk_smlawb(diff[k], sar[0][k] as i32, warp);
+        let mut tmp1 =
+            silk_smlawb(sar[0][k] as i32, silk_sub32_ovflw(sar[1][k] as i32, tmp2), warp);
+        sar[0][k] = tmp2 as SarLane;
         let mut acc = silk_smlawb(base, tmp2, ar_shp_q13[0] as i32);
         let mut j = 2;
         while j < order {
-            tmp2 = silk_smlawb(sar[j - 1][k], silk_sub32_ovflw(sar[j][k], tmp1), warp);
-            sar[j - 1][k] = tmp1;
+            tmp2 = silk_smlawb(
+                sar[j - 1][k] as i32,
+                silk_sub32_ovflw(sar[j][k] as i32, tmp1),
+                warp,
+            );
+            sar[j - 1][k] = tmp1 as SarLane;
             acc = silk_smlawb(acc, tmp1, ar_shp_q13[j - 1] as i32);
-            tmp1 = silk_smlawb(sar[j][k], silk_sub32_ovflw(sar[j + 1][k], tmp2), warp);
-            sar[j][k] = tmp2;
+            tmp1 = silk_smlawb(
+                sar[j][k] as i32,
+                silk_sub32_ovflw(sar[j + 1][k] as i32, tmp2),
+                warp,
+            );
+            sar[j][k] = tmp2 as SarLane;
             acc = silk_smlawb(acc, tmp2, ar_shp_q13[j] as i32);
             j += 2;
         }
-        sar[order - 1][k] = tmp1;
+        sar[order - 1][k] = tmp1 as SarLane;
         n_ar[k] = silk_smlawb(acc, tmp1, ar_shp_q13[order - 1] as i32);
     }
 }
@@ -411,14 +431,14 @@ fn nsq_shape_coef_lanes(ar_shp_q13: &[i16], order: usize) -> [[i64; 4]; MAX_SHAP
 ///
 /// The CPU must support AVX2 (the kernel is compiled with
 /// `#[target_feature(enable = "avx2")]`). There are no memory preconditions:
-/// every raw load/store goes through a `&[i32; 4]` / `&mut [i32; 4]` reference
-/// (always 16 valid bytes; unaligned intrinsics), and all slice/array indexing
+/// every raw load/store goes through a `&[i32; 4]` / `&[i64; 4]` reference
+/// (always 16 / 32 valid bytes; unaligned intrinsics), and all slice/array indexing
 /// (`sar[j]`, `ar_shp_q13[j]`) is bounds-checked, so a bad `order` panics
 /// rather than reading out of bounds.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn nsq_shape_filter_soa_avx2(
-    sar: &mut [[i32; 4]],
+    sar: &mut [[i64; 4]],
     diff: &[i32; 4],
     warp: i32,
     cb: &[[i64; 4]; MAX_SHAPE_LPC_ORDER],
@@ -437,6 +457,9 @@ unsafe fn nsq_shape_filter_soa_avx2(
     let asr16 = |x: __m256i| _mm256_srli_epi64(x, 16);
     let smlawb_v =
         |a: __m256i, b: __m256i, cb: __m256i| _mm256_add_epi64(a, asr16(_mm256_mul_epi32(b, cb)));
+    // State columns live as 64-bit lanes (see `SarLane`): whole-register moves.
+    let lds = |p: &[i64; 4]| _mm256_loadu_si256(p.as_ptr() as *const __m256i);
+    let sts = |p: &mut [i64; 4], v: __m256i| _mm256_storeu_si256(p.as_mut_ptr() as *mut __m256i, v);
     let ldv = |p: &[i32; 4]| _mm256_cvtepi32_epi64(_mm_loadu_si128(p.as_ptr() as *const __m128i));
     let stv = |p: &mut [i32; 4], v: __m256i| {
         let g = _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6));
@@ -452,12 +475,12 @@ unsafe fn nsq_shape_filter_soa_avx2(
     // needs only the ORIGINAL columns j-1, j and j+1). The earlier form staged
     // all columns in a zero-initialised [__m256i; 24] - a 768-byte memset plus a
     // stack round trip per column, on every sample.
-    let mut s_cur = ldv(&sar[0]);
+    let mut s_cur = lds(&sar[0]);
     let vdiff = ldv(diff);
     let mut tmp2 = smlawb_v(vdiff, s_cur, wb);
-    let s_next = ldv(&sar[1]);
+    let s_next = lds(&sar[1]);
     let mut tmp1 = smlawb_v(s_cur, _mm256_sub_epi64(s_next, tmp2), wb);
-    stv(&mut sar[0], tmp2);
+    sts(&mut sar[0], tmp2);
     let mut acc = smlawb_v(
         _mm256_set1_epi64x(base as i64),
         tmp2,
@@ -466,25 +489,25 @@ unsafe fn nsq_shape_filter_soa_avx2(
     s_cur = s_next;
     let mut j = 2;
     while j < order {
-        let s_j = ldv(&sar[j]);
+        let s_j = lds(&sar[j]);
         tmp2 = smlawb_v(s_cur, _mm256_sub_epi64(s_j, tmp1), wb);
-        stv(&mut sar[j - 1], tmp1);
+        sts(&mut sar[j - 1], tmp1);
         acc = smlawb_v(acc, tmp1, cbv(j - 1));
-        let s_j1 = ldv(&sar[j + 1]);
+        let s_j1 = lds(&sar[j + 1]);
         tmp1 = smlawb_v(s_j, _mm256_sub_epi64(s_j1, tmp2), wb);
-        stv(&mut sar[j], tmp2);
+        sts(&mut sar[j], tmp2);
         acc = smlawb_v(acc, tmp2, cbv(j));
         s_cur = s_j1;
         j += 2;
     }
-    stv(&mut sar[order - 1], tmp1);
+    sts(&mut sar[order - 1], tmp1);
     acc = smlawb_v(acc, tmp1, cbv(order - 1));
     stv(n_ar, acc);
 }
 
 #[inline(always)]
 fn nsq_shape_filter_soa(
-    sar: &mut [[i32; 4]],
+    sar: &mut [[SarLane; 4]],
     diff: &[i32; 4],
     warp: i32,
     ar_shp_q13: &[i16],
@@ -570,10 +593,10 @@ mod lpc_pred_avx2_tests {
         for order in [16usize, 24] {
             for _ in 0..crate::isa::oracle::iters(20_000) {
                 let sh = 6 + (rng() % 20) as u32;
-                let mut sar_a = vec![[0i32; 4]; order];
+                let mut sar_a = vec![[0 as SarLane; 4]; order];
                 for row in &mut sar_a {
                     for v in row.iter_mut() {
-                        *v = (rng() as i32) >> sh;
+                        *v = ((rng() as i32) >> sh) as SarLane;
                     }
                 }
                 let mut sar_b = sar_a.clone();
@@ -598,7 +621,11 @@ mod lpc_pred_avx2_tests {
                     nsq_shape_filter_soa_avx2(&mut sar_b, &diff, warp, &cb, order, base, &mut nb);
                 };
                 assert_eq!(na, nb, "n_ar mismatch order={order} sh={sh}");
-                assert_eq!(sar_a, sar_b, "sar mismatch order={order} sh={sh}");
+                // Only the low dword of a lane is state (see `SarLane`).
+                let low = |v: &Vec<[SarLane; 4]>| -> Vec<[i32; 4]> {
+                    v.iter().map(|r| r.map(|x| x as i32)).collect()
+                };
+                assert_eq!(low(&sar_a), low(&sar_b), "sar mismatch order={order} sh={sh}");
             }
         }
     }
@@ -651,10 +678,10 @@ pub fn silk_noise_shape_quantizer_del_dec(
     let shp_base = silk_rshift(shaping_lpc_order, 1);
     #[cfg(target_arch = "x86_64")]
     let shp_cb = nsq_shape_coef_lanes(ar_shp_q13, shp_ord);
-    let mut sar_soa = [[0i32; 4]; MAX_SHAPE_LPC_ORDER];
+    let mut sar_soa = [[0 as SarLane; 4]; MAX_SHAPE_LPC_ORDER];
     for k in 0..n_states {
         for j in 0..shp_ord {
-            sar_soa[j][k] = ps_del_dec[k].s_ar2_q14[j];
+            sar_soa[j][k] = ps_del_dec[k].s_ar2_q14[j] as SarLane;
         }
     }
 
@@ -964,7 +991,7 @@ pub fn silk_noise_shape_quantizer_del_dec(
     // the next subframe's scale_states and the final copy see the updated s_ar2.
     for k in 0..n_states {
         for j in 0..shp_ord {
-            ps_del_dec[k].s_ar2_q14[j] = sar_soa[j][k];
+            ps_del_dec[k].s_ar2_q14[j] = sar_soa[j][k] as i32;
         }
     }
     for k in 0..n_states {
