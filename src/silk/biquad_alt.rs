@@ -18,11 +18,11 @@ pub fn silk_biquad_alt_stride1(
         let inval = input[k] as i32;
         let out32_q14 = silk_smlawb(s[0], b_q28[0], inval) << 2;
 
-        s[0] = s[1] + silk_rshift_round(silk_smulwb(out32_q14, a0_l_q28), 14);
+        s[0] = s[1] + silk_rshift_round_2s(silk_smulwb(out32_q14, a0_l_q28), 14);
         s[0] = silk_smlawb(s[0], out32_q14, a0_u_q28);
         s[0] = silk_smlawb(s[0], b_q28[1], inval);
 
-        s[1] = silk_rshift_round(silk_smulwb(out32_q14, a1_l_q28), 14);
+        s[1] = silk_rshift_round_2s(silk_smulwb(out32_q14, a1_l_q28), 14);
         s[1] = silk_smlawb(s[1], out32_q14, a1_u_q28);
         s[1] = silk_smlawb(s[1], b_q28[2], inval);
 
@@ -48,15 +48,15 @@ pub fn silk_biquad_alt_stride2(
         let out32_q14_0 = silk_smlawb(s[0], b_q28[0], input[2 * k] as i32) << 2;
         let out32_q14_1 = silk_smlawb(s[2], b_q28[0], input[2 * k + 1] as i32) << 2;
 
-        s[0] = s[1] + silk_rshift_round(silk_smulwb(out32_q14_0, a0_l_q28), 14);
-        s[2] = s[3] + silk_rshift_round(silk_smulwb(out32_q14_1, a0_l_q28), 14);
+        s[0] = s[1] + silk_rshift_round_2s(silk_smulwb(out32_q14_0, a0_l_q28), 14);
+        s[2] = s[3] + silk_rshift_round_2s(silk_smulwb(out32_q14_1, a0_l_q28), 14);
         s[0] = silk_smlawb(s[0], out32_q14_0, a0_u_q28);
         s[2] = silk_smlawb(s[2], out32_q14_1, a0_u_q28);
         s[0] = silk_smlawb(s[0], b_q28[1], input[2 * k] as i32);
         s[2] = silk_smlawb(s[2], b_q28[1], input[2 * k + 1] as i32);
 
-        s[1] = silk_rshift_round(silk_smulwb(out32_q14_0, a1_l_q28), 14);
-        s[3] = silk_rshift_round(silk_smulwb(out32_q14_1, a1_l_q28), 14);
+        s[1] = silk_rshift_round_2s(silk_smulwb(out32_q14_0, a1_l_q28), 14);
+        s[3] = silk_rshift_round_2s(silk_smulwb(out32_q14_1, a1_l_q28), 14);
         s[1] = silk_smlawb(s[1], out32_q14_0, a1_u_q28);
         s[3] = silk_smlawb(s[3], out32_q14_1, a1_u_q28);
         s[1] = silk_smlawb(s[1], b_q28[2], input[2 * k] as i32);

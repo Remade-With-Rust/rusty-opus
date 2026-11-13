@@ -150,7 +150,7 @@ pub fn silk_nsq_scale_states(
 
     let mut inv_gain_q31 = silk_inverse32_varq(if gains_q16[k] > 1 { gains_q16[k] } else { 1 }, 47);
 
-    let inv_gain_q26 = silk_rshift_round(inv_gain_q31, 5);
+    let inv_gain_q26 = silk_rshift_round_2s(inv_gain_q31, 5);
     for i in 0..subfr_length {
         x_sc_q10[i] = silk_smulww(x16[i] as i32, inv_gain_q26);
     }
@@ -720,7 +720,7 @@ fn silk_noise_shape_quantizer_voiced(
 
         tmp2 = ltp_pred_q13 - n_ltp_q13;
         tmp1 = tmp2.wrapping_add(tmp1 << 1);
-        tmp1 = silk_rshift_round(tmp1, 3);
+        tmp1 = silk_rshift_round_2s(tmp1, 3);
 
         r_q10 = x_sc_q10[i] - tmp1;
 
@@ -774,7 +774,7 @@ fn silk_noise_shape_quantizer_voiced(
             q1_q10 = q2_q10;
         }
 
-        pulses[i] = silk_rshift_round(q1_q10, 10) as i8;
+        pulses[i] = silk_rshift_round_2s(q1_q10, 10) as i8;
 
         exc_q14 = q1_q10 << 4;
         if rand_seed < 0 {
@@ -785,7 +785,7 @@ fn silk_noise_shape_quantizer_voiced(
         xq_q14 = lpc_exc_q14.wrapping_add(lpc_pred_q10 << 4);
 
         nsq.xq[xq_offset + i] =
-            silk_sat16(silk_rshift_round(silk_smulww(xq_q14, gain_q10), 8)) as i16;
+            silk_sat16(silk_rshift_round_2s(silk_smulww(xq_q14, gain_q10), 8)) as i16;
 
         nsq.s_lpc_q14[NSQ_LPC_BUF_LENGTH + i] = xq_q14;
         s_diff_shp_q14 = xq_q14.wrapping_sub(x_sc_q10[i] << 4);
@@ -877,7 +877,7 @@ fn silk_noise_shape_quantizer_unvoiced(
         tmp1 = (lpc_pred_q10 << 2).wrapping_sub(n_ar_q12);
         tmp1 = tmp1.wrapping_sub(n_lf_q12);
 
-        tmp1 = silk_rshift_round(tmp1, 2);
+        tmp1 = silk_rshift_round_2s(tmp1, 2);
 
         r_q10 = x_sc_q10[i] - tmp1;
 
@@ -931,7 +931,7 @@ fn silk_noise_shape_quantizer_unvoiced(
             q1_q10 = q2_q10;
         }
 
-        pulses[i] = silk_rshift_round(q1_q10, 10) as i8;
+        pulses[i] = silk_rshift_round_2s(q1_q10, 10) as i8;
 
         exc_q14 = q1_q10 << 4;
         if rand_seed < 0 {
@@ -942,7 +942,7 @@ fn silk_noise_shape_quantizer_unvoiced(
         xq_q14 = lpc_exc_q14.wrapping_add(lpc_pred_q10 << 4);
 
         nsq.xq[xq_offset + i] =
-            silk_sat16(silk_rshift_round(silk_smulww(xq_q14, gain_q10), 8)) as i16;
+            silk_sat16(silk_rshift_round_2s(silk_smulww(xq_q14, gain_q10), 8)) as i16;
 
         nsq.s_lpc_q14[NSQ_LPC_BUF_LENGTH + i] = xq_q14;
         s_diff_shp_q14 = xq_q14.wrapping_sub(x_sc_q10[i] << 4);

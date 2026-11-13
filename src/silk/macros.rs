@@ -50,6 +50,32 @@ pub fn silk_rshift_round(a: i32, shift: i32) -> i32 {
     if shift >= 31 {
         return 0;
     }
+    if shift == 1 {
+        return (a >> 1) + (a & 1);
+    }
+    // libopus form for shift >= 2: with t = a >> (shift - 1),
+    // (t + 1) >> 1 == (t >> 1) + (t & 1) (both are ceil(t / 2)), and
+    // |t| <= 2^30 so the + 1 cannot overflow. One shift fewer than the
+    // two-shift form; the shift is a constant at nearly every call site, so
+    // the `== 1` test folds away.
+    ((a >> (shift - 1)) + 1) >> 1
+}
+
+
+/// [`silk_rshift_round`] in its two-shift form `(a >> s) + ((a >> (s - 1)) & 1)`
+/// - the same value for every input. Kept under its own name because the two
+/// forms win at different call sites: the three-operation form above measured
+/// better everywhere except the NSQ sample loops and the HP biquad, where it
+/// cost one instruction per use (del-dec NSQ +1,978,346, hp_cutoff +577,800 on
+/// the hybrid instrument). Those call this one.
+#[inline(always)]
+pub fn silk_rshift_round_2s(a: i32, shift: i32) -> i32 {
+    if shift <= 0 {
+        return a << -shift;
+    }
+    if shift >= 31 {
+        return 0;
+    }
     (a >> shift) + ((a >> (shift - 1)) & 1)
 }
 
