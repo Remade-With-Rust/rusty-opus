@@ -399,9 +399,8 @@ fn nsq_shape_filter_soa_scalar(
 /// `#[target_feature(enable = "avx2")]`). There are no memory preconditions:
 /// every raw load/store goes through a `&[i32; 4]` / `&mut [i32; 4]` reference
 /// (always 16 valid bytes; unaligned intrinsics), and all slice/array indexing
-/// (`sar[j]`, `ar_shp_q13[j]`, `vsar[j]` with `vsar` sized
-/// `MAX_SHAPE_LPC_ORDER`) is bounds-checked, so a bad `order` panics rather
-/// than reading out of bounds.
+/// (`sar[j]`, `ar_shp_q13[j]`) is bounds-checked, so a bad `order` panics
+/// rather than reading out of bounds.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn nsq_shape_filter_soa_avx2(
@@ -431,35 +430,38 @@ unsafe fn nsq_shape_filter_soa_avx2(
     };
     let cbv = |c: i32| _mm256_set1_epi64x(c as i16 as i64);
 
-    // Load the state column-vectors once (i64 lanes); operate in-register.
-    let mut vsar = [_mm256_setzero_si256(); MAX_SHAPE_LPC_ORDER];
-    for j in 0..order {
-        vsar[j] = ldv(&sar[j]);
-    }
+    // One pass over the taps, loading each state column when it is first needed
+    // and storing it as soon as its new value is known (the recurrence at tap j
+    // needs only the ORIGINAL columns j-1, j and j+1). The earlier form staged
+    // all columns in a zero-initialised [__m256i; 24] - a 768-byte memset plus a
+    // stack round trip per column, on every sample.
+    let mut s_cur = ldv(&sar[0]);
     let vdiff = ldv(diff);
-    let mut tmp2 = smlawb_v(vdiff, vsar[0], wb);
-    let mut tmp1 = smlawb_v(vsar[0], _mm256_sub_epi64(vsar[1], tmp2), wb);
-    vsar[0] = tmp2;
+    let mut tmp2 = smlawb_v(vdiff, s_cur, wb);
+    let s_next = ldv(&sar[1]);
+    let mut tmp1 = smlawb_v(s_cur, _mm256_sub_epi64(s_next, tmp2), wb);
+    stv(&mut sar[0], tmp2);
     let mut acc = smlawb_v(
         _mm256_set1_epi64x(base as i64),
         tmp2,
         cbv(ar_shp_q13[0] as i32),
     );
+    s_cur = s_next;
     let mut j = 2;
     while j < order {
-        tmp2 = smlawb_v(vsar[j - 1], _mm256_sub_epi64(vsar[j], tmp1), wb);
-        vsar[j - 1] = tmp1;
+        let s_j = ldv(&sar[j]);
+        tmp2 = smlawb_v(s_cur, _mm256_sub_epi64(s_j, tmp1), wb);
+        stv(&mut sar[j - 1], tmp1);
         acc = smlawb_v(acc, tmp1, cbv(ar_shp_q13[j - 1] as i32));
-        tmp1 = smlawb_v(vsar[j], _mm256_sub_epi64(vsar[j + 1], tmp2), wb);
-        vsar[j] = tmp2;
+        let s_j1 = ldv(&sar[j + 1]);
+        tmp1 = smlawb_v(s_j, _mm256_sub_epi64(s_j1, tmp2), wb);
+        stv(&mut sar[j], tmp2);
         acc = smlawb_v(acc, tmp2, cbv(ar_shp_q13[j] as i32));
+        s_cur = s_j1;
         j += 2;
     }
-    vsar[order - 1] = tmp1;
+    stv(&mut sar[order - 1], tmp1);
     acc = smlawb_v(acc, tmp1, cbv(ar_shp_q13[order - 1] as i32));
-    for j in 0..order {
-        stv(&mut sar[j], vsar[j]);
-    }
     stv(n_ar, acc);
 }
 
