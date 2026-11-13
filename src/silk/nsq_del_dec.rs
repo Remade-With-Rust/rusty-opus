@@ -364,6 +364,19 @@ type SarLane = i64;
 #[cfg(not(target_arch = "x86_64"))]
 type SarLane = i32;
 
+/// The i32 state held in a [`SarLane`] (its low dword on x86_64).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn sar_lo(v: SarLane) -> i32 {
+    v as i32
+}
+/// The i32 state held in a [`SarLane`] (the lane itself off x86_64).
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn sar_lo(v: SarLane) -> i32 {
+    v
+}
+
 /// Cross-state warped shaping AR filter over a state-minor SoA buffer
 /// `sar[tap][state]` (the 4 del-dec states are the lanes). Serial in the tap
 /// dimension; scalar twin = the oracle for the AVX2 version below.
@@ -378,10 +391,10 @@ fn nsq_shape_filter_soa_scalar(
     n_ar: &mut [i32; 4],
 ) {
     for k in 0..4 {
-        let mut tmp2 = silk_smlawb(diff[k], sar[0][k] as i32, warp);
+        let mut tmp2 = silk_smlawb(diff[k], sar_lo(sar[0][k]), warp);
         let mut tmp1 = silk_smlawb(
-            sar[0][k] as i32,
-            silk_sub32_ovflw(sar[1][k] as i32, tmp2),
+            sar_lo(sar[0][k]),
+            silk_sub32_ovflw(sar_lo(sar[1][k]), tmp2),
             warp,
         );
         sar[0][k] = tmp2 as SarLane;
@@ -389,15 +402,15 @@ fn nsq_shape_filter_soa_scalar(
         let mut j = 2;
         while j < order {
             tmp2 = silk_smlawb(
-                sar[j - 1][k] as i32,
-                silk_sub32_ovflw(sar[j][k] as i32, tmp1),
+                sar_lo(sar[j - 1][k]),
+                silk_sub32_ovflw(sar_lo(sar[j][k]), tmp1),
                 warp,
             );
             sar[j - 1][k] = tmp1 as SarLane;
             acc = silk_smlawb(acc, tmp1, ar_shp_q13[j - 1] as i32);
             tmp1 = silk_smlawb(
-                sar[j][k] as i32,
-                silk_sub32_ovflw(sar[j + 1][k] as i32, tmp2),
+                sar_lo(sar[j][k]),
+                silk_sub32_ovflw(sar_lo(sar[j + 1][k]), tmp2),
                 warp,
             );
             sar[j][k] = tmp2 as SarLane;
@@ -1065,7 +1078,7 @@ unsafe fn nsq_del_dec_samples<const LPC_AVX2: bool, const SHAPE_AVX2: bool>(
     // the next subframe's scale_states and the final copy see the updated s_ar2.
     for k in 0..n_states {
         for j in 0..shp_ord {
-            ps_del_dec[k].s_ar2_q14[j] = sar_soa[j][k] as i32;
+            ps_del_dec[k].s_ar2_q14[j] = sar_lo(sar_soa[j][k]);
         }
     }
     for k in 0..n_states {
