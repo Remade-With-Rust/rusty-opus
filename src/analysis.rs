@@ -236,15 +236,17 @@ fn fast_atan2f(y: f32, x: f32) -> f32 {
 fn resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32]) -> f32 {
     let len2 = input.len() / 2;
     let mut hp_ener = 0.0f64;
-    for k in 0..len2 {
-        let in32 = input[2 * k];
+    // Input pairs zipped with the output: no index multiply and no bounds
+    // check per sample (the recurrence itself is unchanged).
+    for (pair, o) in input.chunks_exact(2).zip(out[..len2].iter_mut()) {
+        let in32 = pair[0];
         let y = in32 - s[0];
         let x = 0.6074371 * y;
         let out32 = s[0] + x;
         s[0] = in32 + x;
         let mut out32_hp = out32;
 
-        let in32 = input[2 * k + 1];
+        let in32 = pair[1];
         let y = in32 - s[1];
         let x = 0.15063 * y;
         let out32 = out32 + s[1] + x;
@@ -256,7 +258,8 @@ fn resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32]) -> f32 {
         s[2] = -in32 + x;
 
         hp_ener += (out32_hp as f64) * (out32_hp as f64);
-        out[k] = 0.5 * out32;
+        *o = 0.5 * out32;
+
     }
     hp_ener as f32
 }
