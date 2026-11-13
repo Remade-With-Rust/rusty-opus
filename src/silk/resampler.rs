@@ -177,12 +177,15 @@ const FIR_COEFS_12_8: [[i16; 8]; 12] = build_fir12_8();
 /// associative under wrapping, so `madd`'s pairwise sum is identical). SSE2
 /// `_mm_madd_epi16` on x86, scalar elsewhere.
 #[inline]
-fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize) -> i32 {
+fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize, sse2: bool) -> i32 {
     let c = &FIR_COEFS_12_8[ti];
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = sse2;
     #[cfg(target_arch = "x86_64")]
     {
-        if crate::isa::sse2() {
-            // SAFETY: `crate::isa::sse2()` just returned true, matching the
+        if sse2 {
+            // SAFETY: `sse2` is the caller's `crate::isa::sse2()` (read once per
+            // call rather than once per output sample), matching the
             // kernel's `#[target_feature(enable = "sse2")]`. The kernel's only
             // memory requirement, `buf8.len() >= 8`, is guaranteed by the
             // bounds-checked slice `&buf[bi..bi + 8]` (exactly 8 elements, or a
@@ -399,6 +402,8 @@ impl SilkResampler {
 
         let mut out_idx = 0usize;
 
+        // One dispatch read per call (was one per output sample).
+        let sse2 = crate::isa::sse2();
         let mut in_idx = 0usize;
         let mut remaining = first_len;
 
@@ -426,7 +431,7 @@ impl SilkResampler {
                 let table_index = silk_smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let buf_idx = (index_q16 >> 16) as usize;
 
-                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index);
+                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index, sse2);
 
                 if out_idx < out.len() {
                     out[out_idx] = silk_sat16(silk_rshift_round(res_q15, 15)) as i16;
@@ -442,6 +447,8 @@ impl SilkResampler {
                 .copy_from_slice(&buf[2 * n_samples_in..2 * n_samples_in + RESAMPLER_ORDER_FIR_12]);
         }
 
+        // One dispatch read per call (was one per output sample).
+        let sse2 = crate::isa::sse2();
         let mut in_idx = 0usize;
         let mut remaining = rest_len;
 
@@ -469,7 +476,7 @@ impl SilkResampler {
                 let table_index = silk_smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let buf_idx = (index_q16 >> 16) as usize;
 
-                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index);
+                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index, sse2);
 
                 if out_idx < out.len() {
                     out[out_idx] = silk_sat16(silk_rshift_round(res_q15, 15)) as i16;
@@ -916,7 +923,7 @@ mod isa_oracle {
             let buf = r.i16s(64, 32767);
             let bi = r.below(56);
             let ti = r.below(12);
-            let (s, c) = both(|| resampler_fir12_8(&buf, bi, ti));
+            let (s, c) = both(|| resampler_fir12_8(&buf, bi, ti, crate::isa::sse2()));
             assert_eq!(s, c, "resampler_fir12_8 bi={bi} ti={ti}");
         }
     }
