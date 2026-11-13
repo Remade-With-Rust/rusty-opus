@@ -115,12 +115,15 @@ fn transient_analysis(
 
         let mut mean = 0.0f32;
         mem0 = 0.0f32;
-        for i in 0..len2 {
-            let x2 = (tmp[2 * i] * tmp[2 * i] + tmp[2 * i + 1] * tmp[2 * i + 1]) / 16.0;
+        // Sample pairs zipped with the output: no bounds checks, same
+        // operations in the same order.
+        for (p, t2) in tmp[..2 * len2].chunks_exact(2).zip(tmp2[..len2].iter_mut()) {
+            let x2 = (p[0] * p[0] + p[1] * p[1]) / 16.0;
             mean += x2 / 4096.0;
             mem0 = x2 + (1.0 - forward_decay) * mem0;
-            tmp2[i] = forward_decay * mem0;
+            *t2 = forward_decay * mem0;
         }
+
 
         mem0 = 0.0f32;
         let mut max_e = 0.0f32;
