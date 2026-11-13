@@ -5,13 +5,17 @@
 //! call into libm (`floorf` / `rintf`). In a per-sample loop that is ~20
 //! instructions plus a call per element, and the call keeps the loop scalar.
 //! These twins use only add/sub/compare/select, which are baseline everywhere,
-//! and return the **same bits** as the std functions for every `f32` (zeros,
-//! NaN and infinities included) - proved by the tests below against std.
+//! and return the **same bits** as the std functions for every non-NaN `f32`
+//! (signed zeros and infinities included) - proved by the tests below against
+//! std. A NaN input yields a NaN, but not necessarily the same one: libm quiets
+//! a signalling NaN and these pass it through. Rust leaves the payload and
+//! quiet bit of NaN results unspecified for float arithmetic in general, and no
+//! caller here lets one reach an output (they clamp-and-cast or subtract).
 
 /// 2^23: every `f32` of magnitude >= this is already an integer.
 const TWO_POW_23: f32 = 8_388_608.0;
 
-/// Bit-identical to [`f32::round_ties_even`].
+/// Bit-identical to [`f32::round_ties_even`] for non-NaN input (NaN -> NaN).
 ///
 /// For `|x| < 2^23`, `|x| + 2^23` lies in `[2^23, 2^24)` where the spacing of
 /// `f32` is exactly 1, so the addition itself rounds to the nearest integer,
@@ -25,7 +29,7 @@ pub(crate) fn round_ties_even(x: f32) -> f32 {
     if ax < TWO_POW_23 { r.copysign(x) } else { x }
 }
 
-/// Bit-identical to [`f32::floor`].
+/// Bit-identical to [`f32::floor`] for non-NaN input (NaN -> NaN).
 #[inline(always)]
 pub(crate) fn floor(x: f32) -> f32 {
     let r = round_ties_even(x);
@@ -39,7 +43,13 @@ mod tests {
     use super::*;
 
     fn check(x: f32) {
+        if x.is_nan() {
+            // NaN in, NaN out; payload and quiet bit are not part of the contract.
+            assert!(round_ties_even(x).is_nan() && floor(x).is_nan());
+            return;
+        }
         assert_eq!(
+
             round_ties_even(x).to_bits(),
             x.round_ties_even().to_bits(),
             "round_ties_even({x:e}) [{:#010x}]",
