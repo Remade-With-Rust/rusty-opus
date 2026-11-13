@@ -308,8 +308,11 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
             let val = k0 - curr_k;
             y[j] = (val + s) ^ s;
         } else {
-            let p_k = celt_pvq_u_lookup(curr_k as u32, curr_n);
-            let p_kp1 = celt_pvq_u_lookup((curr_k + 1) as u32, curr_n);
+            // "Lots of dimensions": here 0 <= k < n, so k and k + 1 are the
+            // smaller arguments (see `pvq_u_ordered`).
+            let p_k = pvq_u_ordered(curr_k as u32, curr_n, curr_k as u32, curr_n);
+            let kp1 = (curr_k + 1) as u32;
+            let p_kp1 = pvq_u_ordered(kp1, curr_n, kp1, curr_n);
             if p_k <= i && i < p_kp1 {
                 i -= p_k;
                 y[j] = 0;
@@ -328,10 +331,12 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
             let mut p;
             loop {
                 curr_k -= 1;
-                p = celt_pvq_u_lookup(curr_k.max(0) as u32, curr_n);
+                let kk = curr_k.max(0) as u32;
+                p = pvq_u_ordered(kk, curr_n, kk, curr_n);
                 if p <= i || curr_k <= 0 {
                     break;
                 }
+
             }
             i -= p;
             let val = k0 - curr_k;
