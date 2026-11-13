@@ -495,43 +495,49 @@ impl SilkResampler {
 }
 
 pub fn silk_resampler_private_up2_hq(s: &mut [i32], out: &mut [i16], input: &[i16], len: i32) {
-    for k in 0..len as usize {
-        let in32 = (input[k] as i32) << 10;
+    // The six all-pass states live in locals for the loop and the input is
+    // zipped with output pairs: no bounds check on the state slice (twelve per
+    // sample before), the input or the output. Same recurrence, same order.
+    let n = len as usize;
+    let [mut s0, mut s1, mut s2, mut s3, mut s4, mut s5]: [i32; 6] = s[..6].try_into().unwrap();
+    for (&x_in, o) in input[..n].iter().zip(out[..2 * n].chunks_exact_mut(2)) {
+        let in32 = (x_in as i32) << 10;
 
-        let y = in32 - s[0];
+        let y = in32 - s0;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_0[0] as i32);
-        let out32_1 = s[0] + x;
-        s[0] = in32 + x;
+        let out32_1 = s0 + x;
+        s0 = in32 + x;
 
-        let y = out32_1 - s[1];
+        let y = out32_1 - s1;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_0[1] as i32);
-        let out32_2 = s[1] + x;
-        s[1] = out32_1 + x;
+        let out32_2 = s1 + x;
+        s1 = out32_1 + x;
 
-        let y = out32_2 - s[2];
+        let y = out32_2 - s2;
         let x = silk_smlawb(y, y, SILK_RESAMPLER_UP2_HQ_0[2] as i32);
-        let out32_1 = s[2] + x;
-        s[2] = out32_2 + x;
+        let out32_1 = s2 + x;
+        s2 = out32_2 + x;
 
-        out[2 * k] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
+        o[0] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
 
-        let y = in32 - s[3];
+        let y = in32 - s3;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_1[0] as i32);
-        let out32_1 = s[3] + x;
-        s[3] = in32 + x;
+        let out32_1 = s3 + x;
+        s3 = in32 + x;
 
-        let y = out32_1 - s[4];
+        let y = out32_1 - s4;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_1[1] as i32);
-        let out32_2 = s[4] + x;
-        s[4] = out32_1 + x;
+        let out32_2 = s4 + x;
+        s4 = out32_1 + x;
 
-        let y = out32_2 - s[5];
+        let y = out32_2 - s5;
         let x = silk_smlawb(y, y, SILK_RESAMPLER_UP2_HQ_1[2] as i32);
-        let out32_1 = s[5] + x;
-        s[5] = out32_2 + x;
+        let out32_1 = s5 + x;
+        s5 = out32_2 + x;
 
-        out[2 * k + 1] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
+        o[1] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
     }
+    s[..6].copy_from_slice(&[s0, s1, s2, s3, s4, s5]);
 }
 
 pub fn silk_resampler_down2(s: &mut [i32], out: &mut [i16], input: &[i16], in_len: i32) {
