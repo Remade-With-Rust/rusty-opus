@@ -288,13 +288,37 @@ fn downmix_and_resample(
     // 3 x 320 for the 16 kHz zero-order hold). Stack scratch, not a per-call Vec.
     let mut tmp_buf = [0.0f32; 960];
     let tmp = &mut tmp_buf[..subframe];
-    for (j, t) in tmp.iter_mut().enumerate() {
-        let mut sum = 0.0f32;
-        for c in 0..channels {
-            sum += x[(offset + j) * channels + c];
+    // Mono and stereo walk the interleaved input as slices (one range check,
+    // vectorisable); the sum keeps its `0.0 + a (+ b)` order. Other channel
+    // counts keep the indexed loop.
+    match channels {
+        1 => {
+            for (t, &a) in tmp.iter_mut().zip(&x[offset..offset + subframe]) {
+                let mut sum = 0.0f32;
+                sum += a;
+                *t = sum * scale;
+            }
         }
-        *t = sum * scale;
+        2 => {
+            let src = &x[2 * offset..2 * (offset + subframe)];
+            for (t, p) in tmp.iter_mut().zip(src.chunks_exact(2)) {
+                let mut sum = 0.0f32;
+                sum += p[0];
+                sum += p[1];
+                *t = sum * scale;
+            }
+        }
+        _ => {
+            for (j, t) in tmp.iter_mut().enumerate() {
+                let mut sum = 0.0f32;
+                for c in 0..channels {
+                    sum += x[(offset + j) * channels + c];
+                }
+                *t = sum * scale;
+            }
+        }
     }
+
     match fs {
         48000 => resampler_down2_hp(s, y, tmp),
         24000 => {
