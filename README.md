@@ -106,7 +106,11 @@ coding path verified from the output TOC bytes:
 |---|---:|---:|---|
 | CELT — 48 kHz speech, 32 kb/s | 436× realtime | 291× | 1.50× faster |
 | CELT — 48 kHz stereo music, 128 kb/s | 213× realtime | 133× | 1.60× faster |
-| SILK — 16 kHz VoIP speech, 16 kb/s | 139× realtime | 145× | within 4% |
+| SILK — 16 kHz VoIP speech, 16 kb/s | 155× realtime | 145× | 1.07× faster |
+
+The SILK row is 1.1.0, re-measured against 1.0.2 with this method (135× → 155× realtime,
+faster in 21 of 21 runs); the two CELT rows moved by less than the instrument resolves and
+are unchanged. The `libopus` column was measured alongside 1.0.0 and was not re-run.
 
 Frame-parallel encoding (`parallel`) scales further, since `libopus` encodes each stream
 on a single thread. Methodology and reproduction: [docs/benchmarks.md](docs/benchmarks.md).

@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.1.0](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.0.2...v1.1.0) - 2026-11-12
+
+A performance release. No API change and **no change in output**: on every benchmarked
+configuration the encoder emits the same packets and the decoder the same samples as 1.0.2
+(hash-checked on each of the changes below, and by the frozen bit-exact oracle on Windows and
+Linux).
+
+### Performance
+
+Executed instructions, counted with callgrind on real fixtures (deterministic; a count, not a
+time), 1.0.2 code to 1.1.0:
+
+| Path | Encode | Decode |
+|---|---:|---:|
+| SILK (16 kHz speech) | −17.8% | −15.8% |
+| Hybrid (48 kHz speech, 16 kb/s) | −19.6% | −11.6% |
+| CELT stereo (music, 128 kb/s) | −16.3% | −13.7% |
+| CELT mono (music, 64 kb/s) | −14.8% | −8.9% |
+
+Encode CPU time, 1.1.0 against 1.0.2 with the README method (process per arm, 300 s − 150 s
+slope, pinned, arm order rotated, 21 repetitions, a null arm for the resolution floor):
+
+| Path | 1.0.2 | 1.1.0 | | Null arm |
+|---|---:|---:|---|---:|
+| SILK — 16 kHz VoIP speech, 16 kb/s | 135× realtime | 155× | **+14.5%**, faster in 21/21 runs | 0.0% |
+| CELT — 48 kHz speech, 32 kb/s | 436× | 457× | +4.8%, 14/21 runs: not conclusive | 0.0% |
+| CELT — 48 kHz stereo music, 128 kb/s | 209× | 213× | +2.2%: inside the floor | 2.2% |
+
+The instruction count falls further than the time does, most clearly on CELT: much of what
+was removed there is cheap work (bounds checks, predictable branches, small zero-fills) that
+a modern core was already executing almost for free. Decode time was not re-measured.
+
+The work was 39 independent changes, each measured alone and kept only if it removed
+instructions with bit-identical output. The larger ones:
+
+- **SILK noise-shaping quantizer.** The AVX2 kernels now run inline in the per-sample loop
+  instead of behind a call (and a dispatch check) per sample; the cross-state shaping filter
+  makes a single pass with no zero-filled scratch, keeps its state in vector lanes for the
+  subframe and takes pre-expanded coefficients; an emulated arithmetic shift whose extra work
+  was never observed is now a plain logical shift; and a delayed-decision state swap is two
+  fixed-size copies instead of six `memcpy` calls.
+- **Zero-fill removed where every cell is overwritten.** The MDCT no longer clears 7.7 KB of
+  stack per transform, the high-pass input stage no longer clears a 23 KB array per frame, and
+  the CELT decoder clears only the uncoded part of its frequency buffer.
+- **No libm calls for rounding.** `floor` and `round_ties_even` on the hot paths are computed
+  inline (they are library calls at the x86-64 baseline), with the same result.
+- **SILK decoder.** The LTP re-whitening filter uses the AVX2 / NEON kernel the encoder already
+  had, instead of a scalar copy (−15% of SILK decode instructions on its own).
+- **Sample plumbing.** Stereo deinterleave, pre-emphasis, the decoder's planar-to-interleaved
+  output, the analysis downmix and the resamplers walk slices instead of computing and
+  bounds-checking an index per sample.
+- **PVQ.** Pulse-vector index coding skips table lookups whose result was discarded and the
+  min/max that decode already knew the answer to.
+
+### Other
+
+- `rusty_alloc-api` (dev-dependency, used by the benches and examples) `=2.5.0`. Measured
+  neutral for the codec, which makes no allocation per frame.
+- New instruction-count instrument (`tools/ir/`, with `examples/ir_bench.rs` as its harness),
+  used to gate every change above.
+
 ## [1.0.2](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.0.1...v1.0.2) - 2026-10-17
 
 ### Other

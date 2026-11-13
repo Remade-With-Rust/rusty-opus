@@ -123,3 +123,13 @@ floor: 0.0% / 2.2% / 0.0% on the three paths. The coding path is verified from t
 of each output. Benchmarks build with the `bench` profile (release code generation without the
 overflow checks the repository's test builds keep). Reproduce:
 `powershell tools/bench_encode_3way.ps1 -Reps 31`.
+
+### 1.1.0
+
+1.1.0 changes no output (same packets, same decoded samples) and removes 15–20% of the
+encoder's executed instructions and 8–16% of the decoder's, counted with callgrind
+(`tools/ir/measure.sh`; deterministic, and a count rather than a time). Encode CPU time
+against 1.0.2, same method as above with 21 repetitions: SILK 135× → 155× realtime (+14.5%,
+21/21 runs, null arm 0.0%); CELT speech 436× → 457× (+4.8%, 14/21, not conclusive); CELT
+stereo music 209× → 213× (+2.2%, inside that path's 2.2% null-arm floor). `libopus` was not
+re-run for 1.1.0, so its column in the README is the 1.0.0 measurement.
