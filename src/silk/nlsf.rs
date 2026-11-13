@@ -256,6 +256,43 @@ pub fn silk_nlsf_vq(
     k: usize,
     lpc_order: usize,
 ) {
+    // Shipping shape (even order, tables holding k whole vectors): every
+    // codebook vector is walked as exact pairs zipped across the three inputs,
+    // which removes six bounds checks per pair. Same arithmetic, same order
+    // (pairs from the top down, element 1 then element 0).
+    if lpc_order % 2 == 0
+        && in_q15.len() >= lpc_order
+        && pcb_q8.len() >= k * lpc_order
+        && pwght_q9.len() >= k * lpc_order
+        && err_q24.len() >= k
+        && lpc_order != 0
+    {
+        let x = &in_q15[..lpc_order];
+        let rows = pcb_q8
+            .chunks_exact(lpc_order)
+            .zip(pwght_q9.chunks_exact(lpc_order));
+        for (err, (cb, w)) in err_q24[..k].iter_mut().zip(rows) {
+            let mut sum_error_q24 = 0i32;
+            let mut pred_q24 = 0i32;
+            let pairs = x
+                .chunks_exact(2)
+                .zip(cb.chunks_exact(2))
+                .zip(w.chunks_exact(2));
+            for ((xp, cp), wp) in pairs.rev() {
+                let diff_q15 = (xp[1] as i32) - ((cp[1] as i32) << 7);
+                let diffw_q24 = silk_smulbb(diff_q15, wp[1] as i32);
+                sum_error_q24 = sum_error_q24.wrapping_add((diffw_q24 - (pred_q24 >> 1)).abs());
+                pred_q24 = diffw_q24;
+
+                let diff_q15_m = (xp[0] as i32) - ((cp[0] as i32) << 7);
+                let diffw_q24_m = silk_smulbb(diff_q15_m, wp[0] as i32);
+                sum_error_q24 = sum_error_q24.wrapping_add((diffw_q24_m - (pred_q24 >> 1)).abs());
+                pred_q24 = diffw_q24_m;
+            }
+            *err = sum_error_q24;
+        }
+        return;
+    }
     for i in 0..k {
         let mut sum_error_q24 = 0i32;
         let mut pred_q24 = 0i32;

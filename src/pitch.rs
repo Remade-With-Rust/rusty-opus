@@ -903,7 +903,46 @@ pub fn pitch_downsample(x: &[&[f32]], x_lp: &mut [f32], len: usize, c: usize, fa
         return;
     }
 
-    for i in 1..len {
+    // Interior fast path for the shipping shape (2:1 decimation of one or two
+    // channels): outputs `1..end` have all three taps of every channel in range,
+    // so the per-tap range test of the general loop below is always true there.
+    // Running them over sliding windows removes that test and every bounds
+    // check; each output is the same expression in the same order
+    // (`val = 0.0; val += ch0; val += ch1`). aarch64 has had a kernel for this;
+    // x86 ran the guarded general loop for every output.
+    let mut first = 1;
+    if factor == 2 && (1..=2).contains(&c) && x.len() >= c {
+        let min_len = x[..c].iter().map(|ch| ch.len()).min().unwrap_or(0);
+        // Output i is interior iff 2 * i + 1 < min_len.
+        let end = if min_len >= 4 {
+            ((min_len - 2) / 2 + 1).min(len)
+        } else {
+            1
+        };
+        if end > 1 {
+            let out = &mut x_lp[1..end];
+            // Taps of output i are a[2 * (i - 1)..][..3] with a = x[1..2 * end].
+            let w0 = x[0][1..2 * end].windows(3).step_by(2);
+            if c == 1 {
+                for (o, t) in out.iter_mut().zip(w0) {
+                    let mut val = 0.0f32;
+                    val += 0.25 * t[0] + 0.25 * t[2] + 0.5 * t[1];
+                    *o = val;
+                }
+            } else {
+                let w1 = x[1][1..2 * end].windows(3).step_by(2);
+                for ((o, t), u) in out.iter_mut().zip(w0).zip(w1) {
+                    let mut val = 0.0f32;
+                    val += 0.25 * t[0] + 0.25 * t[2] + 0.5 * t[1];
+                    val += 0.25 * u[0] + 0.25 * u[2] + 0.5 * u[1];
+                    *o = val;
+                }
+            }
+            first = end;
+        }
+    }
+
+    for i in first..len {
         let mut val = 0.0f32;
         for k in 0..c {
             let x_k = x[k];
@@ -920,6 +959,7 @@ pub fn pitch_downsample(x: &[&[f32]], x_lp: &mut [f32], len: usize, c: usize, fa
     }
 
     pitch_downsample_boundary(x, x_lp, c, offset);
+
     pitch_lp_whiten(x_lp, len);
 }
 

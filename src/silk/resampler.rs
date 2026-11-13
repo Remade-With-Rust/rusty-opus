@@ -177,12 +177,15 @@ const FIR_COEFS_12_8: [[i16; 8]; 12] = build_fir12_8();
 /// associative under wrapping, so `madd`'s pairwise sum is identical). SSE2
 /// `_mm_madd_epi16` on x86, scalar elsewhere.
 #[inline]
-fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize) -> i32 {
+fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize, sse2: bool) -> i32 {
     let c = &FIR_COEFS_12_8[ti];
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = sse2;
     #[cfg(target_arch = "x86_64")]
     {
-        if crate::isa::sse2() {
-            // SAFETY: `crate::isa::sse2()` just returned true, matching the
+        if sse2 {
+            // SAFETY: `sse2` is the caller's `crate::isa::sse2()` (read once per
+            // call rather than once per output sample), matching the
             // kernel's `#[target_feature(enable = "sse2")]`. The kernel's only
             // memory requirement, `buf8.len() >= 8`, is guaranteed by the
             // bounds-checked slice `&buf[bi..bi + 8]` (exactly 8 elements, or a
@@ -399,6 +402,8 @@ impl SilkResampler {
 
         let mut out_idx = 0usize;
 
+        // One dispatch read per call (was one per output sample).
+        let sse2 = crate::isa::sse2();
         let mut in_idx = 0usize;
         let mut remaining = first_len;
 
@@ -426,7 +431,7 @@ impl SilkResampler {
                 let table_index = silk_smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let buf_idx = (index_q16 >> 16) as usize;
 
-                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index);
+                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index, sse2);
 
                 if out_idx < out.len() {
                     out[out_idx] = silk_sat16(silk_rshift_round(res_q15, 15)) as i16;
@@ -442,6 +447,8 @@ impl SilkResampler {
                 .copy_from_slice(&buf[2 * n_samples_in..2 * n_samples_in + RESAMPLER_ORDER_FIR_12]);
         }
 
+        // One dispatch read per call (was one per output sample).
+        let sse2 = crate::isa::sse2();
         let mut in_idx = 0usize;
         let mut remaining = rest_len;
 
@@ -469,7 +476,7 @@ impl SilkResampler {
                 let table_index = silk_smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let buf_idx = (index_q16 >> 16) as usize;
 
-                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index);
+                let res_q15 = resampler_fir12_8(buf, buf_idx, table_index, sse2);
 
                 if out_idx < out.len() {
                     out[out_idx] = silk_sat16(silk_rshift_round(res_q15, 15)) as i16;
@@ -488,43 +495,49 @@ impl SilkResampler {
 }
 
 pub fn silk_resampler_private_up2_hq(s: &mut [i32], out: &mut [i16], input: &[i16], len: i32) {
-    for k in 0..len as usize {
-        let in32 = (input[k] as i32) << 10;
+    // The six all-pass states live in locals for the loop and the input is
+    // zipped with output pairs: no bounds check on the state slice (twelve per
+    // sample before), the input or the output. Same recurrence, same order.
+    let n = len as usize;
+    let [mut s0, mut s1, mut s2, mut s3, mut s4, mut s5]: [i32; 6] = s[..6].try_into().unwrap();
+    for (&x_in, o) in input[..n].iter().zip(out[..2 * n].chunks_exact_mut(2)) {
+        let in32 = (x_in as i32) << 10;
 
-        let y = in32 - s[0];
+        let y = in32 - s0;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_0[0] as i32);
-        let out32_1 = s[0] + x;
-        s[0] = in32 + x;
+        let out32_1 = s0 + x;
+        s0 = in32 + x;
 
-        let y = out32_1 - s[1];
+        let y = out32_1 - s1;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_0[1] as i32);
-        let out32_2 = s[1] + x;
-        s[1] = out32_1 + x;
+        let out32_2 = s1 + x;
+        s1 = out32_1 + x;
 
-        let y = out32_2 - s[2];
+        let y = out32_2 - s2;
         let x = silk_smlawb(y, y, SILK_RESAMPLER_UP2_HQ_0[2] as i32);
-        let out32_1 = s[2] + x;
-        s[2] = out32_2 + x;
+        let out32_1 = s2 + x;
+        s2 = out32_2 + x;
 
-        out[2 * k] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
+        o[0] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
 
-        let y = in32 - s[3];
+        let y = in32 - s3;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_1[0] as i32);
-        let out32_1 = s[3] + x;
-        s[3] = in32 + x;
+        let out32_1 = s3 + x;
+        s3 = in32 + x;
 
-        let y = out32_1 - s[4];
+        let y = out32_1 - s4;
         let x = silk_smulwb(y, SILK_RESAMPLER_UP2_HQ_1[1] as i32);
-        let out32_2 = s[4] + x;
-        s[4] = out32_1 + x;
+        let out32_2 = s4 + x;
+        s4 = out32_1 + x;
 
-        let y = out32_2 - s[5];
+        let y = out32_2 - s5;
         let x = silk_smlawb(y, y, SILK_RESAMPLER_UP2_HQ_1[2] as i32);
-        let out32_1 = s[5] + x;
-        s[5] = out32_2 + x;
+        let out32_1 = s5 + x;
+        s5 = out32_2 + x;
 
-        out[2 * k + 1] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
+        o[1] = silk_sat16(silk_rshift_round(out32_1, 10)) as i16;
     }
+    s[..6].copy_from_slice(&[s0, s1, s2, s3, s4, s5]);
 }
 
 pub fn silk_resampler_down2(s: &mut [i32], out: &mut [i16], input: &[i16], in_len: i32) {
@@ -703,13 +716,19 @@ static RESAMPLER_1_6_COEFS: [i16; 2 + RESAMPLER_DOWN_ORDER_FIR2 / 2] = [
 /// silk_resampler_private_AR2, exact port. (The older silk_resampler_private_ar2
 /// above has a different state recurrence and is kept for its down2_3 caller.)
 fn ar2_q14_exact(s: &mut [i32; 2], out_q8: &mut [i32], input: &[i16], a_q14: &[i16]) {
-    for (k, &x) in input.iter().enumerate() {
-        let mut out32 = s[0].wrapping_add((x as i32) << 8);
-        out_q8[k] = out32;
+    // Coefficients and state in locals, input zipped with the output: no
+    // per-sample bounds check on `out_q8` or `a_q14`. Same recurrence.
+    let (a0, a1) = (a_q14[0] as i32, a_q14[1] as i32);
+    let (mut s0, mut s1) = (s[0], s[1]);
+    for (&x, o) in input.iter().zip(out_q8[..input.len()].iter_mut()) {
+        let mut out32 = s0.wrapping_add((x as i32) << 8);
+        *o = out32;
         out32 = out32.wrapping_shl(2);
-        s[0] = silk_smlawb(s[1], out32, a_q14[0] as i32);
-        s[1] = silk_smulwb(out32, a_q14[1] as i32);
+        s0 = silk_smlawb(s1, out32, a0);
+        s1 = silk_smulwb(out32, a1);
     }
+    s[0] = s0;
+    s[1] = s1;
 }
 
 #[inline]
@@ -827,10 +846,15 @@ impl SilkDownFirResampler {
             // RESAMPLER_DOWN_ORDER_FIR1 (symmetric 24-tap, 1:2)
             while index_q16 < max_index_q16 {
                 let b = (index_q16 >> 16) as usize;
+                // One range check per output: a fixed-size window and a
+                // fixed-size coefficient array make every tap index provably in
+                // range (was three bounds checks per tap).
+                let w: &[i32; 24] = buf[b..b + 24].try_into().unwrap();
+                let c: &[i16; 12] = fir_coefs[..12].try_into().unwrap();
                 let mut res = 0i32;
                 for j in 0..12 {
-                    let sum = buf[b + j].wrapping_add(buf[b + 23 - j]);
-                    res = silk_smlawb(res, sum, fir_coefs[j] as i32);
+                    let sum = w[j].wrapping_add(w[23 - j]);
+                    res = silk_smlawb(res, sum, c[j] as i32);
                 }
                 out[n_out] = sat16_round_q6(res);
                 n_out += 1;
@@ -840,11 +864,15 @@ impl SilkDownFirResampler {
             // RESAMPLER_DOWN_ORDER_FIR2 (symmetric 36-tap)
             while index_q16 < max_index_q16 {
                 let b = (index_q16 >> 16) as usize;
+                // Fixed-size window and coefficients, as for the 24-tap case.
+                let w: &[i32; 36] = buf[b..b + 36].try_into().unwrap();
+                let c: &[i16; 18] = fir_coefs[..18].try_into().unwrap();
                 let mut res = 0i32;
                 for j in 0..18 {
-                    let sum = buf[b + j].wrapping_add(buf[b + 35 - j]);
-                    res = silk_smlawb(res, sum, fir_coefs[j] as i32);
+                    let sum = w[j].wrapping_add(w[35 - j]);
+                    res = silk_smlawb(res, sum, c[j] as i32);
                 }
+
                 out[n_out] = sat16_round_q6(res);
                 n_out += 1;
                 index_q16 += inc;
@@ -916,7 +944,7 @@ mod isa_oracle {
             let buf = r.i16s(64, 32767);
             let bi = r.below(56);
             let ti = r.below(12);
-            let (s, c) = both(|| resampler_fir12_8(&buf, bi, ti));
+            let (s, c) = both(|| resampler_fir12_8(&buf, bi, ti, crate::isa::sse2()));
             assert_eq!(s, c, "resampler_fir12_8 bi={bi} ti={ti}");
         }
     }

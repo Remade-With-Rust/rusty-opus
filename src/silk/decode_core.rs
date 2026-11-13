@@ -289,6 +289,28 @@ fn silk_lpc_analysis_filter_offset(
     len: usize,
     d: usize,
 ) {
+    // This is silk_LPC_analysis_filter, which the encoder already runs through
+    // a tested AVX2 / NEON kernel (`silk_lpc_analysis_filter`); the decoder had
+    // its own scalar copy. Delegate whenever the shared kernel's preconditions
+    // hold (always, for valid streams: LPC order 10 or 16); the checked scalar
+    // loop below stays for any other shape and as the reference.
+    if d >= 6
+        && d % 2 == 0
+        && d <= len
+        && b.len() >= d
+        && out.len() >= out_offset + len
+        && input.len() >= input_offset + len
+    {
+        crate::silk::sigproc_fix::silk_lpc_analysis_filter(
+            &mut out[out_offset..out_offset + len],
+            &input[input_offset..input_offset + len],
+            b,
+            len,
+            d,
+            0,
+        );
+        return;
+    }
     for ix in 0..d {
         out[out_offset + ix] = 0;
     }

@@ -75,7 +75,10 @@ fn tansig_approx(x: f32) -> f32 {
         return 0.0;
     }
     let (x, sign) = if x < 0.0 { (-x, -1.0f32) } else { (x, 1.0f32) };
-    let i = (0.5 + 25.0 * x).floor() as usize;
+    // `x >= 0` here (sign folded out above, NaN returned earlier), so the
+    // truncating cast is the floor - without the libm call.
+    let i = (0.5 + 25.0 * x) as usize;
+
     let x = x - 0.04 * i as f32;
     let y = TANSIG_TABLE[i];
     let dy = 1.0 - y * y;
@@ -95,9 +98,16 @@ fn gemm_accum(
     col_stride: usize,
     x: &[f32],
 ) {
-    for i in 0..rows {
-        for j in 0..cols {
-            out[i] += weights[j * col_stride + i] as f32 * x[j];
+    // Column-major walk (j outer). Each `out[i]` still receives its products in
+    // ascending `j`, so every accumulator rounds exactly as in the i-outer form
+    // - but the inner loop is now contiguous in `weights` and `out`, with one
+    // range check per column instead of an index multiply and two bounds checks
+    // per product, and it vectorises (i8 -> f32, multiply, add; no reduction).
+    let out = &mut out[..rows];
+    for (j, &xj) in x[..cols].iter().enumerate() {
+        let w = &weights[j * col_stride..j * col_stride + rows];
+        for (o, &wv) in out.iter_mut().zip(w) {
+            *o += wv as f32 * xj;
         }
     }
 }
@@ -225,15 +235,17 @@ fn fast_atan2f(y: f32, x: f32) -> f32 {
 fn resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32]) -> f32 {
     let len2 = input.len() / 2;
     let mut hp_ener = 0.0f64;
-    for k in 0..len2 {
-        let in32 = input[2 * k];
+    // Input pairs zipped with the output: no index multiply and no bounds
+    // check per sample (the recurrence itself is unchanged).
+    for (pair, o) in input.chunks_exact(2).zip(out[..len2].iter_mut()) {
+        let in32 = pair[0];
         let y = in32 - s[0];
         let x = 0.6074371 * y;
         let out32 = s[0] + x;
         s[0] = in32 + x;
         let mut out32_hp = out32;
 
-        let in32 = input[2 * k + 1];
+        let in32 = pair[1];
         let y = in32 - s[1];
         let x = 0.15063 * y;
         let out32 = out32 + s[1] + x;
@@ -245,7 +257,7 @@ fn resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32]) -> f32 {
         s[2] = -in32 + x;
 
         hp_ener += (out32_hp as f64) * (out32_hp as f64);
-        out[k] = 0.5 * out32;
+        *o = 0.5 * out32;
     }
     hp_ener as f32
 }
@@ -277,13 +289,37 @@ fn downmix_and_resample(
     // 3 x 320 for the 16 kHz zero-order hold). Stack scratch, not a per-call Vec.
     let mut tmp_buf = [0.0f32; 960];
     let tmp = &mut tmp_buf[..subframe];
-    for (j, t) in tmp.iter_mut().enumerate() {
-        let mut sum = 0.0f32;
-        for c in 0..channels {
-            sum += x[(offset + j) * channels + c];
+    // Mono and stereo walk the interleaved input as slices (one range check,
+    // vectorisable); the sum keeps its `0.0 + a (+ b)` order. Other channel
+    // counts keep the indexed loop.
+    match channels {
+        1 => {
+            for (t, &a) in tmp.iter_mut().zip(&x[offset..offset + subframe]) {
+                let mut sum = 0.0f32;
+                sum += a;
+                *t = sum * scale;
+            }
         }
-        *t = sum * scale;
+        2 => {
+            let src = &x[2 * offset..2 * (offset + subframe)];
+            for (t, p) in tmp.iter_mut().zip(src.chunks_exact(2)) {
+                let mut sum = 0.0f32;
+                sum += p[0];
+                sum += p[1];
+                *t = sum * scale;
+            }
+        }
+        _ => {
+            for (j, t) in tmp.iter_mut().enumerate() {
+                let mut sum = 0.0f32;
+                for c in 0..channels {
+                    sum += x[(offset + j) * channels + c];
+                }
+                *t = sum * scale;
+            }
+        }
     }
+
     match fs {
         48000 => resampler_down2_hp(s, y, tmp),
         24000 => {
@@ -669,12 +705,14 @@ fn tonality_analysis(
         let d_angle2 = angle2 - angle;
         let d2_angle2 = d_angle2 - d_angle;
 
-        let mut mod1 = d2_angle - d2_angle.round_ties_even();
+        // `fmath::round_ties_even` returns the bits of the std function without
+        // its libm call (rintf, twice per analysed bin).
+        let mut mod1 = d2_angle - crate::fmath::round_ties_even(d2_angle);
         noisiness[i] = mod1.abs();
         mod1 *= mod1;
         mod1 *= mod1;
 
-        let mut mod2 = d2_angle2 - d2_angle2.round_ties_even();
+        let mut mod2 = d2_angle2 - crate::fmath::round_ties_even(d2_angle2);
         noisiness[i] += mod2.abs();
         mod2 *= mod2;
         mod2 *= mod2;

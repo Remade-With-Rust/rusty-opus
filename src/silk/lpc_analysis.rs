@@ -218,10 +218,12 @@ pub fn silk_burg_modified_fix(
     let mut ca_b = [0i32; MAX_LPC_ORDER + 1];
 
     let total_len = subfr_length * nb_subfr;
-    let mut c0_64: i64 = 0;
-    for i in 0..total_len {
-        c0_64 += (x[i] as i64) * (x[i] as i64);
-    }
+    // Energy as a slice reduction; the i16 square is formed in i32 (exact) and
+    // widened for the i64 sum (see the lag products below).
+    let c0_64: i64 = x[..total_len]
+        .iter()
+        .map(|&v| i64::from(i32::from(v) * i32::from(v)))
+        .sum();
 
     let lz = silk_clz64(c0_64);
     let rshifts = (32 + 1 + N_BITS_HEAD_ROOM - lz).clamp(MIN_RSHIFTS, MAX_RSHIFTS);
@@ -238,12 +240,19 @@ pub fn silk_burg_modified_fix(
     if rshifts > 0 {
         for s in 0..nb_subfr {
             let x_ptr = s * subfr_length;
+            // Lag-n inner products over two zipped slices of the subframe. The
+            // indexed form did two bounds checks and a 64-bit multiply per
+            // sample; an i16 x i16 product fits i32 exactly, so it is formed
+            // there and widened for the (exact, order-free) i64 sum - a shape
+            // the compiler vectorises at the SSE2 baseline.
+            let sub = &x[x_ptr..x_ptr + subfr_length];
             for n in 1..=d {
-                let mut sum: i64 = 0;
-                let lim = subfr_length - n;
-                for i in 0..lim {
-                    sum += (x[x_ptr + i] as i64) * (x[x_ptr + i + n] as i64);
-                }
+                let sum: i64 = sub[..subfr_length - n]
+                    .iter()
+                    .zip(&sub[n..])
+                    .map(|(&a, &b)| i64::from(i32::from(a) * i32::from(b)))
+                    .sum();
+
                 c_first_row[n - 1] =
                     c_first_row[n - 1].wrapping_add(silk_rshift64(sum, rshifts) as i32);
             }

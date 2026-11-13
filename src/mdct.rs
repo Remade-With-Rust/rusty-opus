@@ -11,6 +11,30 @@ pub struct MdctLookup {
     trig: Vec<f32>,
 }
 
+/// Reusable work buffers for [`MdctLookup::forward_with`] /
+/// [`MdctLookup::backward_with`], owned by the codec state so the hot path does
+/// not zero-fill 7.7 KB of stack on every transform (each of the 8 short blocks
+/// of a transient frame included).
+///
+/// Nothing is carried between calls: `forward` writes every `f[..n2]` cell in
+/// its three fold loops (their trip counts sum to `n4`, two writes each) and
+/// both directions write every `f2[..n4]` cell through the bit-reversal
+/// permutation, before either buffer is read.
+#[derive(Clone)]
+pub(crate) struct MdctScratch {
+    f: [f32; MAX_N2],
+    f2: [KissCpx; MAX_N4],
+}
+
+impl Default for MdctScratch {
+    fn default() -> Self {
+        Self {
+            f: [0.0; MAX_N2],
+            f2: [KissCpx::default(); MAX_N4],
+        }
+    }
+}
+
 impl MdctLookup {
     pub fn new(n: usize, max_lm: usize) -> Self {
         let mut kfft = Vec::new();
@@ -70,6 +94,29 @@ impl MdctLookup {
         shift: usize,
         stride: usize,
     ) {
+        self.forward_with(
+            &mut MdctScratch::default(),
+            input,
+            output,
+            window,
+            overlap,
+            shift,
+            stride,
+        );
+    }
+
+    /// [`forward`](Self::forward) over caller-owned scratch (the codec hot path).
+    #[inline]
+    pub(crate) fn forward_with(
+        &self,
+        scratch: &mut MdctScratch,
+        input: &[f32],
+        output: &mut [f32],
+        window: &[f32],
+        overlap: usize,
+        shift: usize,
+        stride: usize,
+    ) {
         let _prof = crate::prof::scope(crate::prof::Stage::CeltMdct);
         // Every mode builds an FFT for each shift 0..=max_lm; an unknown shift
         // (impossible for validated LM) leaves the output untouched, not a panic.
@@ -85,13 +132,10 @@ impl MdctLookup {
         let (trig, _) = self.get_trig(shift);
         let overlap2 = overlap / 2;
 
-        // Zero-initialised scratch (was MaybeUninit + from_raw_parts_mut: a reference
-        // over uninitialised memory, and n2 <= MAX_N2 was not checked here as it is
-        // in `backward`). The checked slices enforce both bounds.
-        let mut f_buf = [0.0f32; MAX_N2];
-        let mut f2_buf = [KissCpx::default(); MAX_N4];
-        let f = &mut f_buf[..n2];
-        let f2 = &mut f2_buf[..n4];
+        // Caller-owned scratch (see `MdctScratch`: every cell is written before it
+        // is read). The checked slices enforce n2 <= MAX_N2 and n4 <= MAX_N4.
+        let f = &mut scratch.f[..n2];
+        let f2 = &mut scratch.f2[..n4];
 
         assert!(input.len() >= n2 + overlap2);
         assert!(window.len() >= overlap);
@@ -261,6 +305,29 @@ impl MdctLookup {
         shift: usize,
         stride: usize,
     ) {
+        self.backward_with(
+            &mut MdctScratch::default(),
+            input,
+            output,
+            window,
+            overlap,
+            shift,
+            stride,
+        );
+    }
+
+    /// [`backward`](Self::backward) over caller-owned scratch (the codec hot path).
+    #[inline]
+    pub(crate) fn backward_with(
+        &self,
+        scratch: &mut MdctScratch,
+        input: &[f32],
+        output: &mut [f32],
+        window: &[f32],
+        overlap: usize,
+        shift: usize,
+        stride: usize,
+    ) {
         let _prof = crate::prof::scope(crate::prof::Stage::CeltMdct);
         // A malformed frame can carry an out-of-range `shift` or a `stride`/size
         // inconsistent with the input buffer; bail gracefully rather than panic on
@@ -279,10 +346,8 @@ impl MdctLookup {
 
         let (trig, _) = self.get_trig(shift);
 
-        // Zero-initialised scratch (was MaybeUninit + from_raw_parts_mut over
-        // uninitialised memory); n4 <= MAX_N4 is checked above.
-        let mut f2_buf = [KissCpx::default(); MAX_N4];
-        let f2 = &mut f2_buf[..n4];
+        // Caller-owned scratch (see `MdctScratch`); n4 <= MAX_N4 is checked above.
+        let f2 = &mut scratch.f2[..n4];
 
         // SAFETY: the kernel is only called after `crate::isa::avx()` returns
         // true, which confirms the CPU supports the `avx` feature in its

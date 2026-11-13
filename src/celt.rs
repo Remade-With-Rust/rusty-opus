@@ -99,24 +99,28 @@ fn transient_analysis(
         let mut mem0 = 0.0f32;
         let mut mem1 = 0.0f32;
 
-        for i in 0..len {
-            let x = input[c * len + i];
+        // One source and one destination slice per channel (was an index
+        // multiply and two bounds checks per sample); the recurrence is
+        // unchanged.
+        for (t, &x) in tmp[..len].iter_mut().zip(&input[c * len..(c + 1) * len]) {
             let y = mem0 + x;
             let mem00 = mem0;
             mem0 = mem0 - x + 0.5 * mem1;
             mem1 = x - mem00;
-            tmp[i] = y;
+            *t = y;
         }
 
         tmp[..12].fill(0.0);
 
         let mut mean = 0.0f32;
         mem0 = 0.0f32;
-        for i in 0..len2 {
-            let x2 = (tmp[2 * i] * tmp[2 * i] + tmp[2 * i + 1] * tmp[2 * i + 1]) / 16.0;
+        // Sample pairs zipped with the output: no bounds checks, same
+        // operations in the same order.
+        for (p, t2) in tmp[..2 * len2].chunks_exact(2).zip(tmp2[..len2].iter_mut()) {
+            let x2 = (p[0] * p[0] + p[1] * p[1]) / 16.0;
             mean += x2 / 4096.0;
             mem0 = x2 + (1.0 - forward_decay) * mem0;
-            tmp2[i] = forward_decay * mem0;
+            *t2 = forward_decay * mem0;
         }
 
         mem0 = 0.0f32;
@@ -134,8 +138,13 @@ fn transient_analysis(
 
         let mut unmask = 0.0f32;
         for i in (12..(len2 - 5)).step_by(4) {
-            let id = (64.0 * norm * (tmp2[i] + 1e-10)).floor() as i32;
+            // No floor: the clamp to [0, 127] follows, and for every f32 the
+            // truncating cast gives the same clamped index (v >= 0: trunc ==
+            // floor; v < 0: both clamp to 0; NaN: both 0; +inf: both 127). The
+            // floor was a libm call per 4 samples of every analysed frame.
+            let id = (64.0 * norm * (tmp2[i] + 1e-10)) as i32;
             let id = id.clamp(0, 127) as usize;
+
             unmask += INV_TABLE[id] as f32;
         }
 
@@ -1581,6 +1590,8 @@ pub struct CeltEncoder {
 
     w_transient_tmp: Vec<f32>,
     w_transient_tmp2: Vec<f32>,
+    /// MDCT work buffers (see `mdct::MdctScratch`), reused across frames.
+    w_mdct: Box<crate::mdct::MdctScratch>,
 
     pub(crate) analysis: AnalysisInfo,
     /// Expected packet loss %, plumbed from `OpusEncoder.packet_loss_perc`
@@ -2021,6 +2032,7 @@ impl CeltEncoder {
             w_prefilter_pitch_buf: vec![0.0; (COMBFILTER_MAXPERIOD + MAX_FRAME_SIZE) >> 1],
             w_transient_tmp: vec![0.0; MAX_TRANSIENT_LEN],
             w_transient_tmp2: vec![0.0; MAX_TRANSIENT_LEN / 2],
+            w_mdct: Box::default(),
             consec_transient: 0,
 
             analysis: AnalysisInfo::default(),
@@ -2125,10 +2137,16 @@ impl CeltEncoder {
             let mut m = self.preemph_mem[c];
             let coef = mode.preemph[0];
             if up == 1 {
-                for i in 0..frame_size {
-                    let x = pcm[c * frame_size + i] * 32768.0;
-                    let val = x - m;
-                    self.syn_mem[channel_offset + syn_mem_size - frame_size + i] = val;
+                // Slices instead of two computed indices per sample: one range
+                // check per channel, and the loop body is the same three float
+                // operations in the same order (`m` is the previous sample
+                // times `coef`, not a feedback term).
+                let src = &pcm[c * frame_size..(c + 1) * frame_size];
+                let dst_start = channel_offset + syn_mem_size - frame_size;
+                let dst = &mut self.syn_mem[dst_start..dst_start + frame_size];
+                for (d, &p) in dst.iter_mut().zip(src) {
+                    let x = p * 32768.0;
+                    *d = x - m;
                     m = x * coef;
                 }
             } else {
@@ -2242,6 +2260,7 @@ impl CeltEncoder {
             false
         };
 
+        let mdct_scratch = &mut *self.w_mdct;
         let freq = &mut self.w_freq[..frame_size * channels];
         // The first MDCT pass is always LONG blocks: for non-transients it is
         // the coding transform; for transients it feeds bandLogE2 (the
@@ -2262,7 +2281,8 @@ impl CeltEncoder {
             }
 
             for i in 0..b {
-                mode.mdct.forward(
+                mode.mdct.forward_with(
+                    mdct_scratch,
                     &in_buf[c_buf_offset + i * n..],
                     &mut freq[c * frame_size + i..],
                     mode.window,
@@ -2381,7 +2401,8 @@ impl CeltEncoder {
             for c in 0..channels {
                 let c_offset = c * buf_stride;
                 for i in 0..b {
-                    mode.mdct.forward(
+                    mode.mdct.forward_with(
+                        mdct_scratch,
                         &in_buf[c_offset + i * n..c_offset + buf_stride],
                         &mut freq[c * frame_size + i..],
                         mode.window,
@@ -2890,7 +2911,8 @@ impl CeltEncoder {
                     } else {
                         syn_n
                     };
-                    mode.mdct.backward(
+                    mode.mdct.backward_with(
+                        &mut self.w_mdct,
                         &freq_synth[c * frame_size + bi..],
                         &mut self.enc_decode_mem[co + out_syn_idx + bi * syn_stride..],
                         mode.window,
@@ -3049,6 +3071,8 @@ pub struct CeltDecoder {
     w_band_amp: Vec<f32>,
     w_pcm_frame: Vec<f32>,
     w_post: Vec<f32>,
+    /// MDCT work buffers (see `mdct::MdctScratch`), reused across frames.
+    w_mdct: Box<crate::mdct::MdctScratch>,
 }
 
 impl CeltDecoder {
@@ -3108,6 +3132,7 @@ impl CeltDecoder {
             w_band_amp: vec![0.0; nb_x_ch],
             w_pcm_frame: vec![0.0; DECODE_BUFFER_SIZE],
             w_post: vec![0.0; DECODE_BUFFER_SIZE + COMBFILTER_MAXPERIOD],
+            w_mdct: Box::default(),
         }
     }
 
@@ -3597,8 +3622,27 @@ impl CeltDecoder {
         // Recompute band_amp after unquant_energy_finalise, which adjusts old_band_e.
         // (Mirrors the encoder's resynth path: log2amp is called after quant_energy_finalise.)
         log2amp(mode, nb_ebands, band_amp, &self.old_band_e, channels);
-        self.w_freq[..frame_size * channels].fill(0.0);
         let freq = &mut self.w_freq[..frame_size * channels];
+        // denormalise_bands writes exactly the coded span [lo, hi) of each
+        // channel, so only the uncoded spans around it need zeroing - not the
+        // whole buffer. Taken only when that span provably lies inside every
+        // channel (then denormalise_bands cannot bail early and leaves no cell
+        // unwritten); anything else keeps the full clear.
+        let lo = (mode.e_bands[start_band] as usize) << lm;
+        let hi = (mode.e_bands[end_band] as usize) << lm;
+        if !silence
+            && lo <= hi
+            && hi <= frame_size
+            && frame_size == mode.short_mdct_size << lm
+            && start_band < end_band
+        {
+            for ch in freq.chunks_exact_mut(frame_size) {
+                ch[..lo].fill(0.0);
+                ch[hi..].fill(0.0);
+            }
+        } else {
+            freq.fill(0.0);
+        }
         if !silence {
             denormalise_bands(
                 mode,
@@ -3679,7 +3723,8 @@ impl CeltDecoder {
                 if available_len < n + overlap {
                     return 0;
                 }
-                self.mode.mdct.backward(
+                self.mode.mdct.backward_with(
+                    &mut self.w_mdct,
                     &freq[block_freq_idx..],
                     &mut self.decode_mem[block_out_idx..],
                     mode.window,
@@ -3695,7 +3740,7 @@ impl CeltDecoder {
                 *v = v.clamp(-SIG_SAT, SIG_SAT);
             }
 
-            self.w_pcm_frame[..frame_size].fill(0.0);
+            // (No clear: the copy below overwrites every cell.)
             let pcm_frame = &mut self.w_pcm_frame[..frame_size];
 
             pcm_frame.copy_from_slice(
@@ -4021,7 +4066,8 @@ impl CeltDecoder {
         let out_syn_idx = DECODE_BUFFER_SIZE - n;
         for ch in 0..c {
             let out = ch * mem_size + out_syn_idx;
-            self.mode.mdct.backward(
+            self.mode.mdct.backward_with(
+                &mut self.w_mdct,
                 &freq[ch * n..],
                 &mut self.decode_mem[out..],
                 window,

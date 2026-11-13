@@ -99,6 +99,21 @@ const CELT_PVQ_U_ROW: [u32; 15] = [
     0, 176, 351, 525, 698, 870, 1041, 1131, 1178, 1207, 1226, 1240, 1248, 1254, 1257,
 ];
 
+/// `U(r, c)` when the caller already knows which argument is the smaller one
+/// (`r <= c`): the same table cell as `celt_pvq_u_lookup(n, k)` without the
+/// min/max pair. `n`, `k` are the arguments in the caller's original order,
+/// used only by the out-of-table fallback so it is the identical call.
+#[inline(always)]
+fn pvq_u_ordered(r: u32, c: u32, n: u32, k: u32) -> u32 {
+    debug_assert!(r <= c && r == n.min(k) && c == n.max(k));
+    if let Some(&base) = CELT_PVQ_U_ROW.get(r as usize) {
+        if let Some(&v) = CELT_PVQ_U_DATA.get(base as usize + c as usize) {
+            return v;
+        }
+    }
+    compute_u(n, k)
+}
+
 #[inline(always)]
 pub fn celt_pvq_u_lookup(n: u32, k: u32) -> u32 {
     let r = n.min(k) as usize;
@@ -226,9 +241,12 @@ pub fn icwrs(n: u32, _k: u32, y: &[i32]) -> u32 {
         i = i.wrapping_add(celt_pvq_u_lookup(m, k));
         k += yj.unsigned_abs();
 
-        let sign_mask = yj >> 31;
-        let lookup = (sign_mask as u32) & celt_pvq_u_lookup(m, k + 1);
-        i = i.wrapping_add(lookup);
+        // libopus shape (`if (_y[j] < 0) i += CELT_PVQ_U(_n - j, k + 1)`): the
+        // masked form looked the cell up for every coefficient, including the
+        // zeros and the positives that then discard it.
+        if yj < 0 {
+            i = i.wrapping_add(celt_pvq_u_lookup(m, k + 1));
+        }
     }
     i
 }
@@ -250,7 +268,11 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
 
     while curr_n > 2 {
         if curr_k >= curr_n as i32 {
-            let p_kp1 = celt_pvq_u_lookup(curr_n, (curr_k + 1) as u32);
+            // "Lots of pulses": every lookup in this arm has a known smaller
+            // argument, so none needs the min/max of the generic lookup
+            // (`pvq_u_ordered` is the same cell).
+            let kp1 = (curr_k + 1) as u32;
+            let p_kp1 = pvq_u_ordered(curr_n, kp1, curr_n, kp1);
             let s: i32 = if i >= p_kp1 {
                 i -= p_kp1;
                 -1
@@ -258,30 +280,42 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
                 0
             };
             let k0 = curr_k;
-            let q = celt_pvq_u_lookup(curr_n, curr_n);
+            let q = pvq_u_ordered(curr_n, curr_n, curr_n, curr_n);
             let mut p;
             if q > i {
+                // k walks down from n - 1: here k < n.
                 curr_k = curr_n as i32;
                 loop {
                     curr_k -= 1;
-                    p = celt_pvq_u_lookup(curr_n, curr_k.max(0) as u32);
+                    let kk = curr_k.max(0) as u32;
+                    p = pvq_u_ordered(kk, curr_n, curr_n, kk);
                     if p <= i || curr_k <= 0 {
                         break;
                     }
                 }
             } else {
-                p = celt_pvq_u_lookup(curr_n, curr_k as u32);
+                // k stays >= n: the walk starts at k >= n and stops at k == n at
+                // the latest, where p == q <= i.
+                p = pvq_u_ordered(curr_n, curr_k as u32, curr_n, curr_k as u32);
                 while p > i && curr_k > 0 {
                     curr_k -= 1;
-                    p = celt_pvq_u_lookup(curr_n, curr_k as u32);
+                    p = if curr_k >= curr_n as i32 {
+                        pvq_u_ordered(curr_n, curr_k as u32, curr_n, curr_k as u32)
+                    } else {
+                        celt_pvq_u_lookup(curr_n, curr_k as u32)
+                    };
                 }
             }
+
             i -= p;
             let val = k0 - curr_k;
             y[j] = (val + s) ^ s;
         } else {
-            let p_k = celt_pvq_u_lookup(curr_k as u32, curr_n);
-            let p_kp1 = celt_pvq_u_lookup((curr_k + 1) as u32, curr_n);
+            // "Lots of dimensions": here 0 <= k < n, so k and k + 1 are the
+            // smaller arguments (see `pvq_u_ordered`).
+            let p_k = pvq_u_ordered(curr_k as u32, curr_n, curr_k as u32, curr_n);
+            let kp1 = (curr_k + 1) as u32;
+            let p_kp1 = pvq_u_ordered(kp1, curr_n, kp1, curr_n);
             if p_k <= i && i < p_kp1 {
                 i -= p_k;
                 y[j] = 0;
@@ -300,7 +334,8 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
             let mut p;
             loop {
                 curr_k -= 1;
-                p = celt_pvq_u_lookup(curr_k.max(0) as u32, curr_n);
+                let kk = curr_k.max(0) as u32;
+                p = pvq_u_ordered(kk, curr_n, kk, curr_n);
                 if p <= i || curr_k <= 0 {
                     break;
                 }
@@ -1371,6 +1406,37 @@ fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
 
 #[inline]
 fn exp_rotation1_scalar(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
+    // Bound relation: `len` bounds the band, `x.len()` bounds the memory, and
+    // nothing related them, so each of the four accesses per step carried its
+    // own bounds check. With `x` cut to exactly `len` and `stride <= len`, the
+    // loop conditions prove every index. Any other shape (never produced by
+    // the codec) takes the original checked loops unchanged.
+    if len > x.len() || stride > len {
+        return exp_rotation1_scalar_checked(x, len, stride, c, s);
+    }
+    let x = &mut x[..len];
+    let ms = -s;
+    for i in 0..(len - stride) {
+        let x1 = x[i];
+        let x2 = x[i + stride];
+        x[i + stride] = c * x2 + s * x1;
+        x[i] = c * x1 + ms * x2;
+    }
+    if len >= 2 * stride {
+        for i in (0..(len - 2 * stride)).rev() {
+            let x1 = x[i];
+            let x2 = x[i + stride];
+            x[i + stride] = c * x2 + s * x1;
+            x[i] = c * x1 + ms * x2;
+        }
+    }
+}
+
+/// The original, fully bounds-checked loops of [`exp_rotation1_scalar`], kept
+/// for shapes its fast path does not prove (`len > x.len()` or `stride > len`).
+#[cold]
+#[inline(never)]
+fn exp_rotation1_scalar_checked(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
     let ms = -s;
     for i in 0..(len - stride) {
         let x1 = x[i];

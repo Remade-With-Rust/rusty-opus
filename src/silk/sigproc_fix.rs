@@ -871,8 +871,25 @@ fn warped_corr_avx2_enabled() -> bool {
     crate::isa::avx2() && !opted_out
 }
 
+/// Removes the bias `calls` invocations of [`warped_corr_update_avx2`] left in
+/// its vector lanes (`2^47` each, lanes `[0, (order + 1) & !3)`); the scalar
+/// tail lanes are exact already. Wrapping: the sums are exact modulo 2^64 and
+/// the true values fit `i64`, exactly as in the scalar twin.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn warped_corr_unbias(corr_qc: &mut [i64], order: usize, calls: usize) {
+    let bias = (calls as i64).wrapping_mul(1i64 << 47);
+    for c in &mut corr_qc[..(order + 1) & !3] {
+        *c = c.wrapping_sub(bias);
+    }
+}
+
 /// AVX2 twin: 4 taps/iteration, `(state[i] as i64 * state0 as i64) >> 16`
-/// accumulated into `corr_qc` (i64). Byte-identical to the scalar.
+/// accumulated into `corr_qc` (i64) **plus a bias of 2^47 per call in the vector
+/// lanes**, which the caller removes with [`warped_corr_unbias`] (an arithmetic
+/// i64 shift has no AVX2 instruction; deferring the sign correction to one
+/// subtraction per accumulator replaces a compare + shift + or per vector per
+/// sample). After un-biasing it is byte-identical to the scalar.
 ///
 /// # Safety
 ///
@@ -888,6 +905,7 @@ unsafe fn warped_corr_update_avx2(corr_qc: &mut [i64], state_qs: &[i32], order: 
     use core::arch::x86_64::*;
     let n = order + 1;
     let s0v = _mm256_set1_epi64x(state_qs[0] as i64); // state0 in low 32 of each lane
+    let sign_bit = _mm256_set1_epi64x(i64::MIN);
     let cp = corr_qc.as_mut_ptr();
     let sp = state_qs.as_ptr();
     let mut i = 0usize;
@@ -895,9 +913,11 @@ unsafe fn warped_corr_update_avx2(corr_qc: &mut [i64], state_qs: &[i32], order: 
         // Sign-extend 4 i32 states to 4 i64 lanes; mul_epi32 uses the low 32 bits.
         let s4 = _mm256_cvtepi32_epi64(_mm_loadu_si128(sp.add(i) as *const __m128i));
         let prod = _mm256_mul_epi32(s4, s0v); // 4× (state[i+k] * state0) as i64
-        // Arithmetic >>16 of packed i64 (logical shift + sign fill at bit 48).
-        let sign = _mm256_cmpgt_epi64(_mm256_setzero_si256(), prod);
-        let shifted = _mm256_or_si256(_mm256_srli_epi64(prod, 16), _mm256_slli_epi64(sign, 48));
+        // `prod >> 16` (arithmetic), biased: flipping the sign bit adds 2^63, so
+        // the LOGICAL shift yields `(prod >> 16) + 2^47` exactly (2^63 is a
+        // multiple of 2^16). The constant 2^47 per call is removed once by
+        // `warped_corr_unbias`; all sums are exact modulo 2^64.
+        let shifted = _mm256_srli_epi64(_mm256_xor_si256(prod, sign_bit), 16);
         let cur = _mm256_loadu_si256(cp.add(i) as *const __m256i);
         _mm256_storeu_si256(cp.add(i) as *mut __m256i, _mm256_add_epi64(cur, shifted));
         i += 4;
@@ -908,23 +928,82 @@ unsafe fn warped_corr_update_avx2(corr_qc: &mut [i64], state_qs: &[i32], order: 
     }
 }
 
+/// The per-sample body of the warped autocorrelation: the serial all-pass state
+/// update, then the correlation MAC. `AVX2` selects the MAC kernel at compile
+/// time, so the instance inlined into [`warped_autocorr_samples_avx2`] has the
+/// kernel inlined into the sample loop instead of calling across a
+/// `#[target_feature]` boundary (and re-reading the dispatch) once per sample.
+///
+/// # Safety
+///
+/// With `AVX2 == true` the caller must itself be compiled with (and the CPU
+/// must support) AVX2. `order <= MAX_SHAPE_LPC_ORDER` is enforced by the
+/// bounds-checked `state_qs[order]` write before the kernel runs.
 #[inline(always)]
-fn warped_corr_update(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if warped_corr_avx2_enabled() {
-            // SAFETY: `warped_corr_avx2_enabled()` returns true only if
-            // `crate::isa::avx2()` does, which checks exactly the kernel's `avx2`
-            // feature. Lengths: the only caller, `silk_warped_autocorrelation_fix`,
-            // passes `corr_qc`/`state_qs` arrays of `MAX_SHAPE_LPC_ORDER + 1`
-            // elements and has just executed the bounds-checked
-            // `state_qs[order] = ..`, so `order + 1 <= state_qs.len() ==
-            // corr_qc.len()` (a larger `order` would have panicked there).
-            unsafe { warped_corr_update_avx2(corr_qc, state_qs, order) };
-            return;
+unsafe fn warped_autocorr_samples<const AVX2: bool>(
+    state_qs: &mut [i32; MAX_SHAPE_LPC_ORDER + 1],
+    corr_qc: &mut [i64; MAX_SHAPE_LPC_ORDER + 1],
+    input: &[i16],
+    warping_q16: i32,
+    length: usize,
+    order: usize,
+) {
+    const QS: i32 = 13;
+    for &input_n in input.iter().take(length) {
+        let mut tmp1_qs = (input_n as i32) << QS;
+        let mut tmp2_qs: i32;
+
+        // Warped all-pass state update (serial recurrence - inherently scalar).
+        let mut i = 0;
+        while i < order {
+            tmp2_qs = silk_smlaww(state_qs[i], state_qs[i + 1] - tmp1_qs, warping_q16);
+            state_qs[i] = tmp1_qs;
+            tmp1_qs = silk_smlaww(state_qs[i + 1], state_qs[i + 2] - tmp2_qs, warping_q16);
+            state_qs[i + 1] = tmp2_qs;
+            i += 2;
         }
+        state_qs[order] = tmp1_qs;
+
+        // Correlation accumulation: corr_qc[i] += (state_qs[i]*state_qs[0]) >> 16
+        // for all i - a vector x scalar i64 MAC (state_qs[0] = input<<QS is the
+        // per-sample scalar).
+        #[cfg(target_arch = "x86_64")]
+        if AVX2 {
+            // SAFETY: AVX2 is guaranteed by this function's contract. Lengths:
+            // both arrays have MAX_SHAPE_LPC_ORDER + 1 elements and the
+            // bounds-checked `state_qs[order] = ..` just above proved
+            // `order + 1 <= len` (a larger `order` panics there).
+            unsafe { warped_corr_update_avx2(corr_qc, state_qs, order) };
+            continue;
+        }
+        warped_corr_update_scalar(corr_qc, state_qs, order);
     }
-    warped_corr_update_scalar(corr_qc, state_qs, order);
+    #[cfg(target_arch = "x86_64")]
+    if AVX2 {
+        warped_corr_unbias(corr_qc, order, input.len().min(length));
+    }
+}
+
+/// [`warped_autocorr_samples`] compiled with AVX2, so the MAC kernel inlines
+/// into the sample loop.
+///
+/// # Safety
+///
+/// The CPU must support AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn warped_autocorr_samples_avx2(
+    state_qs: &mut [i32; MAX_SHAPE_LPC_ORDER + 1],
+    corr_qc: &mut [i64; MAX_SHAPE_LPC_ORDER + 1],
+    input: &[i16],
+    warping_q16: i32,
+    length: usize,
+    order: usize,
+) {
+    // SAFETY: this function is compiled with AVX2 and its caller checked the CPU.
+    unsafe {
+        warped_autocorr_samples::<true>(state_qs, corr_qc, input, warping_q16, length, order);
+    }
 }
 
 pub fn silk_warped_autocorrelation_fix(
@@ -936,33 +1015,46 @@ pub fn silk_warped_autocorrelation_fix(
     order: usize,
 ) {
     const QC: i32 = 10;
-    const QS: i32 = 13;
 
-    let mut tmp1_qs: i32;
-    let mut tmp2_qs: i32;
     let mut state_qs = [0i32; MAX_SHAPE_LPC_ORDER + 1];
     let mut corr_qc = [0i64; MAX_SHAPE_LPC_ORDER + 1];
 
     debug_assert_eq!(order & 1, 0);
 
-    for &input_n in input.iter().take(length) {
-        tmp1_qs = (input_n as i32) << QS;
-
-        // Warped all-pass state update (serial recurrence — inherently scalar).
-        let mut i = 0;
-        while i < order {
-            tmp2_qs = silk_smlaww(state_qs[i], state_qs[i + 1] - tmp1_qs, warping_q16);
-            state_qs[i] = tmp1_qs;
-            tmp1_qs = silk_smlaww(state_qs[i + 1], state_qs[i + 2] - tmp2_qs, warping_q16);
-            state_qs[i + 1] = tmp2_qs;
-            i += 2;
+    // Dispatch once per call, not once per sample.
+    #[cfg(target_arch = "x86_64")]
+    let done = if warped_corr_avx2_enabled() {
+        // SAFETY: `warped_corr_avx2_enabled()` returns true only if
+        // `crate::isa::avx2()` does, which checks exactly the `avx2` feature the
+        // callee is compiled with.
+        unsafe {
+            warped_autocorr_samples_avx2(
+                &mut state_qs,
+                &mut corr_qc,
+                input,
+                warping_q16,
+                length,
+                order,
+            );
         }
-        state_qs[order] = tmp1_qs;
-
-        // Correlation accumulation: corr_qc[i] += (state_qs[i]·state_qs[0]) >> 16
-        // for all i — a vector×scalar i64 MAC (state_qs[0] = input<<QS is the
-        // per-sample scalar). Vectorizable now that it's split from the recurrence.
-        warped_corr_update(&mut corr_qc, &state_qs, order);
+        true
+    } else {
+        false
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let done = false;
+    if !done {
+        // SAFETY: `AVX2 == false` never reaches the kernel; no precondition.
+        unsafe {
+            warped_autocorr_samples::<false>(
+                &mut state_qs,
+                &mut corr_qc,
+                input,
+                warping_q16,
+                length,
+                order,
+            );
+        }
     }
 
     let mut lsh = silk_clz64(corr_qc[0]) - 35;
@@ -1016,6 +1108,7 @@ mod warped_corr_avx2_tests {
                 // `MAX_SHAPE_LPC_ORDER + 1 = 25` elements and `order <= 16`, so
                 // both are >= `order + 1`.
                 unsafe { warped_corr_update_avx2(&mut b, &state, order) };
+                warped_corr_unbias(&mut b, order, 1);
                 assert_eq!(a, b, "order={order}");
             }
         }
