@@ -28,7 +28,7 @@ if ! CARGO_PROFILE_BENCH_DEBUG=1 cargo build --profile bench --example ir_bench 
   exit 2
 fi
 B="$CARGO_TARGET_DIR/release/examples/ir_bench"
-F="$REPO/fixtures"
+F="${IR_FIXTURES:-$REPO/fixtures}"
 NAMES="silk hybrid celt_st celt_mono mixed"
 declare -A ENC=(
   [silk]="$F/answer_16k.wav 24000 voip 9"
