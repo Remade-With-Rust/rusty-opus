@@ -834,10 +834,15 @@ impl SilkDownFirResampler {
             // RESAMPLER_DOWN_ORDER_FIR1 (symmetric 24-tap, 1:2)
             while index_q16 < max_index_q16 {
                 let b = (index_q16 >> 16) as usize;
+                // One range check per output: a fixed-size window and a
+                // fixed-size coefficient array make every tap index provably in
+                // range (was three bounds checks per tap).
+                let w: &[i32; 24] = buf[b..b + 24].try_into().unwrap();
+                let c: &[i16; 12] = fir_coefs[..12].try_into().unwrap();
                 let mut res = 0i32;
                 for j in 0..12 {
-                    let sum = buf[b + j].wrapping_add(buf[b + 23 - j]);
-                    res = silk_smlawb(res, sum, fir_coefs[j] as i32);
+                    let sum = w[j].wrapping_add(w[23 - j]);
+                    res = silk_smlawb(res, sum, c[j] as i32);
                 }
                 out[n_out] = sat16_round_q6(res);
                 n_out += 1;
@@ -847,11 +852,15 @@ impl SilkDownFirResampler {
             // RESAMPLER_DOWN_ORDER_FIR2 (symmetric 36-tap)
             while index_q16 < max_index_q16 {
                 let b = (index_q16 >> 16) as usize;
+                // Fixed-size window and coefficients, as for the 24-tap case.
+                let w: &[i32; 36] = buf[b..b + 36].try_into().unwrap();
+                let c: &[i16; 18] = fir_coefs[..18].try_into().unwrap();
                 let mut res = 0i32;
                 for j in 0..18 {
-                    let sum = buf[b + j].wrapping_add(buf[b + 35 - j]);
-                    res = silk_smlawb(res, sum, fir_coefs[j] as i32);
+                    let sum = w[j].wrapping_add(w[35 - j]);
+                    res = silk_smlawb(res, sum, c[j] as i32);
                 }
+
                 out[n_out] = sat16_round_q6(res);
                 n_out += 1;
                 index_q16 += inc;
