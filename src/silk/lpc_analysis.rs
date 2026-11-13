@@ -218,10 +218,13 @@ pub fn silk_burg_modified_fix(
     let mut ca_b = [0i32; MAX_LPC_ORDER + 1];
 
     let total_len = subfr_length * nb_subfr;
-    let mut c0_64: i64 = 0;
-    for i in 0..total_len {
-        c0_64 += (x[i] as i64) * (x[i] as i64);
-    }
+    // Energy as a slice reduction; the i16 square is formed in i32 (exact) and
+    // widened for the i64 sum (see the lag products below).
+    let c0_64: i64 = x[..total_len]
+        .iter()
+        .map(|&v| i64::from(i32::from(v) * i32::from(v)))
+        .sum();
+
 
     let lz = silk_clz64(c0_64);
     let rshifts = (32 + 1 + N_BITS_HEAD_ROOM - lz).clamp(MIN_RSHIFTS, MAX_RSHIFTS);
