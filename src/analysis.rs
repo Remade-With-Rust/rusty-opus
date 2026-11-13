@@ -98,12 +98,20 @@ fn gemm_accum(
     col_stride: usize,
     x: &[f32],
 ) {
-    for i in 0..rows {
-        for j in 0..cols {
-            out[i] += weights[j * col_stride + i] as f32 * x[j];
+    // Column-major walk (j outer). Each `out[i]` still receives its products in
+    // ascending `j`, so every accumulator rounds exactly as in the i-outer form
+    // - but the inner loop is now contiguous in `weights` and `out`, with one
+    // range check per column instead of an index multiply and two bounds checks
+    // per product, and it vectorises (i8 -> f32, multiply, add; no reduction).
+    let out = &mut out[..rows];
+    for (j, &xj) in x[..cols].iter().enumerate() {
+        let w = &weights[j * col_stride..j * col_stride + rows];
+        for (o, &wv) in out.iter_mut().zip(w) {
+            *o += wv as f32 * xj;
         }
     }
 }
+
 
 struct DenseLayer {
     bias: &'static [i8],
