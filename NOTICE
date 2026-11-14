@@ -1,3 +1,11 @@
+rusty-opus incorporates code derived from opus-rs
+(https://github.com/restsend/opus-rs) and the reference Opus implementation
+(https://opus-codec.org). Their copyright notices and license terms are
+reproduced verbatim below, as those licenses require. rusty-opus as a whole is
+licensed under BSD-3-Clause; see LICENSE.
+
+----------------------------------------------------------------------------
+
 
 Copyright 2026 restsend.com
 
