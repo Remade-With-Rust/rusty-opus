@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.0](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.1.1...v1.2.0) - 2026-11-19
+
+### Added
+
+- *(multistream)* explicit layouts, family 255; fix self-delimited stream decode
+
 ## [1.1.1](https://github.com/Remade-With-Rust/rusty-opus/compare/v1.1.0...v1.1.1) - 2026-11-14
 
 ### Other
