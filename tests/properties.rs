@@ -6,7 +6,7 @@
 //! denormals) for the encoder.
 
 use proptest::prelude::*;
-use rusty_opus::multistream::OpusMSDecoder;
+use rusty_opus::multistream::{ChannelLayout, OpusMSDecoder};
 use rusty_opus::range_coder::RangeCoder;
 use rusty_opus::repacketizer::{self, Repacketizer};
 use rusty_opus::{Application, Error, OpusDecoder, OpusEncoder};
@@ -118,6 +118,27 @@ proptest! {
         let mut dec = OpusMSDecoder::new(48000, channels, family).unwrap();
         let mut out = vec![0f32; 960 * channels];
         let _ = dec.decode(&bytes, 960, &mut out);
+    }
+
+    /// INVARIANT: an arbitrary `OpusHead` (untrusted container header) either
+    /// fails to parse or yields a layout whose decoder never panics on any
+    /// byte string, whatever the output buffer's size.
+    #[test]
+    fn opus_head_layout_decode_never_panics(
+        channels in 1u8..=10, family in prop::sample::select(vec![0u8, 1, 255, 2]),
+        table in prop::collection::vec(any::<u8>(), 0..14),
+        bytes in prop::collection::vec(any::<u8>(), 0..1500),
+        out_len in 0usize..12000) {
+        let mut head = b"OpusHead\x01".to_vec();
+        head.push(channels);
+        head.extend_from_slice(&[0; 8]);
+        head.push(family);
+        head.extend_from_slice(&table);
+        if let Ok(layout) = ChannelLayout::from_opus_head(&head) {
+            let mut dec = OpusMSDecoder::with_layout(48000, layout).unwrap();
+            let mut out = vec![0f32; out_len];
+            let _ = dec.decode(&bytes, 960, &mut out);
+        }
     }
 
     /// INVARIANT: the encoder accepts any f32 input (NaN, ±Inf, denormals,

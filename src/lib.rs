@@ -35,7 +35,8 @@
 //! - [`OpusEncoder`] and [`OpusDecoder`] — mono/stereo coding, packet-loss concealment
 //!   ([`OpusDecoder::decode`] with an empty packet) and in-band FEC
 //!   ([`OpusDecoder::decode_fec`]).
-//! - [`multistream`] — surround encoding and decoding (mapping families 0 and 1).
+//! - [`multistream`] — surround encoding (mapping families 0 and 1) and decoding
+//!   (families 0, 1 and 255, any layout an `OpusHead` declares).
 //! - [`repacketizer`] — merge, split, pad and unpad packets without re-encoding.
 //! - [`parallel`] — frame-parallel and batch encoding across threads.
 //! - [`Error`] — the error type of every fallible operation; variants mirror `libopus`
