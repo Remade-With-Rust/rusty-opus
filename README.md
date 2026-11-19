@@ -73,7 +73,7 @@ whose variants mirror the `libopus` error codes (`BadArg`, `BufferTooSmall`,
 | API | Purpose |
 |---|---|
 | `OpusEncoder` / `OpusDecoder` | Mono and stereo encode / decode, PLC, FEC |
-| `multistream::{OpusMSEncoder, OpusMSDecoder}` | Surround (mapping families 0 and 1) |
+| `multistream::{OpusMSEncoder, OpusMSDecoder}` | Surround: encode families 0 and 1; decode families 0, 1 and 255 (`ChannelLayout::from_opus_head`) |
 | `repacketizer` | Merge, split, pad and unpad packets without re-encoding |
 | `parallel` | Frame-parallel and batch encoding across threads |
 

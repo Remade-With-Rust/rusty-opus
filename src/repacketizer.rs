@@ -149,6 +149,13 @@ pub(crate) struct Frames {
     pub(crate) count: usize,
     pub(crate) ranges: [(usize, usize); MAX_FRAMES],
     pub(crate) end: usize,
+    /// `end` plus the trailing padding: where the next stream of a
+    /// self-delimited multistream packet begins (libopus `packet_offset`).
+    pub(crate) next: usize,
+    /// `(offset, bytes)` of the self-delimiting length field; `(0, 0)` for a
+    /// standard packet. Removing those bytes from `data[..next]` leaves the
+    /// same frames in standard framing (RFC 6716 appendix B).
+    pub(crate) sd_field: (usize, usize),
 }
 
 impl Frames {
@@ -185,6 +192,8 @@ pub(crate) fn parse_frames(data: &[u8], self_delimited: bool) -> Result<Frames, 
     let mut cbr = false;
     let mut last_size = len;
     let mut sizes = SizeList::new();
+    let mut pad = 0usize;
+    let mut sd_field = (0usize, 0usize);
 
     let count: usize = match toc & 0x3 {
         0 => 1,
@@ -235,6 +244,7 @@ pub(crate) fn parse_frames(data: &[u8], self_delimited: bool) -> Result<Frames, 
                     len -= 1;
                     let tmp = if p == 255 { 254 } else { p as i32 };
                     len -= tmp;
+                    pad += tmp as usize;
                     if p != 255 {
                         break;
                     }
@@ -284,6 +294,7 @@ pub(crate) fn parse_frames(data: &[u8], self_delimited: bool) -> Result<Frames, 
         if sz < 0 || sz > len {
             return Err(Error::InvalidPacket("invalid packet"));
         }
+        sd_field = (pos, bytes as usize);
         pos += bytes as usize;
         if cbr {
             if sz * count as i32 > len {
@@ -323,6 +334,8 @@ pub(crate) fn parse_frames(data: &[u8], self_delimited: bool) -> Result<Frames, 
         count: sizes.as_slice().len(),
         ranges,
         end: off,
+        next: off + pad,
+        sd_field,
     })
 }
 
